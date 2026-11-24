@@ -1,9 +1,9 @@
-# StudyHub V2.0 — Wave 3 Independent Functional Regression & Acceptance Report
+# StudyHub V2.0 / V2.1 — Independent Functional Regression & Live Acceptance Report
 
 > **Independent Tester:** `func-tester` (Agent 2 — Independent Functional Tester)  
-> **Date:** 2026-11-24  
-> **Scope:** Full Wave 3 independent verification of integrated StudyHub V2.0 build (`src/*` and `supabase/*` strictly untouched by `func-tester`), Section 26 acceptance suite (`tests/integration/v2-acceptance.test.ts`), updated Playwright E2E suites (`tests/e2e/studyhub.spec.ts`, `tests/e2e/authenticated-journey.spec.ts`), and independent bug-by-bug regression audit of `docs/audit/ISSUE_TRACKER.md` (`SH-005`..`SH-042`) & `docs/audit/AUDIT_REPORT.md` (`BUG-001`..`BUG-040`).  
-> **Companion Matrix:** [`docs/audit/TEST_MATRIX.md`](./TEST_MATRIX.md) (90 acceptance cases: `0 FAIL`, `0 NOT IMPLEMENTED`).
+> **Date:** 2026-11-24 (Wave 3 Offline + **V2.1 Live Supabase Cloud Verification**)  
+> **Scope:** Full Wave 3 + V2.1 Live Supabase Cloud independent verification (`src/*` and `supabase/*` strictly untouched by `func-tester`), Section 26 acceptance suite (`tests/integration/v2-acceptance.test.ts`), full 16-test Live Playwright E2E suite (`tests/e2e/studyhub.spec.ts` + `tests/e2e/authenticated-journey.spec.ts`), and independent bug-by-bug regression audit of `docs/audit/ISSUE_TRACKER.md` (`SH-005`..`SH-043`) & `docs/audit/AUDIT_REPORT.md` (`BUG-001`..`BUG-040`).  
+> **Companion Matrix:** [`docs/audit/TEST_MATRIX.md`](./TEST_MATRIX.md) (90 acceptance cases: **`71 PASS (LIVE)` + `19 PASS (Deterministic Unit)`, `0 BLOCKED`, `0 FAIL`, `0 NOT IMPLEMENTED`**).
 
 ---
 
@@ -96,16 +96,60 @@ All P0, P1, and blocking P2 defects from Wave 1 & Wave 3 are resolved (`0 REOPEN
 
 ---
 
-## 5. External Environment Blocker (`BLK-001`)
+## 5. External Environment Blocker (`BLK-001`) — **RESOLVED IN V2.1**
 
-Live execution against PostgreSQL, Supabase Auth, Supabase Storage (`study-media`), and live 2-account Row-Level Security remains honestly **`BLOCKED`** because `.env.local` is absent and Docker Desktop is not running locally.
+> **Update (2026-11-24 — V2.1 Live Verification):** `BLK-001` is **COMPLETELY RESOLVED**. Live Supabase Cloud project `StudyHub` (`cuoaifyupfmkstqhcjwy`, PostgreSQL 17.12) was provisioned with migrations `0001`–`0012` applied live, private `study-media` Storage bucket enabled, and `.env.local` configured cleanly. Every previously DB-gated verification gate has now been executed **live** and verified passing (see §6 below).
 
-Once a live Supabase instance (local `npx supabase start` with migrations `0001`–`0005` or hosted project in `.env.local`) is connected, execute the final live gate:
-```powershell
-$env:E2E_SUPABASE_READY = "1"
-$env:E2E_USER_A_EMAIL = "<account-a>"
-$env:E2E_USER_A_PASSWORD = "<password-a>"
-$env:E2E_USER_B_EMAIL = "<account-b>"
-$env:E2E_USER_B_PASSWORD = "<password-b>"
-npx playwright test
-```
+---
+
+## 6. V2.1 Live Supabase Cloud Verification Report (`2026-11-24`)
+
+### 6.1 Final Integrated Live & Static Gate Outputs (Post-`0012` & Final V2.1 Build `#121`)
+
+All commands below were executed fresh after every V2.1 live SQL fix (`0006`–`0012`) and final UI polish (`#119` `UX-12` + mobile `390px`/`360px` exam bar) landed in the final V2.1 production build (`52/52` routes, `0` secret leaks in `.next/static/`):
+
+| Verification Gate | Exact Command / Scope | Exit Code | Fresh Verified Result |
+| --- | --- | ---: | --- |
+| **Live Playwright Full Suite (Port `3012`)** | `PLAYWRIGHT_SKIP_WEBSERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3012 PLAYWRIGHT_EXPECT_PROD=1 E2E_SUPABASE_READY=1 npx playwright test --workers=4 --reporter=list` | `0` | **PASS — `16 / 16` PASSED (`0` skipped, `0` failed, `1.7m`)**: `13/13` `studyhub.spec.ts` + **Scenario 1 (`50.0s`) + Scenario 2 (`29.1s`) + Scenario 3 (`20.3s`)**; `SERVER_HEALTH=ok supabaseConfigured=true`; **`PORT_3012_FREE`**; **`CLEANUP_USERS_DELETED=2/2`** |
+| **Live `0012` Account-Delete Cascade Repro** | Standalone PG 17.12 repro (`folder` + `set` + `preset` + completed 2-exam `coverage_cycle` -> `DELETE FROM public.profiles` & `auth.admin.deleteUser`) | `0` | **PASS** — `PROFILE_DELETE_ERROR=null`, `FINAL_CLEANUP_ERR=null` (previously crashed with PG `23503`) |
+| **TypeScript (`tsc`)** | `npm run typecheck` (`tsc --noEmit`) | `0` | **PASS** — `0` errors across entire repo |
+| **ESLint (Touched Tests)** | `npx eslint tests/e2e/studyhub.spec.ts tests/e2e/authenticated-journey.spec.ts tests/integration/v2-acceptance.test.ts` | `0` | **PASS** — `0` errors, `0` warnings (full repo `npm run lint` also `0/0` in `#121`) |
+| **Vitest Unit & Integration** | `npx vitest run tests/integration/v2-acceptance.test.ts tests/integration/api-and-roundtrip.test.ts tests/unit` | `0` | **PASS — `22 / 22` files, `168 / 168` tests passed (`10.20s`)** (+ live `live-db-rpcs.test.ts` **`8/8 PASS`** `#106` & live `live-rls-security.test.ts` **`11/11 PASS`** `#113` = **`24/24` files, `187/187` tests PASS!**) |
+| **Scope & Secret Hygiene** | `git status --short src supabase` + zero secret logging | `0` | **PASS** — Zero `src/*` or `supabase/*` edits by `func-tester`; zero secrets/JWTs printed or committed; `0001`–`0004` strictly untouched |
+
+### 6.2 Live End-to-End Authenticated Browser Journeys Executed (`tests/e2e/authenticated-journey.spec.ts`)
+
+Every Section 33 critical workflow executed live in headless Chromium against `next start -p 3012` + live Supabase Cloud PostgreSQL 17.12 using 2 freshly provisioned disposable accounts (`email_confirm: true`), cleaned up cleanly in `finally`:
+
+1. **Scenario 1 (`50.0s` — PASS):**
+   - Real Login (`/login` → `/dashboard`) as User A.
+   - Live Folder CRUD (`/library?create=folder`, dialog submit `"Tạo mới"`, post-`0007` RLS fix).
+   - Live Private Set creation (`POST /api/sets` `201`, post-`0008` RLS fix) + Main 50Q Set via real **6-step `ImportWizard`** (Steps 1→6 paste → format → answer rule → 50Q preview → fix/options → commit) + live read-back verifying `50/50` questions × `4` options intact.
+   - All **5 Active Learning Modes** live: `Flashcards` (`Space` flip + SM-2 key `3`), `Practice` (start + answer Q1), `Adaptive Learn` (answer Q1 + confirm `Tiếp tục/Continue` feedback stays visible, `SH-008`), `Write`, and `Match`.
+   - **Live Timed Mock Exam:** verified `POST /api/exams` response has **zero** `correct_option_ids`, `accepted_answers_snapshot`, `explanation_snapshot`, or `"is_correct"`; selected choice → verified live `PUT /api/exams/[id]/answers` `200`; executed full **`F5` `page.reload()`** → verified `aria-checked="true"` survived reload; confirmed `[role="alertdialog"]` `"Nộp bài"` submit → routed cleanly to Results.
+   - Live navigation of `/starred`, `/review`, `/history`, `/statistics`, `/profile`, plus `/settings` toggling `#pref-shuffle-q` → `PATCH /api/preferences` `200` → **`page.reload()`** verifying live DB persistence!
+   - **2-Account RLS Isolation & Sharing:** User A creates `viewer` share link (`allow_clone: false`); User B logs in, is **blocked (`403/404`)** from User A's private non-shared set, redeems share link via `/share/[token]` UI verifying canonical `<h1>` title & `Chỉ xem` (`viewer`) role badge (`SH-030`), reads shared set (`200`), is **blocked (`403`)** on `POST /duplicate` (`allow_clone: false`, `SH-020`) and `PATCH /api/sets/[id]` (`viewer`), creates an independent exam attempt which User A is **blocked (`403/404`)** from reading, User A revokes share link → re-redemption returns **`404/410`**, and User A signs out via `POST /auth/signout` → `/dashboard` redirects cleanly to `/login`.
+2. **Scenario 2 (`29.1s` — PASS):**
+   - Created & imported 2 live sets (`20Q MonA` + `10Q MonB`), opened `/exams/new`, selected both (`30` combined eligible), set custom count `10`, switched between `Equal` and `Proportional` strategy radios, saved an **Exam Preset** in dialog, verified persistence in `Saved Presets` tab, launched live custom multi-subject timed exam, answered Q1 (`PUT /answers` `200`), executed **`F5` `page.reload()`** verifying persisted answer, submitted, and verified **BOTH subjects (`MonA` & `MonB`)** rendered in Mixed-Subject Results breakdown.
+3. **Scenario 3 (`20.3s` — PASS):**
+   - Created & imported a live `10Q` set, enabled `#builder-full-coverage` (`#coverage-batch-size = 5`), launched Cycle & Exam #1 (`POST /api/coverage-cycles` `201`, `first_exam` `5` unique `question_id`s), answered all 5 questions & submitted live in Chromium, issued Exam #2 (`POST /api/coverage-cycles/[id]/next-exam` `201`), asserted **ZERO overlap (`overlap = []`)** and exact **`10` unique question union**, completed Exam #2 live in Chromium, and verified `GET /api/coverage-cycles/[id]` reached `status === "completed"` and `completed_count === 10`!
+
+### 6.3 Real Live PostgreSQL 17.12 P0 Bugs Caught Across V2.1 & Verified Fixed (`0007`–`0012`)
+
+Live verification against real PostgreSQL 17.12 proved its worth immediately by catching **6 real production P0 database bugs** that offline mocks could never detect — ALL 6 were fixed live, saved to `supabase/migrations/0007`–`0012`, covered by `supabase-migrations-audit.test.ts` (8/8 PASS), and independently re-verified passing:
+
+| Migration | Live PG 17.12 Bug Caught | Discovered By | Fix & Live Re-Verification |
+| --- | --- | --- | --- |
+| `0007` | `42P17` infinite RLS recursion on `INSERT INTO public.folders` (`folders_insert_own`/`_update_own` self-queried `public.folders`). | `security-auditor` (`#96`) + `func-tester` live run #2 | `SECURITY DEFINER` `public.is_folder_owner()` — **VERIFIED LIVE** (`func-tester` Scenario 1 folder CRUD, `security-auditor` #113). |
+| `0008` | `42501` RLS violation on **every** `INSERT INTO public.study_sets ... RETURNING *` (`STABLE` `can_read_study_set()` read pre-statement snapshot). | `db-backend-auditor` (`#97`) + `perf-import-auditor` + `func-tester` live run #2 | Direct `owner_id = (SELECT auth.uid())` short-circuit in `study_sets_select_readable` — **VERIFIED LIVE** across all 5 auditors. |
+| `0009` | `42P17` 2-table mutual RLS recursion `question_tags` ↔ `tags` crashing every tagged import/edit. | `v2-db-backend-builder` (`#100`) + `perf-import-auditor` (`#101`) + `db-backend-auditor` (`#103`) | Hardened `SECURITY DEFINER` `public.can_read_tag()` — **VERIFIED LIVE** (`perf-import-auditor` #110 500 tagged Qs, `db-backend-auditor` #106, `security-auditor` #113). |
+| `0010` | `42803: aggregate function calls cannot contain window function calls` in live `clone_study_set()`. | `db-backend-auditor` (`#103`) | Ranked subquery before `jsonb_agg` — **VERIFIED LIVE** (`db-backend-auditor` #106 Test #7, `perf-import-auditor` #110 500Q clone `815ms`). |
+| `0011` | `P0001: exam_attempt_questions rows are immutable` blocking ALL `DELETE`s of questions, sets, replace imports, or accounts after any exam (due to FK `ON DELETE SET NULL`). | `perf-import-auditor` (`#107`) + `security-auditor` (`#108`) | `prevent_exam_snapshot_update()` permits ONLY FK `ON DELETE SET NULL` on `question_id`/`source_study_set_id` while keeping all 14 snapshot columns 100% immutable — **VERIFIED LIVE** (`#112`, `#113`). |
+| **`0012`** | **`23503: insert or update on table "coverage_cycles" violates foreign key constraint "coverage_cycles_user_id_fkey"` crashing `DELETE /api/account/data` / `auth.admin.deleteUser` for ANY user who ever used Full Coverage Mode!** | **`func-tester` (`#116`)** (caught from strict `CLEANUP_USERS_DELETED=1/2` teardown check after Scenario 3!) | `release_coverage_cycle_on_attempt_delete()` now guards sibling `UPDATE coverage_cycles` with `EXISTS (SELECT 1 FROM public.profiles WHERE id = OLD.user_id)` — **VERIFIED LIVE** (`PROFILE_DELETE_ERROR=null` & `CLEANUP_USERS_DELETED=2/2` in final `task-704` run!). |
+
+### 6.4 Sibling V2.1 Live Audit Cross-Confirmation & Final Verdict
+- **`db-backend-auditor` (`#106`):** `tests/integration/live-db-rpcs.test.ts` **8/8 PASS** live on PG 17.12 (`15.94s`, `0` leftover test data).
+- **`perf-import-auditor` (`#110`, `#112`):** All **4 real aviation `sample-data/` files** persisted & read back 100% live (`133/133`, `24/24`, `62/62`, `62/62` with 100% cross-file parity) + **500Q bank / 2,000 options / 250Q live exam (`1.75s` start, `824ms` autosave, `724ms` submit) / 500Q export & clone** + `0011` live proof (`PORT_3014_FREE=True`).
+- **`security-auditor` (`#113`):** `tests/integration/live-rls-security.test.ts` **11/11 PASS** live 2-account RLS + private Storage + `0006` 16-RPC `anon` lockdown + live HTTP security suite (`REMAINING_SEC_USERS=0`, `PORT_3015_FREE=True`, **0 P0/P1/P2 security issues**).
+- **`real-user` (`#115`, `#122`):** All **8 authenticated Real User Scenarios** live on desktop `1440×900` & mobile `390×844`/`360×800` (Light & Dark), including `#119` `UX-12` auto-clamp & mobile `Đánh dấu` zero-truncation verified fixed live (`PORT_3011_FREE`, **0 P0/P1/P2 UX issues**).
+- **`func-tester` (this report):** **16/16 Playwright E2E PASS (`0` skipped, `0` failed)**, **90/90 Section 26 acceptance matrix PASS (`0` BLOCKED, `0` FAIL, `0` NOT IMPLEMENTED)**, `PORT_3012_FREE`, `CLEANUP_USERS_DELETED=2/2`. **StudyHub V2.1 passes every independent functional, security, database, performance, and UX release gate!**

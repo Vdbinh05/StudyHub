@@ -139,6 +139,8 @@ AS $$
     NULLIF(current_setting('request.jwt.claim.role', true), ''),
     NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role',
     CASE
+      WHEN NULLIF(current_setting('role', true), 'none') IN ('anon', 'authenticated', 'service_role', 'authenticator')
+        THEN current_setting('role', true)
       WHEN session_user IN ('anon', 'authenticated', 'authenticator') THEN session_user
       WHEN current_user IN ('anon', 'authenticated', 'authenticator') THEN current_user
       ELSE ''

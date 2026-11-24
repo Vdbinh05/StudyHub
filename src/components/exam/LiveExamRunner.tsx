@@ -1070,17 +1070,17 @@ export function LiveExamRunner({
       </div>
 
       {/* Mobile Sticky Bottom Action Bar (<lg, compact single row <12% viewport height) */}
-      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-card/95 px-2.5 py-2 backdrop-blur-xs lg:hidden pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-        <div className="mx-auto grid max-w-xl grid-cols-4 gap-1.5">
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-card/95 px-2 py-2 backdrop-blur-xs lg:hidden pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+        <div className="mx-auto flex max-w-xl items-center gap-1.5">
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="min-h-11 px-2 text-xs"
+            className="min-h-11 flex-1 min-w-0 gap-1 whitespace-nowrap px-1.5 text-xs"
             disabled={currentIndex === 0 || !allowNavigation}
             onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
           >
-            <ChevronLeft className="size-4 shrink-0" aria-hidden="true" />
+            <ChevronLeft className="size-3.5 shrink-0" aria-hidden="true" />
             <span>{lText(locale, "Trước", "Prev")}</span>
           </Button>
 
@@ -1089,7 +1089,7 @@ export function LiveExamRunner({
             variant={currentRecord.isFlagged ? "secondary" : "outline"}
             size="sm"
             className={cn(
-              "min-h-11 px-2 text-xs",
+              "min-h-11 shrink-0 gap-1 whitespace-nowrap px-2 text-xs",
               currentRecord.isFlagged &&
                 "border-warning/60 bg-warning-subtle text-warning-subtle-foreground",
             )}
@@ -1099,12 +1099,12 @@ export function LiveExamRunner({
           >
             <Flag
               className={cn(
-                "size-4 shrink-0",
+                "size-3.5 shrink-0",
                 currentRecord.isFlagged && "fill-current",
               )}
               aria-hidden="true"
             />
-            <span className="truncate">{lText(locale, "Đánh dấu", "Flag")}</span>
+            <span>{lText(locale, "Đánh dấu", "Flag")}</span>
           </Button>
 
           <Sheet open={navSheetOpen} onOpenChange={setNavSheetOpen}>
@@ -1113,9 +1113,9 @@ export function LiveExamRunner({
                 type="button"
                 variant="outline"
                 size="sm"
-                className="min-h-11 px-2 text-xs tabular-nums"
+                className="min-h-11 flex-1 min-w-0 gap-1 whitespace-nowrap px-1.5 text-xs tabular-nums"
               >
-                <Grid2X2 className="size-4 shrink-0" aria-hidden="true" />
+                <Grid2X2 className="size-3.5 shrink-0" aria-hidden="true" />
                 <span>
                   {answeredCount}/{questions.length}
                 </span>
@@ -1147,19 +1147,19 @@ export function LiveExamRunner({
             <Button
               type="button"
               size="sm"
-              className="min-h-11 px-2 text-xs"
+              className="min-h-11 flex-1 min-w-0 gap-1 whitespace-nowrap px-1.5 text-xs"
               onClick={() =>
                 setCurrentIndex((i) => Math.min(questions.length - 1, i + 1))
               }
             >
               <span>{lText(locale, "Tiếp", "Next")}</span>
-              <ChevronRight className="size-4 shrink-0" aria-hidden="true" />
+              <ChevronRight className="size-3.5 shrink-0" aria-hidden="true" />
             </Button>
           ) : (
             <Button
               type="button"
               size="sm"
-              className="min-h-11 px-2 text-xs"
+              className="min-h-11 flex-1 min-w-0 gap-1 whitespace-nowrap px-1.5 text-xs"
               disabled={isSubmitting}
               onClick={handleOpenSubmitModal}
             >

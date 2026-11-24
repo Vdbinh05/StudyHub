@@ -195,6 +195,9 @@ export function CustomExamBuilderClient({
   const [examTitle, setExamTitle] = React.useState("");
   const [useAllQuestions, setUseAllQuestions] = React.useState(false);
   const [questionCountInput, setQuestionCountInput] = React.useState("50");
+  const [countEditedAtPool, setCountEditedAtPool] = React.useState<
+    number | null
+  >(null);
   const [allocationStrategy, setAllocationStrategy] =
     React.useState<AllocationStrategy>("proportional");
   const [customCounts, setCustomCounts] = React.useState<Record<string, string>>(
@@ -322,6 +325,7 @@ export function CustomExamBuilderClient({
     } else {
       setUseAllQuestions(false);
       setQuestionCountInput(String(preset.requested_question_count));
+      setCountEditedAtPool(null);
     }
 
     if (preset.duration_limit_seconds === null) {
@@ -582,9 +586,25 @@ export function CustomExamBuilderClient({
     eligibleQuery.data?.total_eligible ??
     effectiveSubjects.reduce((sum, s) => sum + s.availableCount, 0);
 
+  // UX-12: Auto-clamp untouched/stale positive integer question count when the eligible pool
+  // loads or shrinks below it (e.g., selecting only a 24Q set while default is 50), while still
+  // strictly rejecting explicit out-of-range edits typed against the current pool size.
+  const resolvedQuestionCountInput = React.useMemo(() => {
+    if (useAllQuestions || totalEligible <= 0) return questionCountInput;
+    if (countEditedAtPool === totalEligible) return questionCountInput;
+    const trimmed = questionCountInput.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isSafeInteger(parsed) && parsed > totalEligible) {
+        return String(totalEligible);
+      }
+    }
+    return questionCountInput;
+  }, [countEditedAtPool, questionCountInput, totalEligible, useAllQuestions]);
+
   const requestedCountRaw: unknown = useAllQuestions
     ? totalEligible
-    : questionCountInput;
+    : resolvedQuestionCountInput;
 
   const countValidation = React.useMemo(
     () => validateQuestionCount(requestedCountRaw, totalEligible, 1000),
@@ -1885,7 +1905,8 @@ export function CustomExamBuilderClient({
                       <div className="flex flex-wrap items-center gap-1.5">
                         {QUESTION_COUNT_PRESETS.map((n) => {
                           const active =
-                            !useAllQuestions && questionCountInput === String(n);
+                            !useAllQuestions &&
+                            resolvedQuestionCountInput === String(n);
                           return (
                             <Button
                               key={n}
@@ -1897,6 +1918,9 @@ export function CustomExamBuilderClient({
                               onClick={() => {
                                 setUseAllQuestions(false);
                                 setQuestionCountInput(String(n));
+                                setCountEditedAtPool(
+                                  totalEligible > 0 ? totalEligible : null,
+                                );
                               }}
                             >
                               {n}
@@ -1925,8 +1949,13 @@ export function CustomExamBuilderClient({
                             id="builder-question-count"
                             type="text"
                             inputMode="numeric"
-                            value={questionCountInput}
-                            onChange={(e) => setQuestionCountInput(e.target.value)}
+                            value={resolvedQuestionCountInput}
+                            onChange={(e) => {
+                              setQuestionCountInput(e.target.value);
+                              setCountEditedAtPool(
+                                totalEligible > 0 ? totalEligible : null,
+                              );
+                            }}
                             aria-invalid={
                               hasAnySource && !countValidation.valid
                                 ? "true"

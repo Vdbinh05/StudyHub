@@ -230,6 +230,9 @@ export function CustomPracticeClient() {
   );
   const [countMode, setCountMode] = React.useState<"all" | "custom">("custom");
   const [customCountInput, setCustomCountInput] = React.useState<string>("50");
+  const [countEditedAtPool, setCountEditedAtPool] = React.useState<
+    number | null
+  >(null);
 
   // Fine-grained filters
   const [selectedChapters, setSelectedChapters] = React.useState<string[]>(
@@ -371,6 +374,21 @@ export function CustomPracticeClient() {
   const eligiblePool = eligibleQuery.data ?? null;
   const totalEligible = eligiblePool?.total_eligible ?? 0;
 
+  // Auto-clamp untouched/stale positive integer count when eligible pool loads or shrinks below it,
+  // while preserving strict validation on explicit out-of-range user edits against the current pool.
+  const resolvedCustomCountInput = React.useMemo(() => {
+    if (countMode === "all" || totalEligible <= 0) return customCountInput;
+    if (countEditedAtPool === totalEligible) return customCountInput;
+    const trimmed = customCountInput.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isSafeInteger(parsed) && parsed > totalEligible) {
+        return String(totalEligible);
+      }
+    }
+    return customCountInput;
+  }, [countEditedAtPool, countMode, customCountInput, totalEligible]);
+
   // Validate requested subset size strictly without silent reduction
   const countValidation = React.useMemo(() => {
     if (sources.length === 0) {
@@ -393,7 +411,7 @@ export function CustomPracticeClient() {
     }
 
     const res = validateQuestionCount(
-      customCountInput.trim(),
+      resolvedCustomCountInput.trim(),
       totalEligible,
       MAX_PRACTICE_QUESTIONS,
     );
@@ -402,8 +420,8 @@ export function CustomPracticeClient() {
       if (res.code === "EXCEEDS_AVAILABLE") {
         msg = lText(
           locale,
-          `Số câu yêu cầu (${customCountInput.trim()}) vượt quá số câu hợp lệ hiện có (${totalEligible}). Hãy giảm số câu hoặc bỏ bớt bộ lọc.`,
-          `Requested count (${customCountInput.trim()}) exceeds available questions (${totalEligible}). Reduce count or relax filters.`,
+          `Số câu yêu cầu (${resolvedCustomCountInput.trim()}) vượt quá số câu hợp lệ hiện có (${totalEligible}). Hãy giảm số câu hoặc bỏ bớt bộ lọc.`,
+          `Requested count (${resolvedCustomCountInput.trim()}) exceeds available questions (${totalEligible}). Reduce count or relax filters.`,
         );
       } else if (
         res.code === "NON_POSITIVE" ||
@@ -432,7 +450,7 @@ export function CustomPracticeClient() {
     }
 
     return { valid: true, value: res.value ?? 0, error: null };
-  }, [countMode, customCountInput, locale, sources.length, totalEligible]);
+  }, [countMode, locale, resolvedCustomCountInput, sources.length, totalEligible]);
 
   // Filtered sets list for search UI
   const filteredSets = React.useMemo(() => {
@@ -1304,7 +1322,7 @@ export function CustomPracticeClient() {
                     {SUBSET_PRESETS.map((preset) => {
                       const active =
                         countMode === "custom" &&
-                        customCountInput.trim() === String(preset);
+                        resolvedCustomCountInput.trim() === String(preset);
                       return (
                         <Button
                           key={preset}
@@ -1315,6 +1333,9 @@ export function CustomPracticeClient() {
                           onClick={() => {
                             setCountMode("custom");
                             setCustomCountInput(String(preset));
+                            setCountEditedAtPool(
+                              totalEligible > 0 ? totalEligible : null,
+                            );
                           }}
                         >
                           {preset}
@@ -1341,18 +1362,28 @@ export function CustomPracticeClient() {
                           "Custom question count",
                         )}
                         className="h-9 w-24 tabular-nums"
-                        value={countMode === "all" ? String(totalEligible || "") : customCountInput}
+                        value={
+                          countMode === "all"
+                            ? String(totalEligible || "")
+                            : resolvedCustomCountInput
+                        }
                         onFocus={() => {
                           if (countMode === "all") {
                             setCountMode("custom");
                             setCustomCountInput(
-                              String(Math.min(Math.max(totalEligible, 20), 250)),
+                              String(Math.min(Math.max(totalEligible, 1), 250)),
+                            );
+                            setCountEditedAtPool(
+                              totalEligible > 0 ? totalEligible : null,
                             );
                           }
                         }}
                         onChange={(e) => {
                           setCountMode("custom");
                           setCustomCountInput(e.target.value);
+                          setCountEditedAtPool(
+                            totalEligible > 0 ? totalEligible : null,
+                          );
                         }}
                         placeholder="50"
                       />

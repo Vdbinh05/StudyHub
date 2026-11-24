@@ -42,8 +42,8 @@ export function ServiceSetupNotice({
             </summary>
             <p className="mt-1.5 opacity-90">
               {vi
-                ? "Quản trị viên cần thiết lập biến môi trường NEXT_PUBLIC_SUPABASE_URL và NEXT_PUBLIC_SUPABASE_ANON_KEY trong .env.local và khởi chạy cơ sở dữ liệu Supabase để bật đăng nhập và lưu trữ."
-                : "Administrators need to configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local and connect a Supabase project to enable authentication and persistence."}
+                ? "Quản trị viên cần thiết lập biến môi trường NEXT_PUBLIC_SUPABASE_URL và NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (hoặc NEXT_PUBLIC_SUPABASE_ANON_KEY cũ) trong .env.local và kết nối dự án Supabase để bật đăng nhập và lưu trữ."
+                : "Administrators need to configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or legacy NEXT_PUBLIC_SUPABASE_ANON_KEY) in .env.local and connect a Supabase project to enable authentication and persistence."}
             </p>
           </details>
         </div>

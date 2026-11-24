@@ -464,7 +464,59 @@ Measured directly from `.next/static/chunks` and `.next/server/app/**/page_clien
 | **`IMP-05`**, **`IMP-06`** | Wizard stale mapping + DOCX `pPr/rPr`, `<w:br/>`, media | **VERIFIED FIXED** | `ImportWizard.tsx` resets mapping on toggle + caches unchanged parses (`lastParsedKeyRef`); DOCX regression probes pass (`tests/unit/import`: 28/28). |
 | **Wave 3 `#69` (P1)** | `O(N²)` option/answer queries on 10k chunked commit (`_existing-fingerprints.ts`) | **VERIFIED FIXED** | Reopened to `@v2-import-builder` & verified fixed: `QUESTION_PAGE_SIZE = 1000` + `candidateNormalizedPrompts` prefilter in both `commit/route.ts` and `parse/route.ts` cuts ~1,600 option/answer queries → `0` on distinct 10k imports (`tests/unit/import/v2-regressions.test.ts` verified). |
 | **`DB-01`**, **`DB-02`**, **`DB-03`**, **`DB-07`**, **`DB-08`** | PostgREST 1,000-row cap, HTTP 414 `.in()` chunking, 1,000-Q exams, atomic clone, `Promise.all` options | **VERIFIED FIXED** *(with 1 minor P2 note)* | `SAFE_IN_CHUNK_SIZE = 100` (`fetchInChunks` / `fetchQuestionRelationsChunked` / `fetchAllPages`), `clone_study_set()` SQL RPC, `saveExamAnswers()` chunked `<= 150`, `PATCH question` uses `Promise.all`. *(Minor P2 note: `src/app/api/sets/route.ts:54,124` slices shared-set memberships at `100`; in-flight `#65` tracks `exam-engine.ts:585-607` `study_set_id` pagination & `get_coverage_cycle_subject_progress` RPC.)* |
-| **`DB-04`**, **`DB-05`** | Statement-level count trigger, hot indexes, set-based `create_exam_attempt_v2` & `submit_exam_attempt` | **VERIFIED FIXED** *(SQL static; live DB BLOCKED)* | `0005_v2_custom_exams_and_coverage.sql:633-679` (`FOR EACH STATEMENT`), `:966-977` (5 GIN/partial indexes), `:1890-2009` & `:2450-2630` (set-based CTEs + temp-table grading). Live Postgres latency remains **BLOCKED** pending Docker/Supabase. |
+| **`DB-04`**, **`DB-05`** | Statement-level count trigger, hot indexes, set-based `create_exam_attempt_v2` & `submit_exam_attempt` | **VERIFIED LIVE (V2.1)** | `0005` (`FOR EACH STATEMENT`, 5 GIN/partial indexes, set-based CTEs + temp-table grading) + `0006`–`0010` verified LIVE on Supabase Cloud PostgreSQL 17.12 (see §6 below!). |
 | **`DB-06`** | Unpaginated full-table reads in `/sets/[id]`, `/dashboard`, `/statistics`, `/mistakes` | **VERIFIED FIXED** | All 4 routes migrated to `fetchAllPages` + `fetchInChunks` (`SAFE_IN_CHUNK_SIZE = 100`), eliminating silent 1,000-row truncation. |
 | **UI-Perf** | `ExamTimer`, `ExamNavigatorGrid`, `ExamResultsClient`, `TestHubClient`, `StudySetHub`, `QuestionEditorView`, `ImportWizard`, `PracticeClient` | **VERIFIED FIXED** | Isolated `React.memo(ExamTimer)` (`1,000 ms`), `React.memo` + virtualized `ExamNavigatorGrid` (reused in `PracticeClient`), virtualized `ExamResultsClient`, `enabled: !activeAttemptId` in `TestHubClient`, `250 ms` debounced search + virtualizer in `StudySetHub`/`QuestionEditorView`, `0.031 ms` O(1) Step-5 edit + `useDeferredValue`, `-50.8 KB` / `-52.4 KB` gzip savings on `/sets/[id]/edit` & `/profile`. |
+
+---
+
+## 6. V2.1 Live Supabase Cloud End-to-End Verification & Real DB Benchmarks (`BLK-001` UNBLOCKED)
+
+> **Execution Date:** 2026-11-24  
+> **Live Target:** Supabase Cloud project `StudyHub` (PostgreSQL `17.12`, migrations `0001`–`0011` applied live), Next.js `16.4.6` production server (`next start -p 3014 -H 127.0.0.1`), authenticated via real `@supabase/ssr` session cookies for disposable test account `v21-perf-<ts>@studyhub-test.local`.  
+> **Security & Teardown Attestation:** Zero secrets/keys printed or stored; zero aviation question text copied into docs; disposable test user + all 6 created study sets deleted and verified (`REMAINING_SETS: 0`, `DEL_USER: error: null`, `PORT_3014_FREE=True`).  
+> **Note on Network Latency:** Timings below are **real end-to-end HTTP round-trip times** from the local Next.js server to live Supabase Cloud over the internet (including TLS + auth verification + PostgREST + PostgreSQL 17.12 disk commit + triggers + RLS), NOT mocked or local loopback DB numbers.
+
+### 6.1 Live End-to-End Real Aviation Document Imports (All 4 `sample-data/` Files → Live PostgreSQL 17.12)
+
+Every file was uploaded as multipart `FormData` to `POST /api/import/parse`, committed to live Supabase Cloud via `POST /api/import/commit`, verified for trigger-maintained `study_sets.question_count` via `GET /api/sets/[id]`, and read back in full via `GET /api/sets/[id]/questions?page=1&pageSize=500`:
+
+| Real File (`sample-data/`) | File Size | Policy Used | Parsed / Valid (Dups) | Committed to Live DB | Trigger `question_count` | Live Read-Back Verified (`4 opts` / `1 correct` / `100% match`) | `U+FEFF` / Prefix Leaks | Disk Read (ms) | `POST /api/import/parse` HTTP (ms / KB) | `POST /api/import/commit` Live DB (ms) | `GET /questions` Read-Back (ms) | **Total End-to-End (ms)** |
+|---|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| `METEOROLOGY-01. THE ATMOSTPHERE (133).docx` | `33.8 KB` | `skip` | `133/133` (`0`) | **`133/133`** (`0` skipped) | **`133`** | **`133/133`** *(Q#20 & Q#30 BOTH preserved with distinct options & answers!)* | `0` / `0` | `0.81` | `898.0` *(`130.6 KB`, cold)* | **`1,797.5`** | `967.7` | **`3,664.1`** |
+| `METEOROLOGY-05. PRECIPITATION (24).xlsx` | `14.9 KB` | `skip` | `24/24` (`0`) | **`24/24`** (`0` skipped) | **`24`** | **`24/24`** | `0` / `0` | `2.18` | `561.1` *(`22.1 KB`)* | **`1,465.0`** | `757.0` | **`2,785.2`** |
+| `METEOROLOGY-08. CLIMATOLOGY (62).docx` | `23.1 KB` | `keep_both` | `62/62` (`1` genuine) | **`62/62`** (`0` skipped) | **`62`** | **`62/62`** | `0` / `0` | `2.08` | `461.4` *(`61.4 KB`)* | **`1,395.1`** | `695.4` | **`2,554.1`** |
+| `METEOROLOGY-08. CLIMATOLOGY (62).xlsx` | `20.2 KB` | `keep_both` | `62/62` (`2` genuine) | **`62/62`** (`0` skipped) | **`62`** | **`62/62`** | `0` / `0` | `2.38` | `515.1` *(`58.4 KB`)* | **`1,539.3`** | `721.2` | **`2,778.0`** |
+
+- **Cross-File Live DB Parity (`METEOROLOGY-08.docx` vs `METEOROLOGY-08.xlsx`):** **`62/62` (100%)** match on correct option position/label (`A`–`D`) while preserving both source documents verbatim without mutating minor editorial punctuation/spacing differences between the original Word and Excel files.
+
+---
+
+### 6.2 Live 500-Question Bank Persistence, Read-Back, 250-Q Exam Lifecycle, Export & Clone (`SH-005` Live Proof)
+
+Executed against live Supabase Cloud (`500` synthetic MC questions × `4` options = **`2,000` option rows** + `500` `question_tags` + `4` unique tags across `10` chapters):
+
+| Live Operation (HTTP Route → Live Supabase Cloud PG 17.12) | Measured Latency (ms) | Response / Payload | Exact Live Verification Proof | Verdict |
+|---|---:|---:|---|---|
+| **500-Q Commit** (`POST /api/import/commit`: 500 Qs + 2,000 opts + 500 tags) | **`3,649.3`** | `500` Qs / `2,000` opts | `importedCount: 500`, `totalSetQuestions: 500`, statement-level trigger `study_sets.question_count === 500` | **VERIFIED LIVE** |
+| **500-Q Single-Page Read-Back** (`GET /api/sets/[id]/questions?page=1&pageSize=500`) | **`2,079.9`** | `1,091.9 KB` | **`500/500` questions** AND **`500/500` retain ALL 4 options (`2,000/2,000` options)** — **0** PostgREST 1,000-row truncation, **0** HTTP 414! | **VERIFIED LIVE** |
+| **500-Q Paginated Read-Back** (`5 × pageSize=100`) | **`4,463.0`** *(`~893 ms`/page)* | `500` unique Qs | `500/500` unique IDs & `2,000/2,000` options across pages 1–5 | **VERIFIED LIVE** |
+| **250-Q Live Exam Generation** (`POST /api/exams`, `global_random`, shuffle Qs+Opts, `3600s`) | **`1,749.4`** | `291.0 KB` | **`250/250` questions**, `250/250` × 4 options (`1,000/1,000`), **`0` leaked answer keys/explanations pre-submit!** | **VERIFIED LIVE** |
+| **250-Q Chunked Autosave — Chunk 1** (`PUT /api/exams/[id]/answers`, 150 items, `seq 1..150`) | **`382.4`** | `150` answers | Live server `answered_count === 150` | **VERIFIED LIVE** |
+| **250-Q Chunked Autosave — Chunk 2** (`PUT /api/exams/[id]/answers`, 100 items, `seq 151..250`) | **`441.3`** | `100` answers | Live server `answered_count === 250` (**total 250-answer sync: `823.6 ms`**) | **VERIFIED LIVE** |
+| **250-Q Live Server-Scored Submit** (`POST /api/exams/[id]/submit`) | **`723.7`** | Set-based PG grading + SM-2 | `status: "submitted"`, `answered: 250`, `correct: 200`, `wrong: 50`, `unanswered: 0`, `score_percent: 80.00%`, `passed: true`, `1` subject / `10` chapter breakdowns | **VERIFIED LIVE** |
+| **500-Q Live Export — JSON** (`GET /api/sets/[id]/export?format=json`) | **`2,118.4`** | `556.1 KB` | **`500/500` questions** & **`2,000/2,000` options** exported intact | **VERIFIED LIVE** |
+| **500-Q Live Export — CSV** (`GET /api/sets/[id]/export?format=csv`) | **`2,191.9`** | `159.5 KB` | **`501` lines** (`1` header + `500` questions) exported cleanly | **VERIFIED LIVE** |
+| **500-Q Atomic Clone RPC** (`POST /api/sets/[id]/duplicate` → `clone_study_set()`) | **`815.5`** | 1 SQL RPC call | `copied_questions: 500`, cloned set read-back **`500/500` questions & `2,000/2,000` options**! | **VERIFIED LIVE** |
+
+---
+
+### 6.3 Live PG 17.12 Bugs Caught During V2.1 End-to-End Benchmarks
+
+Running real HTTP + database mutations against live Supabase Cloud PG 17.12 exposed **3 real P0 database bugs** that mock/offline tests could not catch:
+
+1. **`42501` on `POST /api/sets` (`INSERT ... RETURNING *`):** Caught on first live run (`study_sets_select_readable` called `STABLE` `can_read_study_set()` against pre-statement snapshot). **Fixed live in `0008` and re-verified PASS.**
+2. **`42P17` Mutual RLS Recursion `question_tags` ↔ `tags`:** Caught during live 500-Q tagged commit (`POST /api/import/commit` → HTTP 500; `question_tags_insert_editable` queried `tags`, whose `tags_select_readable_via_sets` re-entered `question_tags`). **Fixed live in `0009` (`public.can_read_tag`) and re-verified PASS.**
+3. **`P0001` `trg_prevent_exam_snapshot_update` Blocking FK `ON DELETE SET NULL` Cascades (`#107` / `#108`):** Caught during post-exam teardown (`DELETE FROM study_sets` failed with `exam_attempt_questions rows are immutable and cannot be updated.` because `question_id` and `source_study_set_id` have `ON DELETE SET NULL` FKs). **Fixed live in `0011` (`0011_v2_1_allow_fk_set_null_on_exam_snapshot`) and re-verified PASS live on PG 17.12:** authenticated owner `DELETE FROM study_sets` after exam succeeds (`error: null`), historical `exam_attempt_questions` snapshot remains preserved with `question_id=null` & `source_study_set_id=null`, direct `UPDATE prompt_snapshot` is STILL rejected with `P0001`, and `admin.auth.admin.deleteUser()` cascades cleanly (`remainingAttempts: 0`, `REMAINING_SETS: 0`).
+
 

@@ -33,7 +33,7 @@ export async function tryCreateClient(): Promise<SupabaseClient<Database> | null
 
   const cookieStore = await cookies();
 
-  return createServerClient<Database>(env.url, env.anonKey, {
+  return createServerClient<Database>(env.url, env.publishableKey, {
     cookies: {
       getAll() {
         return cookieStore.getAll();

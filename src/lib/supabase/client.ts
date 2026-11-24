@@ -18,7 +18,7 @@ export function createClient(): SupabaseClient<Database> {
   if (!env) {
     throw new Error(SUPABASE_NOT_CONFIGURED_MESSAGE);
   }
-  return createBrowserClient<Database>(env.url, env.anonKey);
+  return createBrowserClient<Database>(env.url, env.publishableKey);
 }
 
 /**
@@ -29,5 +29,5 @@ export function tryCreateClient(): SupabaseClient<Database> | null {
   if (!env) {
     return null;
   }
-  return createBrowserClient<Database>(env.url, env.anonKey);
+  return createBrowserClient<Database>(env.url, env.publishableKey);
 }
