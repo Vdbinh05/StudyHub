@@ -586,7 +586,7 @@ export function StudySetHub({ setId }: { setId: string }) {
 
   if (setQuery.isLoading) {
     return (
-      <div className="space-y-5" aria-busy="true">
+      <div key="set-hub-loading" className="space-y-5" aria-busy="true">
         {/* Mirrors rendered Study-First hero header + mobile 2-row / desktop inline action bar */}
         <header className="space-y-3">
           <Skeleton className="h-4 w-40" />
@@ -805,7 +805,7 @@ export function StudySetHub({ setId }: { setId: string }) {
     : totalQuestionsMatched;
 
   return (
-    <div className="space-y-5">
+    <div key="set-hub-loaded" className="space-y-5">
       {/* Study-First Hero Header (compact, 3 clean labeled controls — zero 10-button wall) */}
       <header className="space-y-3">
         <nav

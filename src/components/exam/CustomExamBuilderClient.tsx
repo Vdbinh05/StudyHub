@@ -1200,13 +1200,13 @@ export function CustomExamBuilderClient({
         </TabsList>
 
         {/* TAB 1: 3-STEP CUSTOM BUILDER */}
-        <TabsContent value="builder" className="mt-5">
-          {/* Main 2-Column Builder Workspace */}
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
+        <TabsContent value="builder" className="mt-5 min-w-0">
+          {/* Main 2-Column Builder Workspace (min-w-0 grid-cols-1 prevents mobile track widening CLS!) */}
+          <div className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
             {/* LEFT COLUMN: Clean 2-Card Core Flow + Collapsible Advanced Settings */}
-            <div className="space-y-5">
+            <div className="min-w-0 space-y-5">
               {/* STEP 1: Pick Study Sets & Folders */}
-              <Card>
+              <Card className="min-w-0 overflow-hidden">
                 <CardHeader className="pb-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <CardTitle className="text-base">
@@ -1216,12 +1216,12 @@ export function CustomExamBuilderClient({
                         "Step 1 · Select Study Sets",
                       )}
                     </CardTitle>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex shrink-0 items-center gap-1">
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="min-h-9 text-xs"
+                        className="min-h-9 px-2 text-xs"
                         onClick={handleSelectAllSets}
                       >
                         {lText(locale, "Chọn tất cả", "Select all")}
@@ -1230,7 +1230,7 @@ export function CustomExamBuilderClient({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="min-h-9 text-xs"
+                        className="min-h-9 px-2 text-xs"
                         disabled={!hasAnySource}
                         onClick={handleClearSources}
                       >
@@ -1239,7 +1239,7 @@ export function CustomExamBuilderClient({
                     </div>
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-4">
+                <CardContent className="min-w-0 space-y-4">
                   {/* Search input inside semantic <search> */}
                   <search className="relative">
                     <Search
@@ -1276,11 +1276,12 @@ export function CustomExamBuilderClient({
                     </div>
                   ) : null}
 
-                  {/* Scrollable Folders + Study Sets List (fixed height across loading/empty/loaded -> 0px CLS!) */}
+                  {/* Scrollable Folders + Study Sets List (fixed height + min-w-0 + distinct keys -> 0.000 CLS!) */}
                   {setsQuery.isLoading || foldersQuery.isLoading ? (
                     <div
+                      key="sources-loading"
                       aria-busy="true"
-                      className="h-[240px] space-y-2.5 overflow-hidden rounded-lg border border-border p-3 sm:h-[280px]"
+                      className="h-[240px] min-w-0 space-y-2.5 overflow-hidden rounded-lg border border-border p-3 sm:h-[280px]"
                     >
                       <Skeleton className="h-4 w-24" />
                       <Skeleton className="h-10 w-full rounded-md" />
@@ -1289,7 +1290,10 @@ export function CustomExamBuilderClient({
                       <Skeleton className="h-10 w-full rounded-md" />
                     </div>
                   ) : allSets.length === 0 ? (
-                    <div className="flex h-[240px] flex-col items-center justify-center rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground sm:h-[280px]">
+                    <div
+                      key="sources-empty"
+                      className="flex h-[240px] min-w-0 flex-col items-center justify-center rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground sm:h-[280px]"
+                    >
                       <p>
                         {lText(
                           locale,
@@ -1304,7 +1308,10 @@ export function CustomExamBuilderClient({
                       </Button>
                     </div>
                   ) : (
-                    <div className="h-[240px] space-y-4 overflow-y-auto overscroll-contain rounded-lg border border-border p-3 sm:h-[280px]">
+                    <div
+                      key="sources-loaded"
+                      className="h-[240px] min-w-0 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border border-border p-3 sm:h-[280px]"
+                    >
                       {/* Folders Section */}
                       {visibleFolders.length > 0 ? (
                         <div className="space-y-1.5">
@@ -1346,7 +1353,7 @@ export function CustomExamBuilderClient({
                                       <ChevronRight className="size-4" aria-hidden="true" />
                                     )}
                                   </button>
-                                  <label className="flex flex-1 cursor-pointer items-center gap-2.5 text-sm">
+                                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-sm">
                                     <Checkbox
                                       checked={isChecked}
                                       onCheckedChange={() => toggleFolder(folder.id)}
@@ -1355,7 +1362,7 @@ export function CustomExamBuilderClient({
                                       className="size-4 shrink-0 text-primary"
                                       aria-hidden="true"
                                     />
-                                    <span className="flex-1 truncate font-medium">
+                                    <span className="min-w-0 flex-1 truncate font-medium">
                                       {folder.name}
                                     </span>
                                     <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
@@ -1402,7 +1409,7 @@ export function CustomExamBuilderClient({
                             <label
                               key={s.id}
                               className={cn(
-                                "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 text-sm hover:bg-secondary/40",
+                                "flex min-w-0 cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 text-sm hover:bg-secondary/40",
                                 (directChecked || coveredByFolder) && "bg-accent/30",
                               )}
                             >
@@ -1410,7 +1417,7 @@ export function CustomExamBuilderClient({
                                 checked={directChecked || coveredByFolder}
                                 onCheckedChange={() => toggleSet(s.id)}
                               />
-                              <span className="flex-1 truncate font-medium">
+                              <span className="min-w-0 flex-1 truncate font-medium">
                                 {s.title}
                               </span>
                               {coveredByFolder ? (
@@ -1477,7 +1484,7 @@ export function CustomExamBuilderClient({
               </Card>
 
               {/* STEP 2: Question Count, Full Coverage Toggle & Contextual Multi-Subject Allocation */}
-              <Card>
+              <Card className="min-w-0">
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base">
                     {lText(
@@ -2398,8 +2405,8 @@ export function CustomExamBuilderClient({
             </div>
 
             {/* STEP 3 (RIGHT COLUMN): Sticky Live Blueprint & Launch CTA */}
-            <aside className="space-y-4 lg:sticky lg:top-20">
-              <Card>
+            <aside className="min-w-0 space-y-4 lg:sticky lg:top-20">
+              <Card className="min-w-0">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-base">
