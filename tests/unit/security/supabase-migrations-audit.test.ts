@@ -48,6 +48,18 @@ const sql0012 = readFileSync(
   path.join(MIGRATIONS_DIR, "0012_v2_1_fix_coverage_delete_cascade.sql"),
   "utf8",
 );
+const sql0013 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0013_v3_media_richtext_questions_schema.sql"),
+  "utf8",
+);
+const sql0014 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0014_v3_learning_notes_reports_sync_tables.sql"),
+  "utf8",
+);
+const sql0015 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0015_v3_rpcs_grading_search_reset_sync.sql"),
+  "utf8",
+);
 const allSql = [sql0001, sql0002, sql0003, sql0004].join("\n");
 
 const ALL_20_TABLES = [
@@ -252,5 +264,94 @@ describe("Security: Supabase SQL Migrations Structural Audit", () => {
     expect(sql0012).toMatch(/SET search_path = ''/i);
     expect(sql0012).toContain("EXISTS (SELECT 1 FROM public.profiles WHERE id = OLD.user_id)");
     expect(sql0012).toMatch(/REVOKE ALL ON FUNCTION public\.release_coverage_cycle_on_attempt_delete\(\) FROM PUBLIC, anon, authenticated;/i);
+  });
+
+  it("V3.0 migrations 0013–0015 enable RLS on all 10 new tables, preserve zero DROP POLICY/DROP TRIGGER, enforce pre-submit anti-leak, and harden all SECURITY DEFINER RPCs", () => {
+    const v3Raw = [sql0013, sql0014, sql0015].join("\n");
+    const v3Exec = v3Raw
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+
+    // Zero destructive policy/trigger drops or temp tables across 0013-0015
+    expect(v3Exec).not.toMatch(/\bDROP\s+POLICY\b/i);
+    expect(v3Exec).not.toMatch(/\bDROP\s+TRIGGER\b/i);
+    expect(v3Exec).not.toMatch(/\bDROP\s+TABLE\b/i);
+    expect(v3Exec).not.toMatch(/\bCREATE\s+TEMP\s+TABLE\b/i);
+
+    // Zero deprecated auth.role() and 100% wrapped (SELECT auth.uid())
+    expect(v3Exec).not.toMatch(/\bauth\.role\s*\(\s*\)/i);
+    const wrapped = v3Exec.match(/\(\s*SELECT\s+auth\.uid\s*\(\s*\)\s*\)/gi) ?? [];
+    const total = v3Exec.match(/\bauth\.uid\s*\(\s*\)/gi) ?? [];
+    expect(total.length).toBeGreaterThanOrEqual(20);
+    expect(wrapped.length).toBe(total.length);
+
+    // All 10 new V3 tables defined & RLS-enabled
+    const v3Tables = [
+      "media_assets",
+      "content_media_relations",
+      "shared_passages",
+      "diagram_sets",
+      "diagram_hotspots",
+      "user_question_notes",
+      "question_reports",
+      "learning_session_checkpoints",
+      "learning_confidence_events",
+      "learning_sync_events",
+    ];
+    for (const table of v3Tables) {
+      expect(v3Exec, `Missing CREATE TABLE public.${table}`).toMatch(
+        new RegExp(`CREATE TABLE IF NOT EXISTS public\\.${table}\\b`, "i"),
+      );
+      expect(v3Exec, `Missing ENABLE ROW LEVEL SECURITY on public.${table}`).toMatch(
+        new RegExp(`ALTER TABLE public\\.${table}\\s+ENABLE ROW LEVEL SECURITY;`, "i"),
+      );
+    }
+
+    // Every SECURITY DEFINER function sets search_path = ''
+    const fnBlocks = v3Exec.split(/CREATE OR REPLACE FUNCTION\s+/i).slice(1);
+    const secDefBlocks = fnBlocks.filter((block) =>
+      /\bSECURITY DEFINER\b/i.test(block.split(/AS \$\$/i)[0] ?? ""),
+    );
+    expect(secDefBlocks.length).toBeGreaterThanOrEqual(10);
+    for (const block of secDefBlocks) {
+      const header = block.split(/AS \$\$/i)[0] ?? "";
+      const fnName = header.match(/^([^\s(]+)/)?.[1] ?? "unknown";
+      expect(header, `V3 SECURITY DEFINER ${fnName} missing SET search_path = ''`).toMatch(
+        /SET\s+search_path\s*=\s*''/i,
+      );
+    }
+
+    // study-media upgraded to 10MB audio+raster with ZERO SVG/HTML
+    expect(sql0013).toContain("10485760");
+    expect(sql0013).toContain("'audio/mpeg'");
+    expect(sql0013).not.toContain("image/svg+xml");
+    expect(sql0013).not.toContain("text/html");
+
+    // Pre-submit exam column GRANTs strictly exclude type_payload_snapshot & explanation_rich_snapshot
+    const eaqGrants = sql0013.match(
+      /GRANT SELECT\s*\(([\s\S]*?)\)\s*ON public\.exam_attempt_questions TO authenticated;/gi,
+    ) ?? [];
+    expect(eaqGrants.length).toBeGreaterThanOrEqual(1);
+    for (const g of eaqGrants) {
+      expect(g).not.toContain("type_payload_snapshot");
+      expect(g).not.toContain("explanation_rich_snapshot");
+      expect(g).not.toContain("correct_option_ids");
+      expect(g).not.toContain("accepted_answers_snapshot");
+    }
+
+    // Key V3 deterministic RPCs present and revoked from PUBLIC/anon
+    for (const fn of [
+      "point_in_hotspot",
+      "sanitize_pre_submit_type_payload",
+      "has_exam_answer",
+      "grade_v3_exam_answer",
+      "reset_learning_progress",
+      "global_library_search",
+      "sync_offline_learning_events",
+    ]) {
+      expect(sql0015).toMatch(new RegExp(`CREATE OR REPLACE FUNCTION public\\.${fn}\\b`, "i"));
+      expect(sql0015).toMatch(new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}\\([^)]*\\) FROM PUBLIC, anon;`, "i"));
+    }
   });
 });

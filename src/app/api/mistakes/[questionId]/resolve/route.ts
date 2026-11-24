@@ -26,7 +26,9 @@ export async function POST(
       .from("user_question_progress")
       .update({
         mastery_level: "mastered",
+        mistake_status: "resolved",
         consecutive_correct: 4,
+        consecutive_wrong: 0,
         interval_days: 14,
         last_reviewed_at: now.toISOString(),
         next_review_at: nextReview.toISOString(),

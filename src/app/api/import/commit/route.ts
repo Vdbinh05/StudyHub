@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   chunkArray,
   computeQuestionDuplicateFingerprint,
+  inspectRasterImageBytes,
   normalizeForComparison,
   sanitizeFileName,
   validateParsedQuestion,
@@ -32,12 +33,27 @@ const NEW_IMPORT_JOB_RATE_LIMIT = {
 } as const;
 const IN_DELETE_CHUNK_SIZE = 120;
 
+const CommitMediaAttachmentSchema = z.object({
+  id: z.string().max(128).optional(),
+  rId: z.string().max(128).optional(),
+  fileName: z.string().max(240),
+  mimeType: z.string().max(64).optional(),
+  ext: z.string().max(16).optional(),
+  byteLength: z.number().int().min(0).max(5 * 1024 * 1024).optional(),
+  previewPath: z.string().max(512).optional(),
+  dataUrl: z.string().max(7_000_000).optional(),
+  anchorType: z.enum(["inline", "floating"]).default("inline"),
+  ambiguous: z.boolean().optional(),
+  alt: z.string().max(300).optional(),
+});
+
 const CommitOptionSchema = z.object({
   id: z.string().optional(),
   label: z.string().min(1).max(16),
   content: z.string().max(4000),
   isCorrect: z.boolean(),
   imageUrl: z.string().max(2048).nullable().optional(),
+  media: z.array(CommitMediaAttachmentSchema).max(6).optional(),
   detectedBy: z
     .array(
       z.enum([
@@ -74,9 +90,18 @@ const CommitQuestionSchema = z.object({
     "true_false",
     "flashcard",
     "short_answer",
+    "fill_in_blank",
+    "numerical",
+    "image_choice",
+    "ordering",
+    "matching",
+    "image_hotspot",
+    "reading_passage",
+    "listening",
   ]),
   prompt: z.string().max(8000),
   promptImageUrl: z.string().max(2048).nullable().optional(),
+  promptMedia: z.array(CommitMediaAttachmentSchema).max(10).optional(),
   backText: z.string().max(8000).nullable().optional(),
   backImageUrl: z.string().max(2048).nullable().optional(),
   explanation: z.string().max(8000).nullable().optional(),
@@ -116,12 +141,14 @@ const ImportCommitBodySchema = z.object({
       "eduquiz_txt",
       "word_answer_key",
       "docx_ooxml",
+      "docx_multimedia",
       "xlsx_wayground",
       "xlsx_generic",
       "quizlet_tsv",
       "csv",
       "json",
       "txt_generic",
+      "pdf_text",
     ])
     .default("txt_generic"),
   fileName: z.string().max(240).default("import.txt"),
@@ -139,9 +166,40 @@ const ImportCommitBodySchema = z.object({
 function safeUrlOrNull(url: string | null | undefined): string | null {
   if (!url) return null;
   const trimmed = url.trim();
-  // Never persist temporary unuploaded DOCX preview paths as broken 404 image links
-  if (trimmed.startsWith("/docx-media/")) return null;
+  // Never persist temporary unuploaded DOCX preview paths or raw data: URLs into DB columns
+  if (trimmed.startsWith("/docx-media/") || trimmed.toLowerCase().startsWith("data:")) {
+    return null;
+  }
   return trimmed && isSafeHttpOrStorageUrl(trimmed) ? trimmed : null;
+}
+
+const SAFE_DATA_IMAGE_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i;
+
+interface UploadedImportMedia {
+  mediaId: string | null;
+  storagePath: string;
+  proxyUrl: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  alt?: string;
+}
+
+function decodeSafeRasterDataUrl(
+  dataUrl: string,
+): { bytes: Uint8Array; mime: string; ext: string } | null {
+  const match = SAFE_DATA_IMAGE_RE.exec(dataUrl.trim());
+  if (!match) return null;
+  try {
+    const buf = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+    const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    const inspected = inspectRasterImageBytes(bytes);
+    if (!inspected.valid || !inspected.mime || !inspected.ext) return null;
+    return { bytes, mime: inspected.mime, ext: inspected.ext };
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(request: Request) {
@@ -224,6 +282,19 @@ export async function POST(request: Request) {
           questionType: q.questionType,
           prompt: q.prompt.trim(),
           promptImageUrl: safeUrlOrNull(q.promptImageUrl),
+          promptMedia: q.promptMedia?.map((m) => ({
+            id: m.id ?? crypto.randomUUID(),
+            rId: m.rId ?? "import",
+            fileName: sanitizeFileName(m.fileName),
+            mimeType: m.mimeType ?? "image/png",
+            ext: m.ext ?? "png",
+            byteLength: m.byteLength ?? 0,
+            previewPath: m.previewPath ?? `/docx-media/${sanitizeFileName(m.fileName)}`,
+            dataUrl: m.dataUrl,
+            anchorType: m.anchorType,
+            ambiguous: m.ambiguous,
+            alt: m.alt,
+          })),
           backText: q.backText?.trim() || null,
           backImageUrl: safeUrlOrNull(q.backImageUrl),
           explanation: q.explanation?.trim() || null,
@@ -241,6 +312,19 @@ export async function POST(request: Request) {
             content: o.content.trim(),
             isCorrect: o.isCorrect,
             imageUrl: safeUrlOrNull(o.imageUrl),
+            media: o.media?.map((m) => ({
+              id: m.id ?? crypto.randomUUID(),
+              rId: m.rId ?? "import",
+              fileName: sanitizeFileName(m.fileName),
+              mimeType: m.mimeType ?? "image/png",
+              ext: m.ext ?? "png",
+              byteLength: m.byteLength ?? 0,
+              previewPath: m.previewPath ?? `/docx-media/${sanitizeFileName(m.fileName)}`,
+              dataUrl: m.dataUrl,
+              anchorType: m.anchorType,
+              ambiguous: m.ambiguous,
+              alt: m.alt,
+            })),
             detectedBy: o.detectedBy,
           })),
           acceptedAnswers: q.acceptedAnswers,
@@ -415,6 +499,84 @@ export async function POST(request: Request) {
       }
     }
 
+    // 7b. Deduplicated upload of validated V3 DOCX raster media attachments to private `study-media`
+    const uploadedByHash = new Map<string, UploadedImportMedia>();
+    const uploadAttachmentIfNeeded = async (
+      att: NonNullable<ParsedQuestion["promptMedia"]>[number],
+    ): Promise<UploadedImportMedia | null> => {
+      if (!att.dataUrl) return null;
+      const decoded = decodeSafeRasterDataUrl(att.dataUrl);
+      if (!decoded) return null;
+
+      const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
+      const cached = uploadedByHash.get(sha256);
+      if (cached) {
+        return { ...cached, alt: att.alt ?? cached.alt };
+      }
+
+      const storagePath = `${user.id}/${body.studySetId}/import-${sha256.slice(0, 24)}.${decoded.ext}`;
+      const { error: uploadErr } = await supabase.storage
+        .from("study-media")
+        .upload(storagePath, decoded.bytes, {
+          contentType: decoded.mime,
+          upsert: true,
+        });
+      if (uploadErr) {
+        return null;
+      }
+
+      const proxyUrl = `/api/uploads/signed-url?path=${encodeURIComponent(storagePath)}&redirect=1`;
+      let mediaId: string | null = null;
+
+      // Best-effort V3 `media_assets` registry write (graceful if migration 0013 is not applied yet)
+      try {
+        const { data: existingAsset } = await supabase
+          .from("media_assets")
+          .select("id")
+          .eq("owner_id", user.id)
+          .eq("storage_path", storagePath)
+          .maybeSingle();
+
+        if (existingAsset?.id) {
+          mediaId = existingAsset.id;
+        } else {
+          const { data: insertedAsset } = await supabase
+            .from("media_assets")
+            .insert({
+              owner_id: user.id,
+              study_set_id: body.studySetId,
+              kind: "image",
+              storage_bucket: "study-media",
+              storage_path: storagePath,
+              mime_type: decoded.mime,
+              file_name: sanitizeFileName(att.fileName),
+              size_bytes: decoded.bytes.byteLength,
+              sha256_hash: sha256,
+              alt_text: att.alt ?? null,
+              is_orphaned: false,
+            })
+            .select("id")
+            .single();
+          mediaId = insertedAsset?.id ?? null;
+        }
+      } catch {
+        mediaId = null;
+      }
+
+      const record: UploadedImportMedia = {
+        mediaId,
+        storagePath,
+        proxyUrl,
+        fileName: sanitizeFileName(att.fileName),
+        mimeType: decoded.mime,
+        sizeBytes: decoded.bytes.byteLength,
+        sha256,
+        alt: att.alt,
+      };
+      uploadedByHash.set(sha256, record);
+      return record;
+    };
+
     // 8. Chunked 500-row batch inserts into questions, question_options, question_accepted_answers, question_tags
     let importedCount = 0;
 
@@ -423,9 +585,32 @@ export async function POST(request: Request) {
       const optionRows: Database["public"]["Tables"]["question_options"]["Insert"][] = [];
       const acceptedRows: Database["public"]["Tables"]["question_accepted_answers"]["Insert"][] = [];
       const questionTagRows: Database["public"]["Tables"]["question_tags"]["Insert"][] = [];
+      const mediaRelationRows: Database["public"]["Tables"]["content_media_relations"]["Insert"][] = [];
 
       for (const q of qChunk) {
         const questionId = crypto.randomUUID();
+        const uploadedPromptMedia: UploadedImportMedia[] = [];
+        for (const att of q.promptMedia ?? []) {
+          const uploaded = await uploadAttachmentIfNeeded(att);
+          if (uploaded) uploadedPromptMedia.push(uploaded);
+        }
+
+        const resolvedPromptImageUrl =
+          q.promptImageUrl ?? uploadedPromptMedia[0]?.proxyUrl ?? null;
+
+        uploadedPromptMedia.forEach((m, sortOrder) => {
+          if (m.mediaId) {
+            mediaRelationRows.push({
+              media_id: m.mediaId,
+              entity_type: "question",
+              entity_id: questionId,
+              role: "prompt",
+              sort_order: sortOrder,
+              alt_text: m.alt ?? null,
+            });
+          }
+        });
+
         questionRows.push({
           id: questionId,
           study_set_id: body.studySetId,
@@ -433,7 +618,7 @@ export async function POST(request: Request) {
           position: nextPosition,
           chapter: q.chapter ?? null,
           prompt: q.prompt,
-          prompt_image_url: q.promptImageUrl ?? null,
+          prompt_image_url: resolvedPromptImageUrl,
           back_text: q.backText ?? null,
           back_image_url: q.backImageUrl ?? null,
           explanation: q.explanation ?? null,
@@ -444,22 +629,50 @@ export async function POST(request: Request) {
             import_idempotency_key: body.idempotencyKey,
             source_format: body.sourceFormat,
             detected_by: q.detectedBy,
+            ...(uploadedPromptMedia.length > 0
+              ? {
+                  uploaded_prompt_media_urls: uploadedPromptMedia.map((m) => m.proxyUrl),
+                }
+              : {}),
           } as Json,
         });
         nextPosition += 1;
 
-        q.options.forEach((opt, optIdx) => {
+        for (let optIdx = 0; optIdx < q.options.length; optIdx += 1) {
+          const opt = q.options[optIdx];
+          const optionId = crypto.randomUUID();
+          const uploadedOptMedia: UploadedImportMedia[] = [];
+          for (const att of opt.media ?? []) {
+            const uploaded = await uploadAttachmentIfNeeded(att);
+            if (uploaded) uploadedOptMedia.push(uploaded);
+          }
+
+          uploadedOptMedia.forEach((m, sortOrder) => {
+            if (m.mediaId) {
+              mediaRelationRows.push({
+                media_id: m.mediaId,
+                entity_type: "question_option",
+                entity_id: optionId,
+                role: "option",
+                sort_order: sortOrder,
+                alt_text: m.alt ?? null,
+              });
+            }
+          });
+
           optionRows.push({
-            id: crypto.randomUUID(),
+            id: optionId,
             question_id: questionId,
             study_set_id: body.studySetId,
             position: optIdx,
             label: opt.label,
             content: opt.content,
-            image_url: opt.imageUrl ?? null,
+            image_url: opt.imageUrl ?? uploadedOptMedia[0]?.proxyUrl ?? null,
+            media_id: uploadedOptMedia[0]?.mediaId ?? null,
+            image_alt: uploadedOptMedia[0]?.alt ?? null,
             is_correct: opt.isCorrect,
           });
-        });
+        }
 
         const acceptedSource =
           q.acceptedAnswers && q.acceptedAnswers.length > 0
@@ -522,6 +735,16 @@ export async function POST(request: Request) {
             .from("question_tags")
             .insert(qtChunk);
           if (qtErr) throw qtErr;
+        }
+      }
+
+      if (mediaRelationRows.length > 0) {
+        try {
+          for (const mrChunk of chunkArray(mediaRelationRows, 500)) {
+            await supabase.from("content_media_relations").insert(mrChunk);
+          }
+        } catch {
+          // Graceful fallback if content_media_relations is unavailable
         }
       }
 

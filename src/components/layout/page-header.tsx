@@ -13,6 +13,8 @@ interface PageHeaderProps {
   description?: string;
   breadcrumbs?: BreadcrumbItem[];
   actions?: React.ReactNode;
+  /** Place action toolbar on its own row below the heading (ideal for multi-action hubs). */
+  stackActions?: boolean;
   className?: string;
 }
 
@@ -21,11 +23,24 @@ export function PageHeader({
   description,
   breadcrumbs,
   actions,
+  stackActions = false,
   className,
 }: PageHeaderProps) {
   return (
-    <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between", className)}>
-      <div className="min-w-0 space-y-1">
+    <div
+      className={cn(
+        stackActions
+          ? "flex flex-col gap-3"
+          : "flex flex-wrap items-start justify-between gap-x-6 gap-y-3",
+        className,
+      )}
+    >
+      <div
+        className={cn(
+          "min-w-0 space-y-1",
+          !stackActions && "basis-72 flex-1",
+        )}
+      >
         {breadcrumbs && breadcrumbs.length > 0 && (
           <nav aria-label="Breadcrumb" className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs font-medium">
             {breadcrumbs.map((crumb, idx) => (
@@ -57,7 +72,7 @@ export function PageHeader({
         )}
       </div>
       {actions && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex max-w-full flex-wrap items-center gap-2">
           {actions}
         </div>
       )}

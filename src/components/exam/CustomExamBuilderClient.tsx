@@ -92,7 +92,30 @@ const ALL_EXAM_TYPES: ExamQuestionType[] = [
   "multiple_choice",
   "true_false",
   "short_answer",
+  "fill_in_blank",
+  "numerical",
+  "image_choice",
+  "ordering",
+  "matching",
+  "image_hotspot",
+  "reading_passage",
+  "listening",
 ];
+
+const EXAM_TYPE_LABELS: Record<ExamQuestionType, { vi: string; en: string }> = {
+  single_choice: { vi: "1 đáp án", en: "Single Choice" },
+  multiple_choice: { vi: "Nhiều đáp án", en: "Multi-Select" },
+  true_false: { vi: "Đúng / Sai", en: "True / False" },
+  short_answer: { vi: "Trả lời ngắn", en: "Short Answer" },
+  fill_in_blank: { vi: "Điền chỗ trống", en: "Fill in Blank" },
+  numerical: { vi: "Tính toán số", en: "Numerical" },
+  image_choice: { vi: "Chọn hình ảnh", en: "Image Choice" },
+  ordering: { vi: "Sắp xếp thứ tự", en: "Ordering" },
+  matching: { vi: "Ghép cặp", en: "Matching" },
+  image_hotspot: { vi: "Điểm trên ảnh", en: "Image Hotspot" },
+  reading_passage: { vi: "Đọc hiểu", en: "Reading Passage" },
+  listening: { vi: "Nghe hiểu", en: "Listening" },
+};
 const ALL_DIFFICULTIES: DifficultyLevel[] = ["easy", "medium", "hard"];
 
 const ALLOCATION_STRATEGIES: AllocationStrategy[] = [
@@ -1638,14 +1661,11 @@ export function CustomExamBuilderClient({
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                           {ALL_EXAM_TYPES.map((qt) => {
                             const checked = selectedQuestionTypes.includes(qt);
-                            const label =
-                              qt === "single_choice"
-                                ? lText(locale, "1 đáp án", "Single Choice")
-                                : qt === "multiple_choice"
-                                  ? lText(locale, "Nhiều đáp án", "Multi-Select")
-                                  : qt === "true_false"
-                                    ? lText(locale, "Đúng / Sai", "True / False")
-                                    : lText(locale, "Trả lời ngắn", "Short Answer");
+                            const label = lText(
+                              locale,
+                              EXAM_TYPE_LABELS[qt].vi,
+                              EXAM_TYPE_LABELS[qt].en,
+                            );
                             return (
                               <label
                                 key={qt}

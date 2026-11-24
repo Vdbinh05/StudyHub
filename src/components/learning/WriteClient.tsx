@@ -34,7 +34,6 @@ import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
-  isSafeDisplayImageUrl,
   recordStudySessionAnswer,
   updateStudySession,
   upsertQuestionProgress,
@@ -50,6 +49,7 @@ import type { Question } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -672,15 +672,20 @@ export function WriteClient({ setId }: WriteClientProps) {
                   </div>
 
                   <div className="space-y-3">
-                    <h2 className="whitespace-pre-wrap text-lg font-medium leading-relaxed">
-                      {currentQuestion.prompt}
+                    <h2 className="text-lg font-medium leading-relaxed">
+                      <SafeRichText
+                        rich={currentQuestion.prompt_rich}
+                        fallbackText={currentQuestion.prompt}
+                      />
                     </h2>
-                    {isSafeDisplayImageUrl(currentQuestion.prompt_image_url) ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
+                    {currentQuestion.prompt_image_url ? (
+                      <ZoomableImage
                         src={currentQuestion.prompt_image_url}
-                        alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
-                        className="max-h-56 rounded-lg border border-border object-contain"
+                        alt={lText(
+                          locale,
+                          "Hình ảnh câu hỏi",
+                          "Question illustration",
+                        )}
                       />
                     ) : null}
                   </div>
@@ -826,13 +831,18 @@ export function WriteClient({ setId }: WriteClientProps) {
                           <strong>{t("study.correctAnswer")}: </strong>
                           {result.acceptedTexts.join(" / ")}
                         </p>
-                        {currentQuestion.explanation ? (
-                          <p className="pt-1 text-muted-foreground whitespace-pre-wrap">
+                        {currentQuestion.explanation ||
+                        currentQuestion.explanation_rich ? (
+                          <div className="pt-1 text-muted-foreground">
                             <strong className="text-foreground">
                               {t("study.explanation")}:{" "}
                             </strong>
-                            {currentQuestion.explanation}
-                          </p>
+                            <SafeRichText
+                              rich={currentQuestion.explanation_rich}
+                              fallbackText={currentQuestion.explanation}
+                              inline
+                            />
+                          </div>
                         ) : null}
                       </div>
 

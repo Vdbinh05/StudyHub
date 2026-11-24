@@ -1,8 +1,26 @@
 /**
- * Core domain types for StudyHub V2.0.
- * Strictly aligned with PostgreSQL migrations `0001`–`0005` (26 canonical tables)
- * and the V2.0 Universal Custom Exam Engine & Full Coverage Cycle contracts.
+ * Core domain types for StudyHub V3.0 (Complete Learning Edition).
+ * Strictly aligned with PostgreSQL migrations `0001`–`0015` (36 canonical tables)
+ * and the V2.0/V3.0 Custom Exam, Multimedia, Diagram, Confidence & Offline Sync contracts.
  */
+
+import type {
+  ConfidenceLevel,
+  ContentMediaRelation,
+  DiagramSet,
+  MediaAttachmentRole,
+  MistakeStatus,
+  ModePreferences,
+  QuestionTypePayload,
+  RichTextDoc,
+  SharedPassage,
+  StructuredAnswerResponse,
+  V3ExamQuestionType,
+  V3QuestionType,
+  V3StudyMode,
+} from "./v3";
+
+export * from "./v3";
 
 export type Locale = "vi" | "en";
 export type ThemePreference = "light" | "dark" | "system";
@@ -12,14 +30,15 @@ export type Visibility = "private" | "unlisted" | "public" | "shared";
 export type MemberRole = "owner" | "editor" | "viewer";
 export type SharePermission = Exclude<MemberRole, "owner">;
 
-export type QuestionType =
+export type CoreQuestionType =
   | "single_choice"
   | "multiple_choice"
   | "true_false"
   | "flashcard"
   | "short_answer";
 
-export type ExamQuestionType = Exclude<QuestionType, "flashcard">;
+export type QuestionType = V3QuestionType;
+export type ExamQuestionType = V3ExamQuestionType;
 export type AnswerMatchMode =
   | "exact"
   | "case_insensitive"
@@ -30,13 +49,7 @@ export type DifficultyLevel = "easy" | "medium" | "hard";
 export type MasteryLevel = "new" | "learning" | "familiar" | "mastered";
 export type SelfRating = "again" | "hard" | "good" | "easy";
 
-export type StudyMode =
-  | "flashcards"
-  | "learn"
-  | "practice"
-  | "write"
-  | "match"
-  | "review";
+export type StudyMode = V3StudyMode;
 
 export type SessionStatus = "in_progress" | "completed" | "abandoned";
 export type ExamStatus = "in_progress" | "submitted" | "expired" | "discarded";
@@ -97,6 +110,9 @@ export interface UserPreferences {
   show_instant_feedback: boolean;
   sound_effects: boolean;
   reduced_motion: boolean;
+  confidence_enabled?: boolean;
+  mode_preferences?: ModePreferences;
+  progress_generation?: number;
   updated_at: string;
 }
 
@@ -128,6 +144,7 @@ export interface StudySet {
   default_pass_threshold: number;
   is_archived: boolean;
   is_favorite?: boolean;
+  content_version?: number;
   last_studied_at: string | null;
   created_at: string;
   updated_at: string;
@@ -165,7 +182,10 @@ export interface QuestionOption {
   position: number;
   label: string;
   content: string;
+  content_rich?: RichTextDoc | null;
   image_url: string | null;
+  media_id?: string | null;
+  image_alt?: string | null;
   is_correct: boolean;
   created_at: string;
 }
@@ -203,11 +223,21 @@ export interface Question {
   position: number;
   chapter: string | null;
   prompt: string;
+  prompt_rich?: RichTextDoc | null;
   prompt_image_url: string | null;
   back_text: string | null;
+  back_rich?: RichTextDoc | null;
   back_image_url: string | null;
   explanation: string | null;
+  explanation_rich?: RichTextDoc | null;
   hint: string | null;
+  hint_rich?: RichTextDoc | null;
+  audio_media_id?: string | null;
+  audio_url?: string | null;
+  audio_transcript?: string | null;
+  passage_id?: string | null;
+  diagram_id?: string | null;
+  type_payload?: QuestionTypePayload | null;
   difficulty: DifficultyLevel;
   source_metadata: Record<string, unknown>;
   created_at: string;
@@ -215,6 +245,9 @@ export interface Question {
   options?: QuestionOption[];
   accepted_answers?: QuestionAcceptedAnswer[];
   tags?: Tag[];
+  media_attachments?: ContentMediaRelation[];
+  passage?: SharedPassage | null;
+  diagram?: DiagramSet | null;
 }
 
 export interface UserQuestionProgress {
@@ -226,11 +259,21 @@ export interface UserQuestionProgress {
   correct_count: number;
   wrong_count: number;
   consecutive_correct: number;
+  consecutive_wrong?: number;
   ease_factor: number;
   interval_days: number;
   repetitions: number;
   last_reviewed_at: string | null;
+  last_wrong_at?: string | null;
   next_review_at: string | null;
+  last_confidence?: ConfidenceLevel | null;
+  low_confidence_count?: number;
+  high_conf_wrong_count?: number;
+  guess_correct_count?: number;
+  independent_recall_count?: number;
+  hint_used_count?: number;
+  mistake_status?: MistakeStatus;
+  progress_generation?: number;
   updated_at: string;
 }
 
@@ -266,6 +309,9 @@ export interface StudySessionAnswer {
   question_id: string;
   selected_option_ids: string[];
   typed_answer: string | null;
+  structured_response?: StructuredAnswerResponse | null;
+  confidence?: ConfidenceLevel | null;
+  hint_used?: boolean;
   is_correct: boolean;
   self_rating: SelfRating | null;
   response_time_ms: number | null;
@@ -280,7 +326,10 @@ export interface ExamSnapshotOption {
   id: string;
   label: string;
   content: string;
+  content_rich?: RichTextDoc | null;
   image_url: string | null;
+  media_id?: string | null;
+  image_alt?: string | null;
   position: number;
 }
 
@@ -389,9 +438,25 @@ export interface ExamSnapshotQuestion {
   chapter_snapshot: string | null;
   tags_snapshot?: ExamTagSnapshot[];
   prompt_snapshot: string;
+  prompt_rich_snapshot?: RichTextDoc | null;
   prompt_image_url_snapshot: string | null;
+  audio_media_id_snapshot?: string | null;
+  audio_url_snapshot?: string | null;
+  passage_snapshot?: Partial<SharedPassage> | null;
+  diagram_snapshot?: Partial<DiagramSet> | null;
+  type_payload_snapshot?: QuestionTypePayload | null;
+  media_snapshot?: Array<{
+    media_id: string;
+    role: MediaAttachmentRole;
+    storage_path: string;
+    proxy_url: string;
+    mime_type: string;
+    alt_text?: string | null;
+    caption?: string | null;
+  }>;
   options_snapshot: ExamSnapshotOption[];
   explanation_snapshot?: string | null;
+  explanation_rich_snapshot?: RichTextDoc | null;
   correct_option_ids?: string[];
   accepted_answers_snapshot?: ExamAcceptedAnswerSnapshot[];
   created_at: string;
@@ -404,6 +469,9 @@ export interface ExamAttemptAnswer {
   user_id: string;
   selected_option_ids: string[];
   typed_answer: string | null;
+  structured_response?: StructuredAnswerResponse | null;
+  confidence?: ConfidenceLevel | null;
+  hint_used?: boolean;
   is_flagged: boolean;
   is_correct: boolean | null;
   client_seq?: number;

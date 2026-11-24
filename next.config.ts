@@ -7,8 +7,11 @@ const contentSecurityPolicy = [
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   `img-src 'self' data: blob: https://*.supabase.co https://lh3.googleusercontent.com${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
+  `media-src 'self' blob: https://*.supabase.co${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
   "font-src 'self' data: https://fonts.gstatic.com",
-  `connect-src 'self' https://*.supabase.co wss://*.supabase.co${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
+  `connect-src 'self' blob: https://*.supabase.co wss://*.supabase.co${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",
@@ -22,7 +25,7 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   {
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=()",
+    value: "camera=(), microphone=(self), geolocation=()",
   },
   ...(!isDev
     ? [
@@ -37,6 +40,7 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  serverExternalPackages: ["pdfjs-dist"],
   experimental: {
     cpus: 4,
     memoryBasedWorkersCount: true,
@@ -58,6 +62,13 @@ const nextConfig: NextConfig = {
       {
         source: "/(.*)",
         headers: securityHeaders,
+      },
+      {
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },
+          { key: "Service-Worker-Allowed", value: "/" },
+        ],
       },
     ];
   },

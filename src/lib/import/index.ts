@@ -11,6 +11,7 @@ import { detectImportFormat } from "./detector";
 import { parseDocxBuffer, type ExtractedDocxMedia } from "./docx-ooxml-parser";
 import { parseEduQuizText } from "./eduquiz-parser";
 import { parseStudyHubJson } from "./json-parser";
+import { parsePdfBuffer } from "./pdf-parser";
 import { parseQuizletText } from "./quizlet-parser";
 import { sanitizeFileName } from "./text-utils";
 import { validateImportBatch } from "./validator";
@@ -81,7 +82,8 @@ export async function parseImportInput(
   }
 
   let decodedText: string | undefined;
-  if (input.fileBytes && ext !== ".docx" && ext !== ".xlsx") {
+  const isBinaryExt = ext === ".docx" || ext === ".xlsx" || ext === ".pdf";
+  if (input.fileBytes && !isBinaryExt) {
     decodedText = validateAndDecodeTextBytes(input.fileBytes);
   } else if (input.rawText !== undefined) {
     decodedText = input.rawText;
@@ -93,7 +95,7 @@ export async function parseImportInput(
     detectImportFormat({
       fileName: safeFileName,
       textContent: decodedText,
-      isBinary: ext === ".docx" || ext === ".xlsx",
+      isBinary: isBinaryExt,
     });
 
   let rawQuestions: ParsedQuestion[] = [];
@@ -106,8 +108,15 @@ export async function parseImportInput(
   let sampleRows: string[][] | undefined;
   let suggestedMapping: ImportPreviewResult["suggestedMapping"];
   let extractedMedia: Array<Omit<ExtractedDocxMedia, "bytes">> | undefined;
+  let isScannedPdf: boolean | undefined;
+  let pdfPageCount: number | undefined;
+  let pdfExtractedPages: number | undefined;
 
-  if (detectedFormat === "docx_ooxml" || ext === ".docx") {
+  if (
+    detectedFormat === "docx_ooxml" ||
+    detectedFormat === "docx_multimedia" ||
+    ext === ".docx"
+  ) {
     if (!input.fileBytes) {
       throw new ImportSecurityError(
         "INVALID_MAGIC_BYTES",
@@ -115,13 +124,20 @@ export async function parseImportInput(
         400,
       );
     }
+    const preserveMediaPreviews =
+      opts.preserveMediaPreviews === true ||
+      opts.formatOverride === "docx_multimedia";
     const docxOut = await parseDocxBuffer(input.fileBytes, {
       answerRule: ruleUsed,
       defaultChapter: opts.defaultChapter,
       defaultTags: opts.defaultTags,
-      stripUnuploadedMedia: true,
+      preservePreviewDataUrls: preserveMediaPreviews,
+      stripUnuploadedMedia: !preserveMediaPreviews,
     });
-    finalFormat = "docx_ooxml";
+    finalFormat =
+      docxOut.extractedMedia.length > 0 && preserveMediaPreviews
+        ? "docx_multimedia"
+        : "docx_ooxml";
     rawQuestions = docxOut.questions;
     parserIssues = docxOut.issues;
     extractedMedia = docxOut.extractedMedia.map((m) => ({
@@ -131,7 +147,29 @@ export async function parseImportInput(
       ext: m.ext,
       byteLength: m.byteLength,
       previewPath: m.previewPath,
+      dataUrl: m.dataUrl,
     }));
+  } else if (detectedFormat === "pdf_text" || ext === ".pdf") {
+    if (!input.fileBytes) {
+      throw new ImportSecurityError(
+        "INVALID_PDF",
+        "PDF format requires an uploaded .pdf binary file.",
+        400,
+      );
+    }
+    const pdfOut = await parsePdfBuffer(input.fileBytes, {
+      answerRule: ruleUsed,
+      defaultChapter: opts.defaultChapter,
+      defaultTags: opts.defaultTags,
+      pageRange: opts.pdfPageRange,
+      twoColumn: opts.pdfTwoColumn,
+    });
+    finalFormat = "pdf_text";
+    rawQuestions = pdfOut.questions;
+    parserIssues = pdfOut.issues;
+    isScannedPdf = pdfOut.isScannedPdf;
+    pdfPageCount = pdfOut.pageCount;
+    pdfExtractedPages = pdfOut.extractedPages;
   } else if (
     detectedFormat === "xlsx_wayground" ||
     detectedFormat === "xlsx_generic" ||
@@ -261,6 +299,9 @@ export async function parseImportInput(
     detectedColumns,
     sampleRows,
     suggestedMapping,
+    isScannedPdf,
+    pdfPageCount,
+    pdfExtractedPages,
     questions: validated.questions,
     issues: validated.issues,
     summary: validated.summary,
@@ -309,6 +350,7 @@ export {
   MAX_UNCOMPRESSED_BYTES,
   MAX_ZIP_ENTRIES,
   MAX_COMPRESSION_RATIO,
+  hasPdfMagicBytes,
   inspectAndLoadZip,
   inspectRasterImageBytes,
   readSafeZipEntryBytes,
@@ -318,6 +360,14 @@ export {
   validateFileSize,
 } from "./zip-guard";
 export { detectImportFormat, isWaygroundHeaders } from "./detector";
+export {
+  parsePdfBuffer,
+  parsePdfPageRange,
+  MAX_PDF_PAGES,
+  MAX_PDF_TEXT_CHARS,
+  type PdfParseOutput,
+  type PdfParserConfig,
+} from "./pdf-parser";
 export { parseEduQuizText } from "./eduquiz-parser";
 export { parseWordAnswerKeyText } from "./word-answer-key-parser";
 export { parseDocxBuffer } from "./docx-ooxml-parser";

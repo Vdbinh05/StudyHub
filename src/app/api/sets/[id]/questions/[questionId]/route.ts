@@ -79,7 +79,7 @@ export async function PATCH(
 
     const { data: existing, error: existingErr } = await supabase
       .from("questions")
-      .select("id, question_type, back_text")
+      .select("id, question_type, back_text, back_image_url, type_payload")
       .eq("id", qId)
       .eq("study_set_id", setId)
       .maybeSingle();
@@ -89,12 +89,25 @@ export async function PATCH(
       throw new AppError("NOT_FOUND", "Question not found.", 404);
     }
 
-    // SH-025: Validate effective merged question_type + options/back_text integrity!
+    // SH-025 + V3: Validate effective merged question_type + options/back_text integrity!
     const effectiveType = input.question_type ?? existing.question_type;
+    const effectivePayload = (input.type_payload !== undefined
+      ? input.type_payload
+      : existing.type_payload) as Record<string, unknown> | null;
+    const subKind =
+      effectivePayload && typeof effectivePayload.sub_answer_kind === "string"
+        ? effectivePayload.sub_answer_kind
+        : undefined;
+
     const isChoiceType =
       effectiveType === "single_choice" ||
       effectiveType === "multiple_choice" ||
-      effectiveType === "true_false";
+      effectiveType === "true_false" ||
+      effectiveType === "image_choice" ||
+      ((effectiveType === "listening" || effectiveType === "reading_passage") &&
+        (subKind === "single_choice" ||
+          subKind === "multiple_choice" ||
+          subKind === "true_false"));
 
     if (isChoiceType && input.options !== undefined) {
       if (input.options.length < 2) {
@@ -112,10 +125,14 @@ export async function PATCH(
           400,
         );
       }
-      if (
-        (effectiveType === "single_choice" || effectiveType === "true_false") &&
-        correctCount > 1
-      ) {
+      const isStrictSingle =
+        effectiveType === "single_choice" ||
+        effectiveType === "true_false" ||
+        (effectiveType === "image_choice" &&
+          effectivePayload?.selection_mode !== "multiple") ||
+        ((effectiveType === "listening" || effectiveType === "reading_passage") &&
+          (subKind === "single_choice" || subKind === "true_false"));
+      if (isStrictSingle && correctCount > 1) {
         throw new AppError(
           "VALIDATION_ERROR",
           "Single-choice and true/false questions must have exactly 1 correct option.",
@@ -127,10 +144,14 @@ export async function PATCH(
     if (effectiveType === "flashcard") {
       const effectiveBack =
         input.back_text !== undefined ? input.back_text : existing.back_text;
-      if (!effectiveBack || effectiveBack.trim().length === 0) {
+      const effectiveBackImg =
+        input.back_image_url !== undefined
+          ? input.back_image_url
+          : existing.back_image_url;
+      if ((!effectiveBack || effectiveBack.trim().length === 0) && !effectiveBackImg) {
         throw new AppError(
           "VALIDATION_ERROR",
-          "Flashcards require non-empty back_text.",
+          "Flashcards require non-empty back_text or back_image_url.",
           400,
         );
       }
@@ -141,11 +162,21 @@ export async function PATCH(
     if (input.position !== undefined) updatePayload.position = input.position;
     if (input.chapter !== undefined) updatePayload.chapter = input.chapter;
     if (input.prompt !== undefined) updatePayload.prompt = input.prompt;
+    if (input.prompt_rich !== undefined) updatePayload.prompt_rich = (input.prompt_rich ?? null) as Json | null;
     if (input.prompt_image_url !== undefined) updatePayload.prompt_image_url = input.prompt_image_url;
     if (input.back_text !== undefined) updatePayload.back_text = input.back_text;
+    if (input.back_rich !== undefined) updatePayload.back_rich = (input.back_rich ?? null) as Json | null;
     if (input.back_image_url !== undefined) updatePayload.back_image_url = input.back_image_url;
     if (input.explanation !== undefined) updatePayload.explanation = input.explanation;
+    if (input.explanation_rich !== undefined) updatePayload.explanation_rich = (input.explanation_rich ?? null) as Json | null;
     if (input.hint !== undefined) updatePayload.hint = input.hint;
+    if (input.hint_rich !== undefined) updatePayload.hint_rich = (input.hint_rich ?? null) as Json | null;
+    if (input.audio_media_id !== undefined) updatePayload.audio_media_id = input.audio_media_id;
+    if (input.audio_url !== undefined) updatePayload.audio_url = input.audio_url;
+    if (input.audio_transcript !== undefined) updatePayload.audio_transcript = input.audio_transcript;
+    if (input.passage_id !== undefined) updatePayload.passage_id = input.passage_id;
+    if (input.diagram_id !== undefined) updatePayload.diagram_id = input.diagram_id;
+    if (input.type_payload !== undefined) updatePayload.type_payload = (input.type_payload ?? null) as Json | null;
     if (input.difficulty !== undefined) updatePayload.difficulty = input.difficulty;
     if (input.source_metadata !== undefined) updatePayload.source_metadata = input.source_metadata as Json;
 
@@ -174,7 +205,10 @@ export async function PATCH(
         position: number;
         label: string;
         content: string;
+        content_rich: Json | null;
         image_url: string | null;
+        media_id: string | null;
+        image_alt: string | null;
         is_correct: boolean;
       }> = [];
       const toInsert: Array<{
@@ -183,7 +217,10 @@ export async function PATCH(
         position: number;
         label: string;
         content: string;
+        content_rich: Json | null;
         image_url: string | null;
+        media_id: string | null;
+        image_alt: string | null;
         is_correct: boolean;
       }> = [];
 
@@ -196,7 +233,10 @@ export async function PATCH(
             position: opt.position ?? idx,
             label: opt.label,
             content: opt.content,
+            content_rich: (opt.content_rich ?? null) as Json | null,
             image_url: opt.image_url ?? null,
+            media_id: opt.media_id ?? null,
+            image_alt: opt.image_alt ?? null,
             is_correct: opt.is_correct,
           });
         } else {
@@ -206,7 +246,10 @@ export async function PATCH(
             position: opt.position ?? idx,
             label: opt.label,
             content: opt.content,
+            content_rich: (opt.content_rich ?? null) as Json | null,
             image_url: opt.image_url ?? null,
+            media_id: opt.media_id ?? null,
+            image_alt: opt.image_alt ?? null,
             is_correct: opt.is_correct,
           });
         }
@@ -222,7 +265,10 @@ export async function PATCH(
               position: u.position,
               label: u.label,
               content: u.content,
+              content_rich: u.content_rich,
               image_url: u.image_url,
+              media_id: u.media_id,
+              image_alt: u.image_alt,
               is_correct: u.is_correct,
             })
             .eq("id", u.id)
@@ -315,6 +361,45 @@ export async function PATCH(
       }
     }
 
+    if (input.media_attachments !== undefined) {
+      const { error: delMedErr } = await supabase
+        .from("content_media_relations")
+        .delete()
+        .eq("entity_type", "question")
+        .eq("entity_id", qId);
+      if (delMedErr) throw delMedErr;
+
+      if (input.media_attachments.length > 0) {
+        const { error: insMedErr } = await supabase
+          .from("content_media_relations")
+          .upsert(
+            input.media_attachments.map((att, idx) => ({
+              media_id: att.media_id,
+              entity_type: "question" as const,
+              entity_id: qId,
+              role: att.role,
+              sort_order: att.sort_order ?? idx,
+              alt_text: att.alt_text ?? null,
+              caption: att.caption ?? null,
+            })),
+            { onConflict: "media_id,entity_type,entity_id,role" },
+          );
+        if (insMedErr) throw insMedErr;
+      }
+    }
+
+    const { data: setVer } = await supabase
+      .from("study_sets")
+      .select("content_version")
+      .eq("id", setId)
+      .maybeSingle();
+    if (setVer) {
+      await supabase
+        .from("study_sets")
+        .update({ content_version: (setVer.content_version ?? 1) + 1 })
+        .eq("id", setId);
+    }
+
     const [{ data: updated, error: fetchErr }, relations] = await Promise.all([
       supabase.from("questions").select("*").eq("id", qId).single(),
       fetchQuestionRelationsChunked(supabase, [qId], setId),
@@ -356,6 +441,18 @@ export async function DELETE(
     if (error) throw error;
     if (!data) {
       throw new AppError("NOT_FOUND", "Question not found.", 404);
+    }
+
+    const { data: setVer } = await supabase
+      .from("study_sets")
+      .select("content_version")
+      .eq("id", setId)
+      .maybeSingle();
+    if (setVer) {
+      await supabase
+        .from("study_sets")
+        .update({ content_version: (setVer.content_version ?? 1) + 1 })
+        .eq("id", setId);
     }
 
     return apiSuccess({ deleted: true, id: qId });

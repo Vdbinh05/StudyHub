@@ -127,3 +127,19 @@ Used on `/flashcards`, `/learn`, `/practice`, `/write`, `/match`, `/test`, and a
 - **Dialog Focus Management:** All modals/sheets use Radix UI primitives (`Dialog`, `AlertDialog`, `Sheet`) providing automatic focus trap, `Esc` dismissal, and focus restoration.
 - **Screen Reader Landmarks & Live Regions:** Proper `<header>`, `<nav>`, `<main>`, `<aside>`, `aria-label` on icon-only buttons, `aria-live="polite"` for grading feedback and exam timer warnings.
 - **Form Errors:** Every input binds `aria-invalid` and `aria-describedby` to inline Zod validation messages.
+
+---
+
+## 7. StudyHub V2.0–V3.0 UI Patterns & Accessibility Extensions
+
+1. **Wrap-Safe Headers & Responsive Zero Overflow (`PageHeader`, `V3-UX-01`):** `PageHeader` uses wrap-safe flex rows (`min-w-0 basis-72 flex-1`) with an explicit `stackActions` option (used on `/sets/[id]`) so long titles and multi-button action bars never collapse or clip on desktop (`1440px`), tablet (`768px`), or mobile (`360px`/`390px`).
+2. **Academic Calm Media, KaTeX & Interactive Diagrams:**
+   - `ImageLightbox` and `DiagramEditor`/`DiagramStudyPlayer` implement 2D pan & zoom using Baseline **Pointer Events + CSS `touch-action: none`**, paired with explicit `+`/`-`/`0`/`Esc` buttons and a full keyboard hotspot selector for non-pointer accessibility.
+   - `<audio>` controls use lazy loading (`preload="none"` / `"metadata"`), speed controls (`0.75×`–`1.5×`), and post-submit transcript toggles in Listening exams.
+   - KaTeX math (`trust: false`) renders crisply inside both Light and Dark mode tokens across Question Editor Preview, Study Set Hub, Practice, Learn, and Live Exam screens.
+3. **Confidence Calibration & Metacognitive Visuals:** Confidence chips (`Chắc chắn`, `Phân vân`, `Đoán mò`) pair distinct semantic borders/icons (`lucide-react` exclusively — zero emojis, zero `<Sparkles />`) with clear text labels and never visually imply score penalties during exams.
+4. **Global Search (`Ctrl+K`) & Centralized Keyboard Shortcuts (`?`):**
+   - `GlobalSearchDialog` uses safe React `<mark>` highlighting (zero `dangerouslySetInnerHTML`), arrow/Enter/Esc navigation across 8 entity tabs, and enforces the **Hard Exam Guard** (zero dialogs inside active `/exams/[attemptId]` or `/sets/[id]/test`).
+   - `ShortcutHelpModal` (`?`) documents all 8 study/app contexts and explicitly notes Vietnamese Telex/VNI IME safety (`isComposing`, `keyCode === 229`, 50ms `compositionend` guard).
+5. **Offline PWA Indicators:** Top bar & `/offline` / `/settings?tab=offline` show clear online/offline status badges, IndexedDB storage usage meters, download progress, and non-disruptive SW update banners (never interrupting an active exam).
+6. **Verified Mobile Ergonomics:** All 6 responsive Playwright viewports (`360×800` through `1920×1080`) and all 16 live mobile `390×844`/`360×800` student route checks pass with **`0px` horizontal overflow** and `>=44px` touch targets.

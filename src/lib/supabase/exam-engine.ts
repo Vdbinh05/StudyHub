@@ -10,6 +10,7 @@ import type {
   ExamPreviewWarning,
   ExamSnapshotQuestion,
   ExamSourceInput,
+  QuestionTypePayload,
   SelectionPolicy,
 } from "@/types/domain";
 import { MAX_EXAM_QUESTIONS } from "@/lib/validation/exams";
@@ -993,30 +994,206 @@ export async function computeExamPreview(params: {
 }
 
 /**
- * Defense-in-depth strip of answer keys/explanations on pre-submit payloads.
+ * Defense-in-depth mirror of PostgreSQL `sanitize_pre_submit_type_payload()`.
+ * Strips every answer-revealing field from V3 structured question payloads while in_progress.
+ */
+export function sanitizePreSubmitTypePayload(
+  questionType: string,
+  rawPayload: QuestionTypePayload | Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!rawPayload || typeof rawPayload !== "object") return null;
+  const payload = rawPayload as Record<string, unknown>;
+
+  switch (questionType) {
+    case "fill_in_blank": {
+      const blanks = Array.isArray(payload.blanks) ? payload.blanks : [];
+      return {
+        type: "fill_in_blank",
+        template_text: payload.template_text ?? null,
+        require_all_blanks: payload.require_all_blanks ?? true,
+        blanks: blanks.map((b) => {
+          const rec = (b && typeof b === "object" ? b : {}) as Record<string, unknown>;
+          return {
+            blank_id: rec.blank_id ?? "",
+            hint: rec.hint ?? null,
+          };
+        }),
+      };
+    }
+    case "numerical":
+      return {
+        type: "numerical",
+        unit_required: Boolean(payload.unit_required),
+        significant_figures: payload.significant_figures ?? null,
+      };
+    case "ordering": {
+      const rawItems = Array.isArray(payload.items) ? payload.items : [];
+      const items = rawItems
+        .map((it) => {
+          const rec = (it && typeof it === "object" ? it : {}) as Record<string, unknown>;
+          return {
+            id: String(rec.id ?? ""),
+            text: String(rec.text ?? ""),
+            rich_text: rec.rich_text ?? null,
+            image_url: rec.image_url ?? null,
+            media_id: rec.media_id ?? null,
+          };
+        })
+        .sort((a, b) => a.id.localeCompare(b.id));
+      return {
+        type: "ordering",
+        allow_partial_credit: Boolean(payload.allow_partial_credit),
+        items,
+      };
+    }
+    case "matching": {
+      if (Array.isArray(payload.left_items) && Array.isArray(payload.right_items)) {
+        return {
+          type: "matching",
+          left_items: payload.left_items,
+          right_items: payload.right_items,
+        };
+      }
+      const pairs = Array.isArray(payload.pairs) ? payload.pairs : [];
+      const distractors = Array.isArray(payload.distractors) ? payload.distractors : [];
+      const left_items = pairs.map((p) => {
+        const rec = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+        return {
+          id: String(rec.id ?? ""),
+          left_text: String(rec.left_text ?? ""),
+          left_rich_text: rec.left_rich_text ?? null,
+          left_image_url: rec.left_image_url ?? null,
+        };
+      });
+      const right_items = [
+        ...pairs.map((p) => {
+          const rec = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+          return {
+            right_id: String(rec.right_id ?? ""),
+            right_text: String(rec.right_text ?? ""),
+            right_rich_text: rec.right_rich_text ?? null,
+            right_image_url: rec.right_image_url ?? null,
+          };
+        }),
+        ...distractors.map((d) => {
+          const rec = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+          return {
+            right_id: String(rec.right_id ?? ""),
+            right_text: String(rec.right_text ?? ""),
+            right_rich_text: null,
+            right_image_url: rec.right_image_url ?? null,
+          };
+        }),
+      ].sort((a, b) => a.right_id.localeCompare(b.right_id));
+      return { type: "matching", left_items, right_items };
+    }
+    case "image_hotspot": {
+      const targets = Array.isArray(payload.target_hotspots)
+        ? payload.target_hotspots
+        : Array.isArray(payload.target_labels)
+          ? payload.target_labels
+          : [];
+      return {
+        type: "image_hotspot",
+        diagram_id: payload.diagram_id ?? null,
+        image_url: payload.image_url ?? null,
+        image_media_id: payload.image_media_id ?? null,
+        require_all_targets: Boolean(payload.require_all_targets),
+        target_labels: targets.map((t) => {
+          const rec = (t && typeof t === "object" ? t : {}) as Record<string, unknown>;
+          return { id: String(rec.id ?? ""), label: String(rec.label ?? "") };
+        }),
+      };
+    }
+    case "listening": {
+      const hideTranscript = payload.show_transcript_after_submit !== false;
+      return {
+        type: "listening",
+        audio_media_id: payload.audio_media_id ?? null,
+        audio_url: payload.audio_url ?? null,
+        show_transcript_after_submit: hideTranscript,
+        max_replays: payload.max_replays ?? null,
+        language: payload.language ?? null,
+        sub_answer_kind: payload.sub_answer_kind ?? "single_choice",
+        transcript: hideTranscript ? null : (payload.transcript ?? null),
+      };
+    }
+    case "reading_passage":
+      return {
+        type: "reading_passage",
+        passage_id: payload.passage_id ?? null,
+        passage_title: payload.passage_title ?? null,
+        passage_text: payload.passage_text ?? null,
+        passage_rich: payload.passage_rich ?? null,
+        sub_answer_kind: payload.sub_answer_kind ?? "single_choice",
+      };
+    case "image_choice":
+      return {
+        type: "image_choice",
+        selection_mode: payload.selection_mode ?? "single",
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Defense-in-depth strip of answer keys/explanations on pre-submit payloads across all 12 V3 question types.
  */
 export function stripPreSubmitQuestions(
   questions: ExamSnapshotQuestion[],
 ): ExamSnapshotQuestion[] {
-  return questions.map((q) => ({
-    id: q.id,
-    attempt_id: q.attempt_id,
-    question_id: q.question_id,
-    position: q.position,
-    question_type: q.question_type,
-    source_study_set_id: q.source_study_set_id,
-    source_subject_title: q.source_subject_title,
-    chapter_snapshot: q.chapter_snapshot,
-    tags_snapshot: q.tags_snapshot,
-    prompt_snapshot: q.prompt_snapshot,
-    prompt_image_url_snapshot: q.prompt_image_url_snapshot,
-    options_snapshot: (q.options_snapshot ?? []).map((opt) => ({
-      id: opt.id,
-      label: opt.label,
-      content: opt.content,
-      image_url: opt.image_url ?? null,
-      position: opt.position,
-    })),
-    created_at: q.created_at,
-  }));
+  return questions.map((q) => {
+    const base: ExamSnapshotQuestion = {
+      id: q.id,
+      attempt_id: q.attempt_id,
+      question_id: q.question_id,
+      position: q.position,
+      question_type: q.question_type,
+      source_study_set_id: q.source_study_set_id,
+      source_subject_title: q.source_subject_title,
+      chapter_snapshot: q.chapter_snapshot,
+      tags_snapshot: q.tags_snapshot,
+      prompt_snapshot: q.prompt_snapshot,
+      prompt_image_url_snapshot: q.prompt_image_url_snapshot,
+      options_snapshot: (q.options_snapshot ?? []).map((opt) => ({
+        id: opt.id,
+        label: opt.label,
+        content: opt.content,
+        image_url: opt.image_url ?? null,
+        position: opt.position,
+        ...(opt.content_rich !== undefined ? { content_rich: opt.content_rich } : {}),
+        ...(opt.media_id !== undefined ? { media_id: opt.media_id } : {}),
+        ...(opt.image_alt !== undefined ? { image_alt: opt.image_alt } : {}),
+      })),
+      created_at: q.created_at,
+    };
+
+    if (q.prompt_rich_snapshot !== undefined) {
+      base.prompt_rich_snapshot = q.prompt_rich_snapshot;
+    }
+    if (q.audio_media_id_snapshot !== undefined) {
+      base.audio_media_id_snapshot = q.audio_media_id_snapshot;
+    }
+    if (q.audio_url_snapshot !== undefined) {
+      base.audio_url_snapshot = q.audio_url_snapshot;
+    }
+    if (q.passage_snapshot !== undefined) {
+      base.passage_snapshot = q.passage_snapshot;
+    }
+    if (q.diagram_snapshot !== undefined) {
+      base.diagram_snapshot = q.diagram_snapshot;
+    }
+    if (q.type_payload_snapshot !== undefined) {
+      base.type_payload_snapshot = sanitizePreSubmitTypePayload(
+        q.question_type,
+        q.type_payload_snapshot,
+      ) as QuestionTypePayload | null;
+    }
+    if (q.media_snapshot !== undefined) {
+      base.media_snapshot = q.media_snapshot;
+    }
+
+    return base;
+  });
 }

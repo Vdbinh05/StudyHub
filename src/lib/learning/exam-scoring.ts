@@ -4,6 +4,7 @@ import type {
   ExamSnapshotOption,
   ExamSnapshotQuestion,
   ExamTagSnapshot,
+  RichTextDoc,
 } from "@/types/domain";
 import { gradeChoiceSelection } from "./shuffle";
 import { normalizeShortAnswerSqlCompatible } from "./write-grader";
@@ -433,4 +434,86 @@ export function sanitizeExamQuestionsForClient(
 
     return base;
   });
+}
+
+export interface NormalizedMatchingLeftItem {
+  id: string;
+  left_text: string;
+  left_rich_text?: RichTextDoc | null;
+  left_image_url?: string | null;
+}
+
+export interface NormalizedMatchingRightItem {
+  right_id: string;
+  right_text: string;
+  right_rich_text?: RichTextDoc | null;
+  right_image_url?: string | null;
+}
+
+/**
+ * Normalizes both pre-submit anti-leak matching payloads (`{ left_items, right_items }`)
+ * AND post-submit / stored DB payloads (`{ pairs, distractors }`) into safe, non-throwing arrays.
+ * Fixes `V3-UX-05`: `sanitize_pre_submit_type_payload` strips `pairs` pre-submit so answer pairs never leak!
+ */
+export function normalizeMatchingExamPayload(payload: unknown): {
+  leftItems: NormalizedMatchingLeftItem[];
+  rightItems: NormalizedMatchingRightItem[];
+} {
+  if (!payload || typeof payload !== "object") {
+    return { leftItems: [], rightItems: [] };
+  }
+  const rec = payload as Record<string, unknown>;
+
+  if (Array.isArray(rec.left_items) && Array.isArray(rec.right_items)) {
+    const leftItems: NormalizedMatchingLeftItem[] = rec.left_items
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item, idx) => ({
+        id: String(item.id ?? `left-${idx}`),
+        left_text: String(item.left_text ?? ""),
+        left_rich_text: (item.left_rich_text as RichTextDoc | null | undefined) ?? null,
+        left_image_url: typeof item.left_image_url === "string" ? item.left_image_url : null,
+      }));
+    const rightItems: NormalizedMatchingRightItem[] = rec.right_items
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item, idx) => ({
+        right_id: String(item.right_id ?? item.id ?? `right-${idx}`),
+        right_text: String(item.right_text ?? ""),
+        right_rich_text: (item.right_rich_text as RichTextDoc | null | undefined) ?? null,
+        right_image_url: typeof item.right_image_url === "string" ? item.right_image_url : null,
+      }));
+    return { leftItems, rightItems };
+  }
+
+  const pairs = Array.isArray(rec.pairs) ? rec.pairs : [];
+  const distractors = Array.isArray(rec.distractors) ? rec.distractors : [];
+
+  const leftItems: NormalizedMatchingLeftItem[] = pairs
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item, idx) => ({
+      id: String(item.id ?? `left-${idx}`),
+      left_text: String(item.left_text ?? ""),
+      left_rich_text: (item.left_rich_text as RichTextDoc | null | undefined) ?? null,
+      left_image_url: typeof item.left_image_url === "string" ? item.left_image_url : null,
+    }));
+
+  const rightItems: NormalizedMatchingRightItem[] = [
+    ...pairs
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item, idx) => ({
+        right_id: String(item.right_id ?? `right-${idx}`),
+        right_text: String(item.right_text ?? ""),
+        right_rich_text: (item.right_rich_text as RichTextDoc | null | undefined) ?? null,
+        right_image_url: typeof item.right_image_url === "string" ? item.right_image_url : null,
+      })),
+    ...distractors
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item, idx) => ({
+        right_id: String(item.right_id ?? `dist-${idx}`),
+        right_text: String(item.right_text ?? ""),
+        right_rich_text: (item.right_rich_text as RichTextDoc | null | undefined) ?? null,
+        right_image_url: typeof item.right_image_url === "string" ? item.right_image_url : null,
+      })),
+  ];
+
+  return { leftItems, rightItems };
 }

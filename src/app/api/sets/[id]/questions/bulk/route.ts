@@ -59,11 +59,21 @@ export async function POST(
       position: q.position ?? basePos + idx,
       chapter: q.chapter ?? null,
       prompt: q.prompt,
+      prompt_rich: (q.prompt_rich ?? null) as Json | null,
       prompt_image_url: q.prompt_image_url ?? null,
       back_text: q.back_text ?? null,
+      back_rich: (q.back_rich ?? null) as Json | null,
       back_image_url: q.back_image_url ?? null,
       explanation: q.explanation ?? null,
+      explanation_rich: (q.explanation_rich ?? null) as Json | null,
       hint: q.hint ?? null,
+      hint_rich: (q.hint_rich ?? null) as Json | null,
+      audio_media_id: q.audio_media_id ?? null,
+      audio_url: q.audio_url ?? null,
+      audio_transcript: q.audio_transcript ?? null,
+      passage_id: q.passage_id ?? null,
+      diagram_id: q.diagram_id ?? null,
+      type_payload: (q.type_payload ?? null) as Json | null,
       difficulty: q.difficulty,
       source_metadata: (q.source_metadata ?? {}) as Json,
     }));
@@ -79,7 +89,10 @@ export async function POST(
       position: number;
       label: string;
       content: string;
+      content_rich: Json | null;
       image_url: string | null;
+      media_id: string | null;
+      image_alt: string | null;
       is_correct: boolean;
     }> = [];
 
@@ -106,7 +119,10 @@ export async function POST(
           position: opt.position ?? oIdx,
           label: opt.label,
           content: opt.content,
+          content_rich: (opt.content_rich ?? null) as Json | null,
           image_url: opt.image_url ?? null,
+          media_id: opt.media_id ?? null,
+          image_alt: opt.image_alt ?? null,
           is_correct: opt.is_correct,
         });
       }
@@ -175,6 +191,18 @@ export async function POST(
           .upsert(batch, { onConflict: "question_id,tag_id", ignoreDuplicates: true });
         if (qtErr) throw qtErr;
       }
+    }
+
+    const { data: setVer } = await supabase
+      .from("study_sets")
+      .select("content_version")
+      .eq("id", setId)
+      .maybeSingle();
+    if (setVer) {
+      await supabase
+        .from("study_sets")
+        .update({ content_version: (setVer.content_version ?? 1) + 1 })
+        .eq("id", setId);
     }
 
     return apiSuccess(

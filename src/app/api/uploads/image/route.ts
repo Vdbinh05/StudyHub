@@ -3,16 +3,38 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
-import { MAX_IMAGE_FILE_BYTES, validateImageUpload } from "@/lib/security/upload";
+import {
+  computeSha256Hex,
+  MAX_IMAGE_FILE_BYTES,
+  validateImageUpload,
+} from "@/lib/security/upload";
 import { uuidSchema } from "@/lib/validation/common";
 
-const ALLOWED_PURPOSES = new Set(["avatar", "question", "option"]);
+const ALLOWED_PURPOSES = new Set([
+  "avatar",
+  "question",
+  "option",
+  "diagram",
+  "explanation",
+  "passage",
+  "attachment",
+]);
 const SIGNED_URL_TTL_SECONDS = 3600;
 
+function parseOptionalPositiveInt(
+  raw: FormDataEntryValue | null,
+  max: number,
+): number | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > max) return null;
+  return n;
+}
+
 /**
- * Server-side validated raster image upload into private `study-media` bucket (SH-019 / SEC-011).
- * Validates PNG/JPEG/WebP/GIF magic bytes, blocks SVG, enforces 5 MB cap, uses canonical
- * RLS-compliant object paths, and returns both canonical `path` and short-lived `signedUrl`.
+ * Server-side validated raster image upload into private `study-media` bucket (SH-019 / V3.0).
+ * Validates PNG/JPEG/WebP/GIF magic bytes, blocks SVG, enforces 5 MB cap, registers `media_assets`
+ * with SHA-256 hash, and returns canonical `id`/`mediaId`, `path`, `proxyUrl`, and `signedUrl`.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
@@ -29,11 +51,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       throw new AppError("VALIDATION_ERROR", "Image file is required.", 400);
     }
 
-    const rawPurpose = String(formData.get("purpose") ?? "question").trim().toLowerCase();
+    const rawPurpose = String(formData.get("purpose") ?? "question")
+      .trim()
+      .toLowerCase();
     if (!ALLOWED_PURPOSES.has(rawPurpose)) {
       throw new AppError(
         "VALIDATION_ERROR",
-        'Invalid purpose. Expected "avatar", "question", or "option".',
+        'Invalid purpose. Expected "avatar", "question", "option", "diagram", "explanation", "passage", or "attachment".',
         400,
       );
     }
@@ -65,20 +89,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     let storagePath: string;
+    let studySetId: string | null = null;
     if (rawPurpose === "avatar") {
       storagePath = `avatars/${user.id}/${randomUUID()}.${validation.extension}`;
     } else {
       const rawSetId = String(formData.get("studySetId") ?? "").trim();
-      const studySetId = uuidSchema.parse(rawSetId);
+      studySetId = uuidSchema.parse(rawSetId);
       const access = await requireStudySetAccess(
         supabase,
         studySetId,
         user.id,
         "edit",
       );
-      // Canonical owner-scoped path matching Storage RLS `can_access_study_media_path`
       storagePath = `${access.studySet.owner_id}/${studySetId}/${randomUUID()}.${validation.extension}`;
     }
+
+    const sha256 = computeSha256Hex(bytes);
+    const width = parseOptionalPositiveInt(formData.get("width"), 20_000);
+    const height = parseOptionalPositiveInt(formData.get("height"), 20_000);
 
     const { error: uploadErr } = await supabase.storage
       .from("study-media")
@@ -94,6 +122,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         "Failed to upload image to storage.",
         500,
       );
+    }
+
+    const { data: assetRow, error: assetErr } = await supabase
+      .from("media_assets")
+      .insert({
+        owner_id: user.id,
+        study_set_id: studySetId,
+        kind: "image",
+        storage_bucket: "study-media",
+        storage_path: storagePath,
+        mime_type: validation.detectedMime,
+        file_name: validation.sanitizedFileName,
+        size_bytes: validation.sizeBytes,
+        sha256_hash: sha256,
+        width,
+        height,
+      })
+      .select("id")
+      .single();
+
+    if (assetErr) {
+      await supabase.storage.from("study-media").remove([storagePath]).catch(() => {});
+      throw assetErr;
     }
 
     const { data: signedData, error: signErr } = await supabase.storage
@@ -112,12 +163,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     return apiSuccess(
       {
+        id: assetRow.id,
+        mediaId: assetRow.id,
+        kind: "image" as const,
         path: storagePath,
         proxyUrl,
         signedUrl: signedData.signedUrl,
         expiresIn: SIGNED_URL_TTL_SECONDS,
         mimeType: validation.detectedMime,
         size: validation.sizeBytes,
+        sha256,
+        width,
+        height,
       },
       undefined,
       { status: 201 },

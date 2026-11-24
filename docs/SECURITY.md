@@ -111,3 +111,35 @@ Sliding-window in-memory / Edge-safe rate limiter keyed by `user.id` (or hashed 
 | `POST /api/friends` (friend requests) | 20 requests | 15 minutes |
 | `POST /api/exams` (exam start) | 30 requests | 15 minutes |
 | `POST /api/sets/[id]/clone` | 15 requests | 15 minutes |
+
+---
+
+## 7. StudyHub V2.0–V3.0 Security Hardening Extensions (Live-Verified on PG 17.12)
+
+StudyHub V2.0/V2.1 (`0005`–`0012`) and V3.0 (`0013`–`0016`) extend the defense-in-depth baseline across **36 RLS-enabled tables** and **70 API Route Handlers**:
+
+1. **Modern Key & Secret Isolation (`src/lib/supabase/env.ts`, `admin.ts`):** Supports modern `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (`sb_publishable_...`) and server-only `SUPABASE_SECRET_KEY` (`sb_secret_...`) with legacy fallback; `.next/static/` verified `exactRealSecretHits = 0` and `0 B` server parser/PDF libs leaked.
+2. **12-Type Pre-Submit Exam Anti-Leak & Column Revocation (`0013`, `0015`, `0016`):**
+   - Direct `authenticated` PostgREST `SELECT` on `type_payload_snapshot`, `explanation_rich_snapshot`, `correct_option_ids`, `accepted_answers_snapshot`, and `explanation_snapshot` fails with PostgreSQL **`42501`**.
+   - `sanitize_pre_submit_type_payload()` strips `fill_in_blank` accepted answers, `numerical` target/tolerance/unit keys, `ordering` `correct_position`, `matching` `pairs` (exposing unlinked `left_items` + `right_items`), `image_hotspot` `target_hotspots`/`geometry`, and `listening` `transcript` until `status IN ('submitted', 'expired')`.
+   - `POST /api/export/pdf` reads attempt details strictly through `SECURITY DEFINER` `rpcGetExamAttemptDetail()`, blocks non-`question_paper` modes on BOTH `in_progress` and `discarded` attempts (`403`), enforces `allow_clone = false` (`403`), sets `Cache-Control: private, no-store`, and uses RFC 5987 `Content-Disposition` (`filename*=UTF-8''...`).
+3. **Rich Text XSS & KaTeX Safety (`src/lib/richtext/sanitize.ts`, `katex.ts`):**
+   - All TipTap JSON AST v1 payloads pass strict node/mark/URL/depth (`<=12`)/node-count (`<=1500`) sanitization on BOTH `PUT /api/notes` AND `POST /api/sync/events` (`note_upsert` `V3-SEC-04`), stripping `<script>`, `<iframe>`, `javascript:`, `data:text/html`, and `data:image/svg+xml`.
+   - `dangerouslySetInnerHTML` is permitted **solely** for `renderSafeKatexHtml()` (`trust: false`, `throwOnError: false`, explicit `<script|javascript:` guard).
+4. **Private Multimedia, Audio Uploads & Historical Exam Preservation (`0013`, `study-media`):**
+   - `study-media` stays strictly `public = false` (`10 MB` cap, 4 raster + 9 browser-compatible audio MIMEs, zero SVG/HTML). `POST /api/uploads/image` (`<= 5 MB`) and `POST /api/uploads/audio` (`<= 10 MB`) enforce magic-byte verification (`415` on spoofed SVG/HTML) and SHA-256 owner deduplication.
+   - `content_media_relations` (`ON DELETE RESTRICT`) blocks deleting exam-referenced `media_assets` (`409` / `23503`); `DELETE /api/media/[id]` restricts deletion to uploader/set-owner and checks `.select("id").maybeSingle()` BEFORE `supabase.storage.remove()` (`V3-SEC-02`); `POST /api/media` verifies caller edit authorization on target `(entity_type, entity_id)` (`V3-SEC-03`).
+   - `ALTER POLICY "study_media_select"` grants historical exam owners read access to snapshot-referenced media even after source study-set share revocation, while unrelated users remain denied (`403`/`404`).
+   - *(Operational note `V3-SEC-P3-01`: Next.js 16 default `10 MB` `proxyClientMaxBodySize` rejects `>10 MB` audio fail-closed as `400` with 0 bytes stored; `validateAudioUpload()` returns exact `413`.)*
+5. **PDF Parser Sandboxing (`src/lib/import/pdf-parser.ts`):** `pdfjs.getDocument(...)` enforces `isEvalSupported: false`, `disableAutoFetch: true`, `useSystemFonts: false`, and `disableFontFace: true` (`V3-SEC-05`); rejects non-PDF, corrupted, encrypted, and `>15 MB` payloads with zero JS execution.
+6. **Private Notes, Reports, Global Search & Offline Sync RLS (`0014`–`0016`):**
+   - `user_question_notes`, `learning_session_checkpoints`, `learning_confidence_events`, and `learning_sync_events` enforce strict `user_id = (SELECT auth.uid())` isolation across PostgREST, REST APIs, and `global_library_search()` (`0` bidirectional note leakage).
+   - `question_reports` permits viewer submit (`open`), prevents viewer self-resolution (`403`), allows owner/editor review & resolve, and restricts `DELETE` to reporter/set-owner.
+   - `sync_offline_learning_events()` enforces per-user `event_id` idempotency (`duplicate_ignored`), cross-user `invalid` (zero oracle), stale `progress_generation` (`ignored_stale_reset` on both answers & checkpoints), and `rejected_revoked`/`rejected_deleted`.
+7. **PWA Service Worker, Account-Partitioned IndexedDB & Headers (`public/sw.js`, `next.config.ts`):**
+   - `public/sw.js` serves `Cache-Control: no-cache, no-store, must-revalidate`, never caches `/api/*`, `/auth/*`, `/share/*`, cross-origin Supabase traffic, `no-store` responses, or authenticated HTML, and gates `skipWaiting()` on `APPLY_UPDATE`.
+   - IndexedDB is strictly partitioned by `userId` (`studyhub-offline-v3:${userId}`), with `0`-leak Account A → B switch verified live in Chromium.
+   - Production headers enforce `Content-Security-Policy` (`media-src 'self' blob: https://*.supabase.co`, `worker-src 'self' blob:`, `manifest-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`, no `'unsafe-eval'`), `Permissions-Policy: camera=(), microphone=(self), geolocation=()`, `Strict-Transport-Security`, `X-Frame-Options: DENY`, and `X-Content-Type-Options: nosniff`.
+   - Global Search Hard Exam Guard suppresses `Ctrl+K`/`Cmd+K` during active exams.
+
+See [`docs/audit/v3/SECURITY_AUDIT.md`](audit/v3/SECURITY_AUDIT.md) for the full 3-account live Wave 5B security audit (`22/22` live + `39/39` unit PASS, `0` open P0/P1/P2).

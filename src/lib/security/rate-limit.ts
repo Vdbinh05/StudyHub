@@ -28,6 +28,11 @@ export const RATE_LIMITS = {
   ACCOUNT_RESTORE: { id: "account_restore", limit: 5, windowMs: 15 * 60 * 1000 },
   AUTH_ACTION: { id: "auth_action", limit: 20, windowMs: 15 * 60 * 1000 },
   UPLOAD: { id: "upload", limit: 30, windowMs: 15 * 60 * 1000 },
+  AUDIO_UPLOAD: { id: "audio_upload", limit: 20, windowMs: 15 * 60 * 1000 },
+  SEARCH: { id: "search", limit: 90, windowMs: 60 * 1000 },
+  REPORT_CREATE: { id: "report_create", limit: 20, windowMs: 15 * 60 * 1000 },
+  SYNC_EVENTS: { id: "sync_events", limit: 60, windowMs: 60 * 1000 },
+  PROGRESS_RESET: { id: "progress_reset", limit: 15, windowMs: 15 * 60 * 1000 },
 } as const satisfies Record<string, RateLimitConfig>;
 
 /**

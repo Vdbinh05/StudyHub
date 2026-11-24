@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import JSZip from "jszip";
 import { sanitizeFilename } from "./sanitize";
 
 export const MAX_IMPORT_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
 export const MAX_IMAGE_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_AUDIO_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_ZIP_ENTRIES = 500;
 export const MAX_ZIP_ENTRIES_WITH_MEDIA = 2_000;
 export const MAX_ZIP_UNCOMPRESSED_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -50,6 +52,17 @@ export const ALLOWED_IMAGE_MIME_TYPES = [
 
 export type AllowedImageMimeType = (typeof ALLOWED_IMAGE_MIME_TYPES)[number];
 
+export const ALLOWED_AUDIO_MIME_TYPES = [
+  "audio/mpeg",
+  "audio/wav",
+  "audio/mp4",
+  "audio/aac",
+  "audio/webm",
+  "audio/ogg",
+] as const;
+
+export type AllowedAudioMimeType = (typeof ALLOWED_AUDIO_MIME_TYPES)[number];
+
 export type UploadValidationErrorCode =
   | "EMPTY_FILE"
   | "FILE_TOO_LARGE"
@@ -64,7 +77,8 @@ export type UploadValidationErrorCode =
   | "MACRO_OR_ENCRYPTED_ARCHIVE"
   | "CORRUPT_ARCHIVE"
   | "SVG_FORBIDDEN"
-  | "UNSUPPORTED_IMAGE_FORMAT";
+  | "UNSUPPORTED_IMAGE_FORMAT"
+  | "UNSUPPORTED_AUDIO_FORMAT";
 
 export type ImportFileValidationResult =
   | {
@@ -94,6 +108,25 @@ export type ImageValidationResult =
       message: string;
       status: number;
     };
+
+export type AudioValidationResult =
+  | {
+      valid: true;
+      detectedMime: AllowedAudioMimeType;
+      extension: "mp3" | "wav" | "m4a" | "aac" | "webm" | "ogg";
+      sanitizedFileName: string;
+      sizeBytes: number;
+    }
+  | {
+      valid: false;
+      code: UploadValidationErrorCode;
+      message: string;
+      status: number;
+    };
+
+export function computeSha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 function getExtension(fileName: string): string {
   const sanitized = sanitizeFilename(fileName);
@@ -476,6 +509,195 @@ export function validateImageUpload(
       code: "UNSUPPORTED_IMAGE_FORMAT",
       message:
         "Unsupported image format. Only PNG, JPEG, WebP, and GIF images are allowed.",
+      status: 415,
+    };
+  }
+
+  return {
+    valid: true,
+    detectedMime: detected.mime,
+    extension: detected.ext,
+    sanitizedFileName,
+    sizeBytes: buffer.byteLength,
+  };
+}
+
+function looksLikeTextMarkup(bytes: Uint8Array): boolean {
+  const sampleLen = Math.min(bytes.length, 256);
+  let text = "";
+  for (let i = 0; i < sampleLen; i += 1) {
+    text += String.fromCharCode(bytes[i] ?? 0);
+  }
+  const lower = text.trimStart().toLowerCase();
+  return (
+    lower.startsWith("<svg") ||
+    lower.startsWith("<!doctype") ||
+    lower.startsWith("<html") ||
+    lower.startsWith("<script") ||
+    lower.startsWith("<?xml")
+  );
+}
+
+function detectAudioMagicBytes(
+  bytes: Uint8Array,
+): {
+  mime: AllowedAudioMimeType;
+  ext: "mp3" | "wav" | "m4a" | "aac" | "webm" | "ogg";
+} | null {
+  if (bytes.length < 4 || looksLikeTextMarkup(bytes)) {
+    return null;
+  }
+
+  // WAV: RIFF....WAVE
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return { mime: "audio/wav", ext: "wav" };
+  }
+
+  // OGG: OggS
+  if (
+    bytes[0] === 0x4f &&
+    bytes[1] === 0x67 &&
+    bytes[2] === 0x67 &&
+    bytes[3] === 0x53
+  ) {
+    return { mime: "audio/ogg", ext: "ogg" };
+  }
+
+  // WebM / Matroska EBML header: 1A 45 DF A3
+  if (
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    return { mime: "audio/webm", ext: "webm" };
+  }
+
+  // MP4 / M4A container: ....ftyp<brand>
+  if (
+    bytes.length >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    const brand = String.fromCharCode(
+      bytes[8] ?? 0,
+      bytes[9] ?? 0,
+      bytes[10] ?? 0,
+      bytes[11] ?? 0,
+    ).toLowerCase();
+    const allowedBrands = [
+      "m4a ",
+      "m4b ",
+      "mp42",
+      "mp41",
+      "isom",
+      "iso2",
+      "dash",
+      "3gp4",
+      "3gp5",
+      "qt  ",
+    ];
+    if (allowedBrands.includes(brand)) {
+      return { mime: "audio/mp4", ext: "m4a" };
+    }
+  }
+
+  // MP3 with ID3v2 tag: "ID3"
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return { mime: "audio/mpeg", ext: "mp3" };
+  }
+
+  // Raw ADTS AAC frame sync: 0xFF 0xF1 or 0xFF 0xF9 (12-bit sync + layer bits == 00)
+  if (bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) {
+    return { mime: "audio/aac", ext: "aac" };
+  }
+
+  // Raw MPEG Audio frame sync (MP3): 11-bit sync 0xFFE + valid version != 01 + valid layer != 00
+  if (
+    bytes[0] === 0xff &&
+    (bytes[1] & 0xe0) === 0xe0 &&
+    (bytes[1] & 0x18) !== 0x08 &&
+    (bytes[1] & 0x06) !== 0x00
+  ) {
+    return { mime: "audio/mpeg", ext: "mp3" };
+  }
+
+  return null;
+}
+
+/**
+ * Validates audio uploads (MP3, WAV, M4A/MP4, AAC, WebM, OGG up to 10 MB)
+ * strictly by magic bytes, rejecting SVG/HTML/executables.
+ */
+export function validateAudioUpload(
+  buffer: Uint8Array,
+  fileName: string,
+  mimeType?: string,
+): AudioValidationResult {
+  const sanitizedFileName = sanitizeFilename(fileName);
+  const ext = getExtension(sanitizedFileName);
+
+  if (
+    ext === ".svg" ||
+    ext === ".html" ||
+    ext === ".htm" ||
+    mimeType?.toLowerCase().includes("svg") ||
+    mimeType?.toLowerCase().includes("html")
+  ) {
+    return {
+      valid: false,
+      code: "FORBIDDEN_EXTENSION",
+      message: "Markup and SVG files are not permitted as audio uploads.",
+      status: 415,
+    };
+  }
+
+  if ((FORBIDDEN_EXTENSIONS as readonly string[]).includes(ext)) {
+    return {
+      valid: false,
+      code: "FORBIDDEN_EXTENSION",
+      message: `File type "${ext}" is not permitted for security reasons.`,
+      status: 415,
+    };
+  }
+
+  if (buffer.byteLength === 0) {
+    return {
+      valid: false,
+      code: "EMPTY_FILE",
+      message: "Uploaded audio file is empty.",
+      status: 400,
+    };
+  }
+
+  if (buffer.byteLength > MAX_AUDIO_FILE_BYTES) {
+    return {
+      valid: false,
+      code: "FILE_TOO_LARGE",
+      message: "Audio file exceeds the maximum allowed size of 10 MB.",
+      status: 413,
+    };
+  }
+
+  const detected = detectAudioMagicBytes(buffer);
+  if (!detected) {
+    return {
+      valid: false,
+      code: "UNSUPPORTED_AUDIO_FORMAT",
+      message:
+        "Unsupported audio format. Only MP3, WAV, M4A, AAC, WebM, and OGG audio files are allowed.",
       status: 415,
     };
   }

@@ -5,16 +5,21 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowLeftRight,
   BookOpen,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Edit3,
   EyeOff,
+  Image as ImageIcon,
   Plus,
   RotateCcw,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +32,7 @@ import { cn } from "@/lib/utils";
 import type { Locale } from "@/types/domain";
 import type {
   ImportPreviewSummary,
+  ParsedMediaAttachment,
   ParsedOption,
   ParsedQuestion,
 } from "@/types/import";
@@ -46,6 +52,12 @@ export interface VirtualizedPreviewListProps {
   detectedChapters: string[];
   allowInlineEdit: boolean;
   onUpdateQuestion: (tempId: string, updater: (q: ParsedQuestion) => ParsedQuestion) => void;
+  onMoveMediaToQuestion?: (
+    sourceTempId: string,
+    mediaId: string,
+    sourceSlot: "prompt" | string,
+    targetQuestionIndex: number,
+  ) => void;
 }
 
 export function VirtualizedPreviewList({
@@ -55,6 +67,7 @@ export function VirtualizedPreviewList({
   detectedChapters,
   allowInlineEdit,
   onUpdateQuestion,
+  onMoveMediaToQuestion,
 }: VirtualizedPreviewListProps) {
   const [filterTab, setFilterTab] = React.useState<PreviewFilterTab>("all");
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -344,6 +357,15 @@ export function VirtualizedPreviewList({
                             {locale === "en" ? "Duplicate" : "Trùng lặp"}
                           </Badge>
                         )}
+                        {q.ambiguousMedia && (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-warning/50 bg-warning-subtle text-warning-subtle-foreground"
+                          >
+                            <ImageIcon className="size-3" aria-hidden="true" />
+                            {locale === "en" ? "Review Image" : "Kiểm tra ảnh nổi"}
+                          </Badge>
+                        )}
                         {q.excluded && (
                           <Badge variant="secondary" className="gap-1">
                             <EyeOff className="size-3" aria-hidden="true" />
@@ -428,8 +450,10 @@ export function VirtualizedPreviewList({
                         key={q.tempId}
                         locale={locale}
                         question={q}
+                        totalQuestions={questions.length}
                         onUpdateQuestion={onUpdateQuestion}
                         onToggleOptionCorrect={handleToggleOptionCorrect}
+                        onMoveMediaToQuestion={onMoveMediaToQuestion}
                       />
                     ) : (
                       <div className="space-y-2.5">
@@ -440,6 +464,81 @@ export function VirtualizedPreviewList({
                             </span>
                           )}
                         </p>
+
+                        {/* Prompt extracted media thumbnails */}
+                        {q.promptMedia && q.promptMedia.length > 0 && (
+                          <div className="flex flex-wrap items-start gap-2">
+                            {q.promptMedia.map((media, mediaIdx) => (
+                              <MediaPreviewChip
+                                key={media.id}
+                                locale={locale}
+                                media={media}
+                                canEdit={allowInlineEdit}
+                                canMoveLeft={mediaIdx > 0}
+                                canMoveRight={mediaIdx < (q.promptMedia?.length ?? 0) - 1}
+                                onReorder={(dir) =>
+                                  onUpdateQuestion(q.tempId, (prev) => {
+                                    const list = [...(prev.promptMedia ?? [])];
+                                    const swapIdx = mediaIdx + dir;
+                                    if (swapIdx < 0 || swapIdx >= list.length) return prev;
+                                    [list[mediaIdx], list[swapIdx]] = [list[swapIdx], list[mediaIdx]];
+                                    return { ...prev, promptMedia: list };
+                                  })
+                                }
+                                onRemove={() =>
+                                  onUpdateQuestion(q.tempId, (prev) => {
+                                    const remaining = (prev.promptMedia ?? []).filter(
+                                      (m) => m.id !== media.id,
+                                    );
+                                    const stillFloating =
+                                      remaining.some((m) => m.ambiguous) ||
+                                      prev.options.some((o) =>
+                                        (o.media ?? []).some((m) => m.ambiguous),
+                                      );
+                                    return {
+                                      ...prev,
+                                      promptMedia: remaining.length > 0 ? remaining : undefined,
+                                      ambiguousMedia: stillFloating ? true : undefined,
+                                      issues: stillFloating
+                                        ? prev.issues
+                                        : prev.issues.filter(
+                                            (i) => i.code !== "AMBIGUOUS_MEDIA_MAPPING",
+                                          ),
+                                    };
+                                  })
+                                }
+                                onConfirmPlacement={
+                                  media.ambiguous
+                                    ? () =>
+                                        onUpdateQuestion(q.tempId, (prev) => {
+                                          const nextPromptMedia = (prev.promptMedia ?? []).map(
+                                            (m) =>
+                                              m.id === media.id
+                                                ? { ...m, ambiguous: false }
+                                                : m,
+                                          );
+                                          const stillFloating =
+                                            nextPromptMedia.some((m) => m.ambiguous) ||
+                                            prev.options.some((o) =>
+                                              (o.media ?? []).some((m) => m.ambiguous),
+                                            );
+                                          return {
+                                            ...prev,
+                                            promptMedia: nextPromptMedia,
+                                            ambiguousMedia: stillFloating ? true : undefined,
+                                            issues: stillFloating
+                                              ? prev.issues
+                                              : prev.issues.filter(
+                                                  (i) => i.code !== "AMBIGUOUS_MEDIA_MAPPING",
+                                                ),
+                                          };
+                                        })
+                                    : undefined
+                                }
+                              />
+                            ))}
+                          </div>
+                        )}
 
                         {q.questionType === "flashcard" ? (
                           <div className="rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-sm text-foreground">
@@ -463,7 +562,7 @@ export function VirtualizedPreviewList({
                                     handleToggleOptionCorrect(q, opt.id)
                                   }
                                   className={cn(
-                                    "flex items-start gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-colors",
+                                    "flex flex-col gap-1.5 rounded-lg border px-3 py-2 text-left text-xs transition-colors",
                                     opt.isCorrect
                                       ? "border-success/50 bg-success-subtle font-medium text-success-subtle-foreground"
                                       : "border-border bg-background text-foreground",
@@ -471,23 +570,51 @@ export function VirtualizedPreviewList({
                                       "cursor-pointer hover:border-primary/50",
                                   )}
                                 >
-                                  <span
-                                    className={cn(
-                                      "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
-                                      opt.isCorrect
-                                        ? "bg-success text-success-foreground"
-                                        : "bg-muted text-muted-foreground",
-                                    )}
-                                  >
-                                    {opt.isCorrect ? (
-                                      <Check className="size-3" aria-hidden="true" />
-                                    ) : (
-                                      opt.label
-                                    )}
-                                  </span>
-                                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                                    {opt.label}. {opt.content}
-                                  </span>
+                                  <div className="flex items-start gap-2">
+                                    <span
+                                      className={cn(
+                                        "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
+                                        opt.isCorrect
+                                          ? "bg-success text-success-foreground"
+                                          : "bg-muted text-muted-foreground",
+                                      )}
+                                    >
+                                      {opt.isCorrect ? (
+                                        <Check className="size-3" aria-hidden="true" />
+                                      ) : (
+                                        opt.label
+                                      )}
+                                    </span>
+                                    <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+                                      {opt.label}.{" "}
+                                      {opt.content ||
+                                        ((opt.media?.length ?? 0) > 0
+                                          ? locale === "en"
+                                            ? "(Image option)"
+                                            : "(Đáp án hình ảnh)"
+                                          : "")}
+                                    </span>
+                                  </div>
+                                  {opt.media && opt.media.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 pl-7">
+                                      {opt.media.map((m) =>
+                                        m.dataUrl ? (
+                                          // eslint-disable-next-line @next/next/no-img-element
+                                          <img
+                                            key={m.id}
+                                            src={m.dataUrl}
+                                            alt={m.alt ?? m.fileName}
+                                            className="h-14 max-w-[120px] rounded border border-border object-contain bg-background"
+                                          />
+                                        ) : (
+                                          <Badge key={m.id} variant="outline" className="text-[10px]">
+                                            <ImageIcon className="mr-1 size-3" aria-hidden="true" />
+                                            {m.fileName}
+                                          </Badge>
+                                        ),
+                                      )}
+                                    </div>
+                                  )}
                                 </button>
                               ))}
                             </div>
@@ -560,19 +687,119 @@ interface InlineDraft {
 
 const INLINE_EDIT_DEBOUNCE_MS = 220;
 
+function MediaPreviewChip({
+  locale,
+  media,
+  canEdit,
+  canMoveLeft,
+  canMoveRight,
+  onReorder,
+  onRemove,
+  onConfirmPlacement,
+}: {
+  locale: Locale;
+  media: ParsedMediaAttachment;
+  canEdit: boolean;
+  canMoveLeft: boolean;
+  canMoveRight: boolean;
+  onReorder: (delta: -1 | 1) => void;
+  onRemove: () => void;
+  onConfirmPlacement?: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "group relative flex flex-col gap-1 rounded-lg border p-1.5 text-xs",
+        media.ambiguous
+          ? "border-warning/60 bg-warning-subtle/40"
+          : "border-border bg-muted/30",
+      )}
+    >
+      {media.dataUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={media.dataUrl}
+          alt={media.alt ?? media.fileName}
+          className="h-20 max-w-[160px] rounded object-contain bg-background"
+        />
+      ) : (
+        <div className="flex h-16 w-28 items-center justify-center rounded bg-muted text-muted-foreground">
+          <ImageIcon className="size-5" aria-hidden="true" />
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-1">
+        <span className="max-w-[110px] truncate text-[11px] text-muted-foreground" title={media.fileName}>
+          {media.fileName}
+        </span>
+        {canEdit && (
+          <div className="flex items-center gap-0.5">
+            {canMoveLeft && (
+              <button
+                type="button"
+                title={locale === "en" ? "Move left" : "Sang trái"}
+                onClick={() => onReorder(-1)}
+                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ChevronLeft className="size-3" />
+              </button>
+            )}
+            {canMoveRight && (
+              <button
+                type="button"
+                title={locale === "en" ? "Move right" : "Sang phải"}
+                onClick={() => onReorder(1)}
+                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ChevronRight className="size-3" />
+              </button>
+            )}
+            <button
+              type="button"
+              title={locale === "en" ? "Remove decorative image" : "Gỡ ảnh"}
+              aria-label={locale === "en" ? "Remove image" : "Gỡ ảnh"}
+              onClick={onRemove}
+              className="rounded p-0.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+        )}
+      </div>
+      {canEdit && onConfirmPlacement && (
+        <button
+          type="button"
+          onClick={onConfirmPlacement}
+          className="rounded bg-warning/20 px-1.5 py-0.5 text-[10px] font-medium text-warning-subtle-foreground hover:bg-warning/30"
+        >
+          {locale === "en" ? "Confirm placement" : "Xác nhận vị trí"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function InlineQuestionEditor({
   locale,
   question,
+  totalQuestions,
   onUpdateQuestion,
   onToggleOptionCorrect,
+  onMoveMediaToQuestion,
 }: {
   locale: Locale;
   question: ParsedQuestion;
+  totalQuestions: number;
   onUpdateQuestion: (
     tempId: string,
     updater: (q: ParsedQuestion) => ParsedQuestion,
   ) => void;
   onToggleOptionCorrect: (q: ParsedQuestion, optionId: string) => void;
+  onMoveMediaToQuestion?: (
+    sourceTempId: string,
+    mediaId: string,
+    sourceSlot: "prompt" | string,
+    targetQuestionIndex: number,
+  ) => void;
 }) {
   const [draft, setDraft] = React.useState<InlineDraft>(() => ({
     prompt: question.prompt,
@@ -743,6 +970,178 @@ function InlineQuestionEditor({
           />
         </div>
       </div>
+
+      {/* Embedded Media Management (reassign between Prompt / Options / other Questions, or remove decorative images) */}
+      {((question.promptMedia && question.promptMedia.length > 0) ||
+        question.options.some((o) => o.media && o.media.length > 0)) && (
+        <div className="space-y-2 rounded-lg border border-border bg-background p-2.5">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <ArrowLeftRight className="size-3.5 text-primary" aria-hidden="true" />
+            {locale === "en"
+              ? "Extracted Images (Reassign or Remove)"
+              : "Hình ảnh trích xuất (Gán lại hoặc Xóa)"}
+          </div>
+          <div className="space-y-1.5">
+            {[
+              ...(question.promptMedia ?? []).map((m) => ({
+                media: m,
+                slot: "prompt" as const,
+                slotLabel: locale === "en" ? "Prompt" : "Câu hỏi",
+              })),
+              ...question.options.flatMap((opt) =>
+                (opt.media ?? []).map((m) => ({
+                  media: m,
+                  slot: opt.id,
+                  slotLabel: `${locale === "en" ? "Option" : "Đáp án"} ${opt.label}`,
+                })),
+              ),
+            ].map(({ media, slot, slotLabel }) => (
+              <div
+                key={media.id}
+                className="flex flex-wrap items-center gap-2 rounded-md border border-border/70 bg-muted/20 p-1.5 text-xs"
+              >
+                {media.dataUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={media.dataUrl}
+                    alt={media.alt ?? media.fileName}
+                    className="h-10 w-14 rounded border border-border object-contain bg-background"
+                  />
+                ) : (
+                  <ImageIcon className="size-4 text-muted-foreground" />
+                )}
+                <span className="max-w-[130px] truncate font-medium">{media.fileName}</span>
+                <Badge variant="outline" className="text-[10px]">
+                  {slotLabel}
+                </Badge>
+                <select
+                  aria-label={locale === "en" ? "Assign image slot" : "Gán vị trí ảnh"}
+                  value={slot}
+                  onChange={(e) => {
+                    const targetSlot = e.target.value;
+                    if (targetSlot === slot) return;
+                    onUpdateQuestion(question.tempId, (prev) => {
+                      const cleanMedia: ParsedMediaAttachment = {
+                        ...media,
+                        ambiguous: false,
+                      };
+                      const nextPromptMedia = (prev.promptMedia ?? []).filter(
+                        (m) => m.id !== media.id,
+                      );
+                      const nextOptions = prev.options.map((o) => ({
+                        ...o,
+                        media: (o.media ?? []).filter((m) => m.id !== media.id),
+                      }));
+                      if (targetSlot === "prompt") {
+                        nextPromptMedia.push(cleanMedia);
+                      } else {
+                        const targetOpt = nextOptions.find((o) => o.id === targetSlot);
+                        if (targetOpt) {
+                          targetOpt.media = [...(targetOpt.media ?? []), cleanMedia];
+                        }
+                      }
+                      const stillFloating =
+                        nextPromptMedia.some((m) => m.ambiguous) ||
+                        nextOptions.some((o) =>
+                          (o.media ?? []).some((m) => m.ambiguous),
+                        );
+                      return {
+                        ...prev,
+                        promptMedia:
+                          nextPromptMedia.length > 0 ? nextPromptMedia : undefined,
+                        options: nextOptions.map((o) => ({
+                          ...o,
+                          media: o.media && o.media.length > 0 ? o.media : undefined,
+                        })),
+                        ambiguousMedia: stillFloating ? true : undefined,
+                        issues: stillFloating
+                          ? prev.issues
+                          : prev.issues.filter(
+                              (i) => i.code !== "AMBIGUOUS_MEDIA_MAPPING",
+                            ),
+                      };
+                    });
+                  }}
+                  className="h-7 rounded border border-input bg-background px-1.5 text-xs"
+                >
+                  <option value="prompt">
+                    {locale === "en" ? "Prompt" : "Câu hỏi"}
+                  </option>
+                  {question.options.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {locale === "en" ? `Option ${opt.label}` : `Đáp án ${opt.label}`}
+                    </option>
+                  ))}
+                </select>
+                {onMoveMediaToQuestion && totalQuestions > 1 && (
+                  <select
+                    aria-label={locale === "en" ? "Move image to question" : "Chuyển ảnh sang câu khác"}
+                    defaultValue=""
+                    onChange={(e) => {
+                      const idxVal = Number.parseInt(e.target.value, 10);
+                      if (!Number.isNaN(idxVal) && idxVal !== question.index) {
+                        onMoveMediaToQuestion(question.tempId, media.id, slot, idxVal);
+                      }
+                    }}
+                    className="h-7 rounded border border-input bg-background px-1.5 text-xs"
+                  >
+                    <option value="">
+                      {locale === "en" ? "Move to Q#…" : "Chuyển sang câu…"}
+                    </option>
+                    {Array.from(
+                      { length: Math.min(totalQuestions, 200) },
+                      (_, i) => i,
+                    )
+                      .filter((i) => i !== question.index)
+                      .map((i) => (
+                        <option key={i} value={i}>
+                          #{i + 1}
+                        </option>
+                      ))}
+                  </select>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-7 px-2 text-destructive hover:text-destructive"
+                  onClick={() =>
+                    onUpdateQuestion(question.tempId, (prev) => {
+                      const nextPromptMedia = (prev.promptMedia ?? []).filter(
+                        (m) => m.id !== media.id,
+                      );
+                      const nextOptions = prev.options.map((o) => {
+                        const rem = (o.media ?? []).filter((m) => m.id !== media.id);
+                        return { ...o, media: rem.length > 0 ? rem : undefined };
+                      });
+                      const stillFloating =
+                        nextPromptMedia.some((m) => m.ambiguous) ||
+                        nextOptions.some((o) =>
+                          (o.media ?? []).some((m) => m.ambiguous),
+                        );
+                      return {
+                        ...prev,
+                        promptMedia:
+                          nextPromptMedia.length > 0 ? nextPromptMedia : undefined,
+                        options: nextOptions,
+                        ambiguousMedia: stillFloating ? true : undefined,
+                        issues: stillFloating
+                          ? prev.issues
+                          : prev.issues.filter(
+                              (i) => i.code !== "AMBIGUOUS_MEDIA_MAPPING",
+                            ),
+                      };
+                    })
+                  }
+                >
+                  <Trash2 className="mr-1 size-3" />
+                  {locale === "en" ? "Remove" : "Xóa"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {question.questionType === "flashcard" ? (
         <div className="space-y-1">

@@ -346,6 +346,47 @@ html[data-reduced-motion="true"] .skip-to-content {
   container-type: inline-size;
 }
 
+/* StudyHub V3 — KaTeX math & TipTap academic rich-text display hygiene */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-inline-size: 100%;
+  padding-block: 0.25rem;
+}
+
+.ProseMirror {
+  outline: none;
+}
+
+.ProseMirror table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  margin-block: 0.5rem;
+}
+
+.ProseMirror th,
+.ProseMirror td {
+  border: 1px solid var(--border);
+  padding: 0.375rem 0.5rem;
+  vertical-align: top;
+}
+
+.ProseMirror th {
+  background: var(--muted);
+  font-weight: 600;
+}
+
+/* StudyHub V3 — Accessibility mode preferences (opt-in from Settings) */
+html[data-high-contrast-focus="true"] :focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 3px;
+}
+
+html[data-large-text="true"] body {
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+
 /* Printable study sheet stylesheet (WCAG & PRD printable sheets) */
 @media print {
   @page {

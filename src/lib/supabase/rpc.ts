@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import type {
+  ConfidenceLevel,
   CoverageCycle,
   ExamAttempt,
   ExamAttemptAnswer,
@@ -10,9 +11,16 @@ import type {
   ExamSnapshotQuestion,
   ExamSubjectBreakdown,
   ExamTagBreakdown,
+  GlobalSearchResponse,
+  GlobalSearchResultType,
+  LearningSyncEventInput,
+  LearningSyncResponse,
   PracticePoolResponse,
   Profile,
+  ProgressResetRequest,
+  ProgressResetResult,
   SharePermission,
+  StructuredAnswerResponse,
   StudySet,
   StudySetType,
 } from "@/types/domain";
@@ -158,6 +166,9 @@ export async function rpcSaveExamAttemptAnswers(
     attempt_question_id: string;
     selected_option_ids: string[];
     typed_answer?: string | null;
+    structured_response?: StructuredAnswerResponse | null;
+    confidence?: ConfidenceLevel | null;
+    hint_used?: boolean;
     is_flagged?: boolean;
     client_seq?: number;
   }>,
@@ -381,6 +392,64 @@ export async function rpcRedeemShareLink(
   });
   return {
     data: (data as RedeemShareLinkResult | null) ?? null,
+    error,
+  };
+}
+
+export async function rpcResetLearningProgress(
+  supabase: SupabaseClient<Database>,
+  params: Omit<ProgressResetRequest, "confirm">,
+): Promise<{ data: ProgressResetResult | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("reset_learning_progress", {
+    p_scope: params.scope,
+    p_study_set_id: params.study_set_id ?? null,
+    p_subject: params.subject ?? null,
+    p_chapter: params.chapter ?? null,
+    p_question_ids: params.question_ids ?? null,
+    p_mode: params.mode ?? null,
+    p_clear_mistakes: params.clear_mistakes ?? true,
+    p_clear_starred: params.clear_starred ?? false,
+    p_clear_checkpoints: params.clear_checkpoints ?? true,
+  });
+  return {
+    data: (data as ProgressResetResult | null) ?? null,
+    error,
+  };
+}
+
+export async function rpcGlobalLibrarySearch(
+  supabase: SupabaseClient<Database>,
+  params: {
+    query: string;
+    types?: GlobalSearchResultType[];
+    limit?: number;
+    offset?: number;
+  },
+): Promise<{ data: GlobalSearchResponse | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("global_library_search", {
+    p_query: params.query,
+    p_types: params.types && params.types.length > 0 ? params.types : null,
+    p_limit: params.limit ?? 30,
+    p_offset: params.offset ?? 0,
+  });
+  return {
+    data: (data as GlobalSearchResponse | null) ?? null,
+    error,
+  };
+}
+
+export async function rpcSyncOfflineLearningEvents(
+  supabase: SupabaseClient<Database>,
+  events: LearningSyncEventInput[],
+): Promise<{ data: LearningSyncResponse | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("sync_offline_learning_events", {
+    p_events: events,
+  });
+  return {
+    data: (data as LearningSyncResponse | null) ?? null,
     error,
   };
 }

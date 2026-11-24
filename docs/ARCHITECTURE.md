@@ -284,7 +284,33 @@ StudyHub MUST handle study sets with **10,000+ questions** smoothly without free
 4. **Non-Blocking Parsing:**
    - Client-side text/TSV/CSV pre-parsing for files > 1 MB runs inside a dedicated Web Worker (or streamed server-side via `/api/import/parse` for binary `.docx`/`.xlsx`) so the main thread stays at 60 fps.
    - All regexes in `src/lib/import/*` are linear-time (no catastrophic backtracking / ReDoS).
-5. **TanStack Query Caching:**
-   - `staleTime`: 60s for set metadata & folders, 0s for active exam state.
-   - Optimistic updates for starring questions and toggling exam flags, with automatic rollback on network failure.
-   - Prefetch next question batch during Practice/Learn pagination.
+- **TanStack Query Caching:**
+  - `staleTime`: 60s for set metadata & folders, 0s for active exam state.
+  - Optimistic updates for starring questions and toggling exam flags, with automatic rollback on network failure.
+  - Prefetch next question batch during Practice/Learn pagination.
+
+---
+
+## 7. StudyHub V2.0–V3.0 Architecture Extensions (Complete Learning Edition)
+
+StudyHub V3.0 extends the V1.0 baseline cleanly to **114 App Router routes** (`70` API Route Handlers + `3` `/auth/*` routes + `40` `page.tsx` + `/_not-found`) plus `src/proxy.ts` (Next.js 16 Proxy middleware) and **36 RLS-enabled PostgreSQL tables** (Migrations `0001`–`0016`):
+
+### 7.1 New V2.0–V3.0 App Router Pages & APIs
+- **Universal Multi-Subject Exams & Practice (V2.0):** `/exams`, `/exams/new`, `/exams/[attemptId]`, `/exams/[attemptId]/results`, `/practice`, `/folders`, `/import`, plus `/api/exams/{eligible,preview}`, `/api/exam-presets/*`, `/api/coverage-cycles/*`, `/api/practice/questions`, `/api/account/{data,restore}`, `/api/uploads/{image,signed-url}`.
+- **V3.0 Complete Learning Routes:**
+  - **Spell Mode:** `/sets/[id]/spell`
+  - **Visual Diagram Mode:** `/sets/[id]/diagrams`, `/diagrams/[id]/edit`, `/diagrams/[id]/study` (`/api/diagrams`, `/api/diagrams/[id]`, `/api/sets/[id]/diagrams`)
+  - **Offline PWA Hub:** `/offline` + `public/sw.js` + `src/app/manifest.ts` (`/manifest.webmanifest`)
+  - **V3.0 REST APIs:** `/api/uploads/audio`, `/api/media`, `/api/media/[id]`, `/api/passages`, `/api/passages/[id]`, `/api/notes`, `/api/reports`, `/api/reports/[id]`, `/api/checkpoints`, `/api/checkpoints/[sessionKey]`, `/api/progress/reset`, `/api/search`, `/api/sync/events`, `/api/export/pdf`.
+
+### 7.2 V3.0 Pure Core Modules & Bundle Isolation Rules
+- **Pure Testable Modules (`src/lib/*`):** `richtext/` (TipTap AST v1 + KaTeX `trust: false`), `media/` (image/audio magic-byte & SHA-256 validation), `audio/` (`tts.ts` + `recorder.ts`), `diagram/` (`geometry.ts` normalized `[0,1]` hit-test + 6-mode `study-engine.ts`), `questions/` (13-type registry), `learning/` (12-type `exam-scoring.ts`, `confidence.ts`, `adaptive-learn.ts`, `spell.ts`, `checkpoints.ts`), `import/` (`docx-ooxml-parser.ts` multimedia + `pdf-parser.ts` `pdfjs-dist`), `export/` (`pdf-exporter.ts` `pdf-lib` + `NotoSans`), `offline/` (`db.ts`, `download-manager.ts`, `offline-session.ts`, `sync-queue.ts`), and `ui/` (`shortcuts.ts`).
+- **Strict Bundle & Server-Only Hygiene (Verified in Wave 5B & Wave 6 `.next/static/`):**
+  - `next.config.ts` declares `serverExternalPackages: ["pdfjs-dist"]` and `pdf-parser.ts` preloads `globalThis.pdfjsWorker` so server-side PDF parsing succeeds in Turbopack production builds (`V3-PERF-01`).
+  - Zero server parser/PDF libraries (`pdfjs-dist`, `pdf-lib`, `@pdf-lib/fontkit`, `exceljs`, `jszip`, `fast-xml-parser`, `mammoth`, `papaparse`) exist in `.next/static/` (`0 B` leaked).
+  - Read-only & public routes import leaf modules directly (`@/components/richtext/RichContentRenderer`, `@/components/pwa/PwaProvider`, `@/components/media/ImageLightbox`), keeping TipTap (`145 KB` gzip) strictly lazy-loaded (`next/dynamic`) and skipping `@supabase/supabase-js`/IndexedDB bootstrap on anonymous public routes (`V3-PERF-02`, `V3-PERF-03`).
+
+### 7.3 Account-Partitioned Offline PWA & Sync Architecture
+- **IndexedDB Partitioning:** Every authenticated user gets an isolated database `studyhub-offline-v3:${userId}` (`idb`) storing downloaded set snapshots, `media_blobs`, `sync_events`, and `checkpoints`. Logout clears the active user pointer and prevents cross-account leakage (`0` sets visible on Account A → B switch).
+- **Service Worker Boundaries (`public/sw.js`):** Served with `Cache-Control: no-cache, no-store, must-revalidate`; caches only immutable static assets and public offline shell while strictly bypassing `/api/*`, `/auth/*`, `/share/*`, cross-origin Supabase requests, and authenticated HTML; gates `skipWaiting()` on explicit `APPLY_UPDATE` (never reloads mid-exam).
+- **Deterministic Sync Protocol (`POST /api/sync/events` -> `sync_offline_learning_events()`):** Single atomic PgBouncer-safe SQL RPC returning per-event deterministic verdicts: `applied`, `duplicate_ignored` (by `event_id`), `ignored_stale_reset` (comparing `progress_generation`), `rejected_revoked`, `rejected_deleted`, `conflict` (lossless note merge returning `server_version` + `server_data`), or `invalid` (cross-user replay anti-oracle).

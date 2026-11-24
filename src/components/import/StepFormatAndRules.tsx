@@ -37,6 +37,8 @@ const ALL_FORMATS: ImportFormat[] = [
   "eduquiz_txt",
   "word_answer_key",
   "docx_ooxml",
+  "docx_multimedia",
+  "pdf_text",
   "xlsx_wayground",
   "xlsx_generic",
   "quizlet_tsv",
@@ -78,6 +80,12 @@ export interface StepFormatConfigProps {
   onCardDelimiterChange: (val: string) => void;
   csvDelimiter: string;
   onCsvDelimiterChange: (val: string) => void;
+  pdfPageRange?: string;
+  onPdfPageRangeChange?: (val: string) => void;
+  pdfTwoColumn?: boolean;
+  onPdfTwoColumnChange?: (val: boolean) => void;
+  isScannedPdf?: boolean;
+  pdfPageCount?: number;
   isParsing: boolean;
   onBack: () => void;
   onNext: () => void;
@@ -108,6 +116,12 @@ export function StepFormatConfig({
   onCardDelimiterChange,
   csvDelimiter,
   onCsvDelimiterChange,
+  pdfPageRange = "",
+  onPdfPageRangeChange,
+  pdfTwoColumn = false,
+  onPdfTwoColumnChange,
+  isScannedPdf = false,
+  pdfPageCount,
   isParsing,
   onBack,
   onNext,
@@ -119,6 +133,7 @@ export function StepFormatConfig({
     activeFormat === "xlsx_generic" ||
     activeFormat === "csv";
   const isQuizlet = activeFormat === "quizlet_tsv";
+  const isPdf = activeFormat === "pdf_text";
 
   const updateMapField = (field: keyof ColumnMapping, value: string) => {
     onColumnMappingChange({
@@ -225,6 +240,49 @@ export function StepFormatConfig({
             </div>
           )}
         </div>
+
+        {/* PDF Selectable-Text Options */}
+        {isPdf && (
+          <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-4">
+            {isScannedPdf && (
+              <div
+                role="alert"
+                className="rounded-lg border border-warning/50 bg-warning-subtle px-3.5 py-2.5 text-xs text-warning-subtle-foreground"
+              >
+                {locale === "en"
+                  ? "This PDF appears to be scanned / image-only with no selectable text layer. StudyHub does not run AI OCR — please export as selectable-text PDF or Word (.docx) before importing."
+                  : "Tệp PDF này có vẻ là bản quét (scan / chỉ gồm hình ảnh), không có lớp văn bản chọn được. StudyHub không sử dụng AI OCR — vui lòng chuyển sang PDF có văn bản hoặc tệp Word (.docx) trước khi nhập."}
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="pdf-page-range">
+                  {locale === "en"
+                    ? `Page range (optional${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`
+                    : `Khoảng trang (tùy chọn${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`}
+                </Label>
+                <Input
+                  id="pdf-page-range"
+                  value={pdfPageRange}
+                  onChange={(e) => onPdfPageRangeChange?.(e.target.value)}
+                  placeholder={locale === "en" ? "e.g. 1-5, 8" : "VD: 1-5, 8"}
+                />
+              </div>
+              <div className="flex items-center gap-3 self-end pb-1">
+                <Switch
+                  id="pdf-two-column"
+                  checked={pdfTwoColumn}
+                  onCheckedChange={(v) => onPdfTwoColumnChange?.(v)}
+                />
+                <Label htmlFor="pdf-two-column" className="text-sm">
+                  {locale === "en"
+                    ? "Two-column reading order (left then right)"
+                    : "Bố cục 2 cột (đọc cột trái trước, phải sau)"}
+                </Label>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Quizlet Delimiter Configuration */}
         {isQuizlet && (
@@ -487,7 +545,7 @@ export function StepAnswerRule({
   onNext,
   headingRef,
 }: StepAnswerRuleProps) {
-  const isDocx = activeFormat === "docx_ooxml";
+  const isDocx = activeFormat === "docx_ooxml" || activeFormat === "docx_multimedia";
   const isTabularOrJson =
     activeFormat === "xlsx_wayground" ||
     activeFormat === "xlsx_generic" ||

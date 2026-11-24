@@ -15,6 +15,7 @@ export const MAX_PARSED_QUESTIONS = 50_000;
 export const ALLOWED_IMPORT_EXTENSIONS = new Set([
   ".docx",
   ".xlsx",
+  ".pdf",
   ".csv",
   ".tsv",
   ".txt",
@@ -59,6 +60,8 @@ export type ImportSecurityErrorCode =
   | "XXE_FORBIDDEN"
   | "SVG_IMAGE_REJECTED"
   | "UNSUPPORTED_IMAGE_FORMAT"
+  | "INVALID_PDF"
+  | "ENCRYPTED_PDF"
   | "QUESTION_LIMIT_EXCEEDED";
 
 export class ImportSecurityError extends Error {
@@ -88,7 +91,7 @@ export function validateFileExtension(fileName: string): string {
   if (!ext || FORBIDDEN_MACRO_EXTENSIONS.has(ext) || !ALLOWED_IMPORT_EXTENSIONS.has(ext)) {
     throw new ImportSecurityError(
       "UNSUPPORTED_EXTENSION",
-      `Unsupported file extension "${ext || "(none)"}". Allowed: .docx, .xlsx, .csv, .tsv, .txt, .json.`,
+      `Unsupported file extension "${ext || "(none)"}". Allowed: .docx, .xlsx, .pdf, .csv, .tsv, .txt, .json.`,
       400,
     );
   }
@@ -121,6 +124,25 @@ export function hasZipMagicBytes(bytes: Uint8Array): boolean {
     bytes[2] === 0x03 &&
     bytes[3] === 0x04
   );
+}
+
+/**
+ * Check PDF magic header (`%PDF-`) within the first 1024 bytes per PDF 1.7 spec.
+ */
+export function hasPdfMagicBytes(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length - 5, 1024);
+  for (let i = 0; i <= limit; i += 1) {
+    if (
+      bytes[i] === 0x25 && // %
+      bytes[i + 1] === 0x50 && // P
+      bytes[i + 2] === 0x44 && // D
+      bytes[i + 3] === 0x46 && // F
+      bytes[i + 4] === 0x2d // -
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

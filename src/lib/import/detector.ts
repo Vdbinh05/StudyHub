@@ -52,6 +52,7 @@ export function detectImportFormat(input: FormatDetectionInput): ImportFormat {
   const ext = input.fileName ? getFileExtension(input.fileName) : "";
 
   if (ext === ".docx") return "docx_ooxml";
+  if (ext === ".pdf") return "pdf_text";
   if (ext === ".xlsx") {
     if (input.xlsxHeaders && isWaygroundHeaders(input.xlsxHeaders)) {
       return "xlsx_wayground";

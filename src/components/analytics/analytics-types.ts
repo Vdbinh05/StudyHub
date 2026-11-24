@@ -1,4 +1,10 @@
-import type { ExamAttempt, MasteryLevel, StudySession, StudySet } from "@/types/domain";
+import type {
+  ExamAttempt,
+  LearningSessionCheckpoint,
+  MasteryLevel,
+  StudySession,
+  StudySet,
+} from "@/types/domain";
 
 export interface DailyActivityPoint {
   date: string;
@@ -41,6 +47,7 @@ export interface DashboardSummary {
   recentSets: StudySet[];
   recentExams: ExamAttempt[];
   recentSessions: StudySession[];
+  activeCheckpoints: LearningSessionCheckpoint[];
   activitySeries: DailyActivityPoint[];
 }
 

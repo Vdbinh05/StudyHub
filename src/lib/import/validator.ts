@@ -44,11 +44,15 @@ export function validateParsedQuestion(
   const isChoice =
     question.questionType === "single_choice" ||
     question.questionType === "multiple_choice" ||
-    question.questionType === "true_false";
+    question.questionType === "true_false" ||
+    question.questionType === "image_choice";
 
   if (isChoice) {
     const nonEmptyOptions = question.options.filter(
-      (opt) => opt.content.trim().length > 0,
+      (opt) =>
+        opt.content.trim().length > 0 ||
+        Boolean(opt.imageUrl?.trim()) ||
+        (opt.media !== undefined && opt.media.length > 0),
     );
     if (nonEmptyOptions.length < 2) {
       newIssues.push({
@@ -167,18 +171,49 @@ export interface ValidateBatchResult {
  */
 export function computeQuestionDuplicateFingerprint(input: {
   prompt: string;
+  promptImageUrl?: string | null;
+  promptMedia?: readonly { fileName?: string; rId?: string }[];
   backText?: string | null;
-  options?: readonly { content: string; isCorrect: boolean }[];
+  options?: readonly {
+    content: string;
+    isCorrect: boolean;
+    imageUrl?: string | null;
+    media?: readonly { fileName?: string; rId?: string }[];
+  }[];
   acceptedAnswers?: readonly { answerText: string }[];
 }): string {
   const normPrompt = normalizeForComparison(input.prompt);
   if (!normPrompt) return "";
 
+  const promptMediaTokens: string[] = [];
+  if (input.promptImageUrl?.trim()) {
+    promptMediaTokens.push(input.promptImageUrl.trim().toLowerCase());
+  }
+  for (const m of input.promptMedia ?? []) {
+    const token = (m.fileName ?? m.rId ?? "").trim().toLowerCase();
+    if (token) promptMediaTokens.push(token);
+  }
+  const promptMediaSig =
+    promptMediaTokens.length > 0
+      ? `::pm[${Array.from(new Set(promptMediaTokens)).sort().join(",")}]`
+      : "";
+
   const normalizedOptions = (input.options ?? [])
-    .map((opt) => ({
-      text: normalizeForComparison(opt.content),
-      isCorrect: Boolean(opt.isCorrect),
-    }))
+    .map((opt) => {
+      const text = normalizeForComparison(opt.content);
+      const mediaSig = [
+        opt.imageUrl?.trim().toLowerCase() ?? "",
+        ...(opt.media ?? []).map((m) => (m.fileName ?? m.rId ?? "").trim().toLowerCase()),
+      ]
+        .filter(Boolean)
+        .sort()
+        .join(",");
+      const combined = mediaSig ? `${text}[img:${mediaSig}]` : text;
+      return {
+        text: combined,
+        isCorrect: Boolean(opt.isCorrect),
+      };
+    })
     .filter((opt) => opt.text.length > 0);
 
   if (normalizedOptions.length > 0) {
@@ -191,7 +226,7 @@ export function computeQuestionDuplicateFingerprint(input: {
       .map((o) => o.text)
       .sort()
       .join("\u001f");
-    return `choice::${normPrompt}::${sortedOptions}::${sortedCorrect}`;
+    return `choice::${normPrompt}${promptMediaSig}::${sortedOptions}::${sortedCorrect}`;
   }
 
   const sortedAccepted = (input.acceptedAnswers ?? [])
@@ -200,7 +235,7 @@ export function computeQuestionDuplicateFingerprint(input: {
     .sort()
     .join("\u001f");
   const normBack = normalizeForComparison(input.backText ?? "");
-  return `text::${normPrompt}::${sortedAccepted || normBack}`;
+  return `text::${normPrompt}${promptMediaSig}::${sortedAccepted || normBack}`;
 }
 
 /**
@@ -242,6 +277,8 @@ export function validateImportBatch(
     const normPrompt = normalizeForComparison(q.prompt);
     const fingerprint = computeQuestionDuplicateFingerprint({
       prompt: q.prompt,
+      promptImageUrl: q.promptImageUrl,
+      promptMedia: q.promptMedia,
       backText: q.backText,
       options: q.options,
       acceptedAnswers: q.acceptedAnswers,

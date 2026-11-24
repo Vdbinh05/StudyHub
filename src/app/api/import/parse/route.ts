@@ -88,12 +88,14 @@ const ImportOptionsSchema = z
         "eduquiz_txt",
         "word_answer_key",
         "docx_ooxml",
+        "docx_multimedia",
         "xlsx_wayground",
         "xlsx_generic",
         "quizlet_tsv",
         "csv",
         "json",
         "txt_generic",
+        "pdf_text",
       ])
       .optional(),
     sheetName: z.string().max(120).optional(),
@@ -104,6 +106,9 @@ const ImportOptionsSchema = z
     csvDelimiter: z.string().max(5).optional(),
     termDelimiter: z.string().max(16).optional(),
     cardDelimiter: z.string().max(16).optional(),
+    pdfPageRange: z.string().max(100).optional(),
+    pdfTwoColumn: z.boolean().optional(),
+    preserveMediaPreviews: z.boolean().optional(),
     defaultQuestionType: z
       .enum([
         "single_choice",
@@ -111,6 +116,14 @@ const ImportOptionsSchema = z
         "true_false",
         "flashcard",
         "short_answer",
+        "fill_in_blank",
+        "numerical",
+        "image_choice",
+        "ordering",
+        "matching",
+        "image_hotspot",
+        "reading_passage",
+        "listening",
       ])
       .optional(),
     defaultChapter: z.string().max(200).optional(),
@@ -202,7 +215,10 @@ export async function POST(request: Request) {
       fileBytes,
       fileName,
       rawText,
-      options,
+      options: {
+        preserveMediaPreviews: true,
+        ...options,
+      },
     });
 
     // Paginated, prompt-prefiltered full-fingerprint duplicate check beyond 1,000 existing rows

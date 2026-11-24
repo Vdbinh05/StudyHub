@@ -186,7 +186,7 @@ export async function GET(
             supabase
               .from("user_question_progress")
               .select(
-                "question_id, mastery_level, correct_count, wrong_count, consecutive_correct, ease_factor, interval_days, repetitions, last_reviewed_at, next_review_at",
+                "question_id, mastery_level, correct_count, wrong_count, consecutive_correct, consecutive_wrong, ease_factor, interval_days, repetitions, last_reviewed_at, last_wrong_at, next_review_at, last_confidence, low_confidence_count, high_conf_wrong_count, guess_correct_count, independent_recall_count, hint_used_count, mistake_status",
               )
               .eq("user_id", user.id)
               .in("question_id", chunk),
@@ -251,11 +251,21 @@ export async function POST(
         position,
         chapter: input.chapter ?? null,
         prompt: input.prompt,
+        prompt_rich: (input.prompt_rich ?? null) as Json | null,
         prompt_image_url: input.prompt_image_url ?? null,
         back_text: input.back_text ?? null,
+        back_rich: (input.back_rich ?? null) as Json | null,
         back_image_url: input.back_image_url ?? null,
         explanation: input.explanation ?? null,
+        explanation_rich: (input.explanation_rich ?? null) as Json | null,
         hint: input.hint ?? null,
+        hint_rich: (input.hint_rich ?? null) as Json | null,
+        audio_media_id: input.audio_media_id ?? null,
+        audio_url: input.audio_url ?? null,
+        audio_transcript: input.audio_transcript ?? null,
+        passage_id: input.passage_id ?? null,
+        diagram_id: input.diagram_id ?? null,
+        type_payload: (input.type_payload ?? null) as Json | null,
         difficulty: input.difficulty,
         source_metadata: (input.source_metadata ?? {}) as Json,
       })
@@ -276,7 +286,10 @@ export async function POST(
               position: opt.position ?? idx,
               label: opt.label,
               content: opt.content,
+              content_rich: (opt.content_rich ?? null) as Json | null,
               image_url: opt.image_url ?? null,
+              media_id: opt.media_id ?? null,
+              image_alt: opt.image_alt ?? null,
               is_correct: opt.is_correct,
             })),
           )
@@ -285,6 +298,37 @@ export async function POST(
 
         if (optErr) throw optErr;
         insertedOptions = opts ?? [];
+      }
+
+      if (input.media_attachments && input.media_attachments.length > 0) {
+        const { error: mediaRelErr } = await supabase
+          .from("content_media_relations")
+          .upsert(
+            input.media_attachments.map((att, idx) => ({
+              media_id: att.media_id,
+              entity_type: "question" as const,
+              entity_id: created.id,
+              role: att.role,
+              sort_order: att.sort_order ?? idx,
+              alt_text: att.alt_text ?? null,
+              caption: att.caption ?? null,
+            })),
+            { onConflict: "media_id,entity_type,entity_id,role" },
+          );
+        if (mediaRelErr) throw mediaRelErr;
+      }
+
+      // Bump study_sets.content_version for offline freshness detection
+      const { data: setVer } = await supabase
+        .from("study_sets")
+        .select("content_version")
+        .eq("id", setId)
+        .maybeSingle();
+      if (setVer) {
+        await supabase
+          .from("study_sets")
+          .update({ content_version: (setVer.content_version ?? 1) + 1 })
+          .eq("id", setId);
       }
 
       let insertedAccepted: unknown[] = [];

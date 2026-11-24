@@ -12,6 +12,7 @@ import {
   FolderPlus,
   History,
   Home,
+  Keyboard,
   Layers,
   Library,
   LogIn,
@@ -20,6 +21,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Settings,
@@ -28,8 +30,11 @@ import {
   Upload,
   User,
   Users,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
+import { clearOfflineDataForLogout, useOptionalPwa } from "@/components/pwa/PwaProvider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,7 +45,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
@@ -59,6 +63,7 @@ import { apiFetch, ApiError, isSupabaseConfiguredClient } from "./api-client";
 import { BrandLogo } from "./brand-logo";
 import { LanguageToggle } from "./language-toggle";
 import { ServiceSetupNotice } from "./service-setup-notice";
+import { useShortcuts } from "./ShortcutProvider";
 import { ThemeToggle } from "./theme-toggle";
 
 interface NavItem {
@@ -200,7 +205,7 @@ const NAV_ITEMS: NavItem[] = [
 
 // Focus routes render their own single <main id="main-content"> and focus header
 const FOCUS_ROUTE_PATTERN =
-  /^(\/sets\/[^/]+\/(flashcards|learn|practice|write|match|test|results)(?:\/|$)|\/exams\/(?!new(?:\/|$))[^/]+(?:\/|$))/;
+  /^(\/sets\/[^/]+\/(flashcards|learn|practice|write|spell|match|test|results)(?:\/|$)|\/exams\/(?!new(?:\/|$))[^/]+(?:\/|$))/;
 
 const SIDEBAR_STORAGE_KEY = "studyhub-sidebar-collapsed";
 const sidebarListeners = new Set<() => void>();
@@ -254,6 +259,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
   const { locale, t } = useI18n();
   const { updatePreferences } = useUserPreferences();
+  const { openSearch, openHelp, isExamRoute } = useShortcuts();
+  const pwa = useOptionalPwa();
 
   const collapsed = React.useSyncExternalStore(
     subscribeSidebar,
@@ -261,7 +268,6 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     () => false,
   );
   const [mobileMoreOpen, setMobileMoreOpen] = React.useState(false);
-  const [searchQuery, setSearchQuery] = React.useState("");
   const [signingOut, setSigningOut] = React.useState(false);
 
   const toggleSidebar = () => {
@@ -297,18 +303,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     },
   });
 
-  const handleGlobalSearch = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const trimmed = searchQuery.trim();
-    const target = trimmed
-      ? `/library?search=${encodeURIComponent(trimmed)}`
-      : "/library";
-    router.push(target);
-  };
-
   const handleSignOut = async () => {
     setSigningOut(true);
     try {
+      await clearOfflineDataForLogout(profileData?.profile?.id);
       await fetch("/auth/signout", { method: "POST", credentials: "same-origin" });
       queryClient.clear();
       router.push("/login");
@@ -344,7 +342,9 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     (profileError instanceof ApiError &&
       profileError.code === "SUPABASE_NOT_CONFIGURED");
 
-  const hideTopbarSearch = pathname === "/library";
+  const isOnline = pwa?.isOnline ?? true;
+  const isSyncing = pwa?.isSyncing ?? false;
+  const pendingSyncCount = pwa?.syncSummary?.pendingCount ?? 0;
 
   const renderNavLink = (item: NavItem, onNavigate?: () => void) => {
     const active = item.match(pathname, searchParams);
@@ -599,28 +599,71 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               <BrandLogo />
             </Link>
 
-            {!hideTopbarSearch && (
-              <search className="hidden max-w-md flex-1 sm:block">
-                <form onSubmit={handleGlobalSearch} className="relative">
-                  <Search
-                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                    aria-hidden="true"
-                  />
-                  <Input
-                    type="search"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    enterKeyHint="search"
-                    placeholder={t("library.searchPlaceholder")}
-                    aria-label={t("library.searchPlaceholder")}
-                    className="bg-background h-9 pl-9"
-                  />
-                </form>
-              </search>
+            {!isExamRoute && (
+              <div className="hidden max-w-md flex-1 sm:block">
+                <button
+                  type="button"
+                  onClick={openSearch}
+                  aria-label={t("search.dialogTitle")}
+                  className="border-input bg-background text-muted-foreground hover:bg-secondary/60 hover:text-foreground focus-visible:ring-ring flex h-9 w-full items-center justify-between gap-2 rounded-md border px-3 text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Search className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{t("search.triggerPlaceholder")}</span>
+                  </span>
+                  <kbd className="border-border bg-muted text-muted-foreground hidden shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium md:inline-block">
+                    Ctrl K
+                  </kbd>
+                </button>
+              </div>
             )}
           </div>
 
           <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
+            {/* Online / Offline / Sync Status Pill (desktop/tablet) */}
+            <Link
+              href={isOnline ? "/settings?tab=offline" : "/offline"}
+              aria-label={
+                isOnline
+                  ? isSyncing
+                    ? t("pwa.syncing")
+                    : pendingSyncCount > 0
+                      ? t("pwa.pendingSyncCount", { count: pendingSyncCount })
+                      : t("pwa.online")
+                  : t("pwa.offline")
+              }
+              className={cn(
+                "hidden min-h-9 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors md:inline-flex",
+                !isOnline
+                  ? "border-warning/40 bg-warning-subtle text-warning-subtle-foreground"
+                  : pendingSyncCount > 0 || isSyncing
+                    ? "border-primary/30 bg-primary-subtle text-primary"
+                    : "border-border bg-card text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {!isOnline ? (
+                <>
+                  <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />
+                  <span>{t("pwa.offline")}</span>
+                </>
+              ) : isSyncing ? (
+                <>
+                  <RefreshCw className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                  <span>{t("pwa.syncing")}</span>
+                </>
+              ) : pendingSyncCount > 0 ? (
+                <>
+                  <RefreshCw className="size-3.5 shrink-0" aria-hidden="true" />
+                  <span>{pendingSyncCount}</span>
+                </>
+              ) : (
+                <>
+                  <Wifi className="text-success size-3.5 shrink-0" aria-hidden="true" />
+                  <span className="hidden xl:inline">{t("pwa.online")}</span>
+                </>
+              )}
+            </Link>
+
             {/* Quick Create Dropdown */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -740,6 +783,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                       <span>{t("nav.history")}</span>
                     </Link>
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={openHelp}>
+                    <Keyboard className="size-4" aria-hidden="true" />
+                    <span>{t("study.keyboardShortcuts")}</span>
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     variant="destructive"
@@ -818,29 +865,60 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                 </SheetDescription>
               </SheetHeader>
 
-              <search className="mt-2">
-                <form
-                  onSubmit={(e) => {
-                    handleGlobalSearch(e);
-                    setMobileMoreOpen(false);
-                  }}
-                  className="relative"
-                >
-                  <Search
-                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                    aria-hidden="true"
-                  />
-                  <Input
-                    type="search"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    enterKeyHint="search"
-                    placeholder={t("library.searchPlaceholder")}
-                    aria-label={t("library.searchPlaceholder")}
-                    className="pl-9"
-                  />
-                </form>
-              </search>
+              <div className="mt-2 flex flex-col gap-2">
+                {!isExamRoute && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setMobileMoreOpen(false);
+                      openSearch();
+                    }}
+                    className="text-muted-foreground min-h-11 w-full justify-start gap-2 font-normal"
+                  >
+                    <Search className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{t("search.triggerPlaceholder")}</span>
+                  </Button>
+                )}
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={isOnline ? "/settings?tab=offline" : "/offline"}
+                    onClick={() => setMobileMoreOpen(false)}
+                    className={cn(
+                      "flex min-h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-medium",
+                      !isOnline
+                        ? "border-warning/40 bg-warning-subtle text-warning-subtle-foreground"
+                        : "border-border bg-card text-foreground",
+                    )}
+                  >
+                    {isOnline ? (
+                      <Wifi className="text-success size-3.5 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />
+                    )}
+                    <span>
+                      {!isOnline
+                        ? t("pwa.offline")
+                        : pendingSyncCount > 0
+                          ? t("pwa.pendingSyncCount", { count: pendingSyncCount })
+                          : t("pwa.online")}
+                    </span>
+                  </Link>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setMobileMoreOpen(false);
+                      openHelp();
+                    }}
+                    className="min-h-10 shrink-0 gap-1.5"
+                  >
+                    <Keyboard className="size-3.5" aria-hidden="true" />
+                    <span>{t("study.keyboardShortcuts")}</span>
+                  </Button>
+                </div>
+              </div>
 
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {mobileSheetLinks.map((item) => {

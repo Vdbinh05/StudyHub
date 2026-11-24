@@ -5,12 +5,12 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  Check,
   ChevronLeft,
   ChevronRight,
   Cloud,
   CloudOff,
   Flag,
+  Gauge,
   Grid2X2,
   Keyboard,
   Loader2,
@@ -37,7 +37,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import {
   Sheet,
   SheetContent,
@@ -45,7 +44,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
+import { ConfidenceSelector } from "@/components/learning/ConfidenceSelector";
 import { FocusModeShell } from "@/components/learning/FocusModeShell";
 import { lText } from "@/components/learning/learning-copy";
 import {
@@ -53,27 +52,33 @@ import {
   StudyLoadingSkeleton,
 } from "@/components/learning/useStudySetBundle";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   fetchExamAttempt,
   isEditableEventTarget,
-  isSafeDisplayImageUrl,
   LearningApiError,
   saveExamAnswers,
   submitExamAttempt,
   type ExamAnswerSaveItem,
   type ExamAttemptPayload,
 } from "@/lib/learning/api-client";
-import { indexToOptionLabel } from "@/lib/learning/shuffle";
+import type { ConfidenceLevel, StructuredAnswerResponse } from "@/types/domain";
 import { cn } from "@/lib/utils";
 import {
   ExamNavigatorGrid,
   type NavigatorQuestionItem,
 } from "./ExamNavigatorGrid";
 import { ExamTimer } from "./ExamTimer";
+import {
+  hasExamQuestionAnswer,
+  V3ExamQuestionBody,
+} from "./V3ExamQuestionBody";
 
 interface LocalAnswerRecord {
   selectedOptionIds: string[];
   typedAnswer: string;
+  structuredResponse?: StructuredAnswerResponse | null;
+  confidence?: ConfidenceLevel | null;
   isFlagged: boolean;
   clientSeq: number;
   updatedAtMs: number;
@@ -131,6 +136,7 @@ export function LiveExamRunner({
 }: LiveExamRunnerProps) {
   const router = useRouter();
   const { locale, t } = useI18n();
+  const { preferences } = useUserPreferences();
 
   const examQuery = useQuery<ExamAttemptPayload>({
     queryKey: ["exam-attempt-live", attemptId],
@@ -168,6 +174,20 @@ export function LiveExamRunner({
   const [exitModalOpen, setExitModalOpen] = React.useState(false);
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const [navSheetOpen, setNavSheetOpen] = React.useState(false);
+  const [confidenceBarOverride, setConfidenceBarOverride] = React.useState<
+    boolean | null
+  >(null);
+  const showConfidenceBar =
+    confidenceBarOverride ?? Boolean(preferences.confidence_enabled);
+  const setShowConfidenceBar = React.useCallback(
+    (updater: boolean | ((prev: boolean) => boolean)) => {
+      setConfidenceBarOverride((prev) => {
+        const current = prev ?? Boolean(preferences.confidence_enabled);
+        return typeof updater === "function" ? updater(current) : updater;
+      });
+    },
+    [preferences.confidence_enabled],
+  );
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const dirtyQueueRef = React.useRef<Map<string, ExamAnswerSaveItem>>(new Map());
@@ -226,6 +246,8 @@ export function LiveExamRunner({
       hydrated[ans.attempt_question_id] = {
         selectedOptionIds: ans.selected_option_ids ?? [],
         typedAnswer: ans.typed_answer ?? "",
+        structuredResponse: ans.structured_response ?? null,
+        confidence: ans.confidence ?? null,
         isFlagged: Boolean(ans.is_flagged),
         clientSeq: srvSeq,
         updatedAtMs: srvMs,
@@ -250,6 +272,8 @@ export function LiveExamRunner({
             attempt_question_id: aqId,
             selected_option_ids: rec.selectedOptionIds,
             typed_answer: rec.typedAnswer || null,
+            structured_response: rec.structuredResponse ?? null,
+            confidence: rec.confidence ?? null,
             is_flagged: rec.isFlagged,
             client_seq: nextSeq,
           });
@@ -516,6 +540,8 @@ export function LiveExamRunner({
             attempt_question_id: currentQuestion.id,
             selected_option_ids: nextRec.selectedOptionIds,
             typed_answer: nextRec.typedAnswer.trim() ? nextRec.typedAnswer : null,
+            structured_response: nextRec.structuredResponse ?? null,
+            confidence: nextRec.confidence ?? null,
             is_flagged: nextRec.isFlagged,
             client_seq: nextSeq,
           },
@@ -530,20 +556,28 @@ export function LiveExamRunner({
   const handleSelectOption = React.useCallback(
     (optionId: string) => {
       if (!currentQuestion) return;
-      const isMulti = currentQuestion.question_type === "multiple_choice";
+      const payload = currentQuestion.type_payload_snapshot;
+      const isMulti =
+        currentQuestion.question_type === "multiple_choice" ||
+        (payload?.type === "image_choice" &&
+          payload.selection_mode === "multiple") ||
+        (payload?.type === "reading_passage" &&
+          payload.sub_answer_kind === "multiple_choice") ||
+        (payload?.type === "listening" &&
+          payload.sub_answer_kind === "multiple_choice");
       updateCurrentRecord((prev) => {
-        if (isMulti) {
-          const exists = prev.selectedOptionIds.includes(optionId);
-          return {
-            ...prev,
-            selectedOptionIds: exists
-              ? prev.selectedOptionIds.filter((id) => id !== optionId)
-              : [...prev.selectedOptionIds, optionId],
-          };
-        }
+        const nextIds = isMulti
+          ? prev.selectedOptionIds.includes(optionId)
+            ? prev.selectedOptionIds.filter((id) => id !== optionId)
+            : [...prev.selectedOptionIds, optionId]
+          : [optionId];
         return {
           ...prev,
-          selectedOptionIds: [optionId],
+          selectedOptionIds: nextIds,
+          structuredResponse: {
+            kind: "options",
+            selected_option_ids: nextIds,
+          },
         };
       });
     },
@@ -668,10 +702,7 @@ export function LiveExamRunner({
   const navigatorItems = React.useMemo<NavigatorQuestionItem[]>(() => {
     return questions.map((q) => {
       const rec = answerMap[q.id];
-      const isAnswered = Boolean(
-        rec &&
-          (rec.selectedOptionIds.length > 0 || rec.typedAnswer.trim().length > 0),
-      );
+      const isAnswered = hasExamQuestionAnswer(q, rec);
       return {
         attemptQuestionId: q.id,
         position: q.position,
@@ -874,141 +905,90 @@ export function LiveExamRunner({
                   ) : null}
                 </div>
 
-                {allowMarkForReview ? (
+                <div className="flex items-center gap-1.5">
                   <Button
                     type="button"
-                    variant={currentRecord.isFlagged ? "secondary" : "ghost"}
+                    variant={showConfidenceBar ? "secondary" : "ghost"}
                     size="sm"
-                    className={cn(
-                      "min-h-11 sm:min-h-9 shrink-0",
-                      currentRecord.isFlagged &&
-                        "bg-warning-subtle text-warning-subtle-foreground hover:bg-warning-subtle/80",
-                    )}
-                    aria-pressed={currentRecord.isFlagged}
-                    onClick={handleToggleFlag}
+                    className="min-h-11 sm:min-h-9 shrink-0 text-xs"
+                    aria-pressed={showConfidenceBar}
+                    onClick={() => setShowConfidenceBar((v) => !v)}
                   >
-                    <Flag
-                      className={cn(
-                        "size-4",
-                        currentRecord.isFlagged && "fill-current",
-                      )}
-                      aria-hidden="true"
-                    />
+                    <Gauge className="size-3.5" aria-hidden="true" />
                     <span className="hidden sm:inline">
-                      {currentRecord.isFlagged
-                        ? t("exam.unflagQuestion")
-                        : t("exam.flagQuestion")}
+                      {lText(locale, "Độ tự tin", "Confidence")}
                     </span>
-                    <kbd className="ml-1 hidden rounded bg-background/60 px-1 py-0.5 font-mono text-[10px] lg:inline">
-                      M
-                    </kbd>
                   </Button>
-                ) : null}
-              </div>
 
-              <div className="space-y-3">
-                <h2 className="max-w-[68ch] whitespace-pre-wrap text-base sm:text-lg font-medium leading-relaxed text-foreground">
-                  {currentQuestion.prompt_snapshot}
-                </h2>
-                {isSafeDisplayImageUrl(
-                  currentQuestion.prompt_image_url_snapshot,
-                ) ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={currentQuestion.prompt_image_url_snapshot}
-                    alt={lText(
-                      locale,
-                      "Hình ảnh câu hỏi",
-                      "Question illustration",
-                    )}
-                    className="max-h-64 rounded-lg border border-border object-contain"
-                  />
-                ) : null}
-              </div>
-
-              {currentQuestion.question_type === "short_answer" ||
-              currentQuestion.options_snapshot.length === 0 ? (
-                <div className="space-y-2">
-                  <Label htmlFor="exam-short-answer">
-                    {t("study.yourAnswer")}
-                  </Label>
-                  <Textarea
-                    id="exam-short-answer"
-                    rows={3}
-                    value={currentRecord.typedAnswer}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      updateCurrentRecord((prev) => ({
-                        ...prev,
-                        typedAnswer: val,
-                      }));
-                    }}
-                    placeholder={lText(
-                      locale,
-                      "Nhập câu trả lời của bạn...",
-                      "Type your answer...",
-                    )}
-                    className="text-base sm:text-sm"
-                  />
-                </div>
-              ) : (
-                <div
-                  role={
-                    currentQuestion.question_type === "multiple_choice"
-                      ? "group"
-                      : "radiogroup"
-                  }
-                  aria-label={lText(locale, "Các phương án", "Answer choices")}
-                  className="space-y-2.5"
-                >
-                  {currentQuestion.options_snapshot.map((opt, optIdx) => {
-                    const isSelected = currentRecord.selectedOptionIds.includes(
-                      opt.id,
-                    );
-                    const displayLetter = indexToOptionLabel(optIdx);
-
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        role={
-                          currentQuestion.question_type === "multiple_choice"
-                            ? "checkbox"
-                            : "radio"
-                        }
-                        aria-checked={isSelected}
-                        onClick={() => handleSelectOption(opt.id)}
+                  {allowMarkForReview ? (
+                    <Button
+                      type="button"
+                      variant={currentRecord.isFlagged ? "secondary" : "ghost"}
+                      size="sm"
+                      className={cn(
+                        "min-h-11 sm:min-h-9 shrink-0",
+                        currentRecord.isFlagged &&
+                          "bg-warning-subtle text-warning-subtle-foreground hover:bg-warning-subtle/80",
+                      )}
+                      aria-pressed={currentRecord.isFlagged}
+                      onClick={handleToggleFlag}
+                    >
+                      <Flag
                         className={cn(
-                          "flex min-h-[52px] w-full items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                          isSelected
-                            ? "border-2 border-primary bg-accent text-accent-foreground"
-                            : "border-input bg-card text-foreground hover:bg-secondary/60",
+                          "size-4",
+                          currentRecord.isFlagged && "fill-current",
                         )}
-                      >
-                        <span
-                          className={cn(
-                            "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-semibold",
-                            isSelected
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border bg-secondary text-secondary-foreground",
-                          )}
-                        >
-                          {displayLetter}
-                        </span>
-                        <span className="flex-1 whitespace-pre-wrap text-sm sm:text-base leading-relaxed">
-                          {opt.content}
-                        </span>
-                        {isSelected ? (
-                          <Check
-                            className="mt-1 size-4 shrink-0 text-primary"
-                            aria-hidden="true"
-                          />
-                        ) : null}
-                      </button>
-                    );
-                  })}
+                        aria-hidden="true"
+                      />
+                      <span className="hidden sm:inline">
+                        {currentRecord.isFlagged
+                          ? t("exam.unflagQuestion")
+                          : t("exam.flagQuestion")}
+                      </span>
+                      <kbd className="ml-1 hidden rounded bg-background/60 px-1 py-0.5 font-mono text-[10px] lg:inline">
+                        M
+                      </kbd>
+                    </Button>
+                  ) : null}
                 </div>
-              )}
+              </div>
+
+              {/* Optional Pre-Answer Confidence Selector (Metacognitive Analytics Only — NEVER Changes Score!) */}
+              <ConfidenceSelector
+                enabled={showConfidenceBar}
+                value={currentRecord.confidence ?? null}
+                onChange={(conf) =>
+                  updateCurrentRecord((prev) => ({
+                    ...prev,
+                    confidence: conf,
+                  }))
+                }
+                keyboardMode="none"
+                isExamContext
+                compact
+              />
+
+              {/* All 12 V3 Exam Question Types Renderer */}
+              <V3ExamQuestionBody
+                question={currentQuestion}
+                record={currentRecord}
+                onSelectOption={handleSelectOption}
+                onChangeTyped={(val) =>
+                  updateCurrentRecord((prev) => ({
+                    ...prev,
+                    typedAnswer: val,
+                    structuredResponse: { kind: "text", value: val },
+                  }))
+                }
+                onChangeStructured={(resp, mirrorTyped) =>
+                  updateCurrentRecord((prev) => ({
+                    ...prev,
+                    structuredResponse: resp,
+                    typedAnswer:
+                      mirrorTyped !== undefined ? mirrorTyped : prev.typedAnswer,
+                  }))
+                }
+              />
             </CardContent>
           </Card>
 

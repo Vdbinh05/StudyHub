@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import "katex/dist/katex.min.css";
 import "./globals.css";
 import { AppProviders } from "./providers";
 
@@ -15,7 +16,22 @@ export const metadata: Metadata = {
     template: "%s | StudyHub",
   },
   description:
-    "Nền tảng tự học, ôn tập flashcard, nhập đề chính xác từ DOCX/XLSX/TXT và luyện thi trắc nghiệm nhiều môn dành cho học sinh, sinh viên và bạn bè.",
+    "Nền tảng tự học toàn diện: Flashcards, Học sâu, Luyện trắc nghiệm, Nghe & Gõ, Sơ đồ tương tác, nhập DOCX/PDF/XLSX/TXT, xuất PDF tiếng Việt và học ngoại tuyến PWA.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "StudyHub",
+  },
+  icons: {
+    icon: [
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [
+      { url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
 };
 
 export const viewport: Viewport = {

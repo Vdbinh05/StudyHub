@@ -9,6 +9,7 @@ const PROTECTED_PREFIXES = [
   "/library",
   "/folders",
   "/sets",
+  "/diagrams",
   "/exams",
   "/practice",
   "/import",

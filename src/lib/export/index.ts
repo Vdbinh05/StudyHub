@@ -3,6 +3,18 @@ import Papa from "papaparse";
 import type { Question, StudySet } from "@/types/domain";
 import { indexToOptionLabel, sanitizeFileName } from "@/lib/import/text-utils";
 
+export {
+  exportStudySetToPdf,
+  type PdfAnswerKeyEntry,
+  type PdfEmbeddedImage,
+  type PdfExportMode,
+  type PdfExportOption,
+  type PdfExportOptions,
+  type PdfExportQuestion,
+  type PdfExportResult,
+  type PdfOrientation,
+} from "./pdf-exporter";
+
 export type StudySetExportFormat = "json" | "csv" | "txt" | "xlsx";
 
 export interface StudySetExportOptions {

@@ -4,11 +4,16 @@ import * as React from "react";
 import Link from "next/link";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   Brain,
   CheckCircle2,
   Clock,
+  Layers,
   RotateCcw,
+  Settings2,
+  SkipForward,
   Star,
   XCircle,
 } from "lucide-react";
@@ -19,32 +24,58 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
 import {
+  advanceAdaptiveLearnRound,
+  buildSessionChoiceAnswerPayload,
+  createAdaptiveLearnState,
+  filterAdaptiveLearnSeeds,
+  getAdaptiveLearnSummary,
+  getCurrentAdaptiveCard,
+  isValidUuid,
+  LEARN_OBJECTIVES,
+  LEARN_STAGE_LABELS,
+  recordAdaptiveLearnStep,
+  type AdaptiveLearnFilterConfig,
+  type AdaptiveLearnItemSeed,
+  type AdaptiveLearnState,
+  type LearnObjective,
+} from "@/lib/learning/adaptive-learn";
+import {
   createStudySession,
+  deleteCheckpoint,
   isEditableEventTarget,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
+  listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
+  upsertCheckpoint,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
 import {
-  advanceLearnRound,
-  createLearnQueueState,
-  getCurrentLearnCard,
-  getLearnStats,
-  recordLearnAnswer,
-  type LearnItemInput,
-  type LearnQueueState,
-} from "@/lib/learning/learn-queue";
+  clearLocalCheckpoint,
+  loadLocalCheckpoint,
+  makeCheckpointSessionKey,
+  pickNewestCheckpoint,
+  reconcileCheckpointQuestions,
+  saveLocalCheckpoint,
+} from "@/lib/learning/checkpoints";
+import { applyConfidenceToSm2 } from "@/lib/learning/confidence";
+import { projectQuestionToFlashcard } from "@/lib/learning/flashcard-projection";
 import {
   createSeededRng,
   gradeChoiceSelection,
@@ -53,7 +84,6 @@ import {
   type DisplayedOption,
 } from "@/lib/learning/shuffle";
 import {
-  calculateNextReview,
   createInitialProgressState,
   summarizeMastery,
 } from "@/lib/learning/sm2";
@@ -61,10 +91,22 @@ import {
   getExpectedWriteAnswers,
   gradeWriteAnswer,
 } from "@/lib/learning/write-grader";
-import type { Question, QuestionOption } from "@/types/domain";
+import { gradeQuestionResponse } from "@/lib/questions";
+import type {
+  ConfidenceLevel,
+  NormalizedPoint,
+  Question,
+  QuestionOption,
+  StructuredAnswerResponse,
+} from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
+import { ConfidenceSelector } from "./ConfidenceSelector";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
+import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { ResetProgressDialog } from "./ResetProgressDialog";
+import { ResumeSessionBanner } from "./ResumeSessionBanner";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -72,14 +114,24 @@ import {
   useStudySetBundle,
 } from "./useStudySetBundle";
 
-interface LearnClientProps {
+export interface LearnClientProps {
   setId: string;
+}
+
+interface LearnFeedbackState {
+  isCorrect: boolean;
+  expectedText: string;
+  explanation?: string | null;
+  explanationRich?: Question["explanation_rich"];
+  stageMessage?: string | null;
+  isForcedCorrectionPrompt?: boolean;
 }
 
 export function LearnClient({ setId }: LearnClientProps) {
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
   const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
+
   const {
     data: bundle,
     isLoading,
@@ -90,37 +142,82 @@ export function LearnClient({ setId }: LearnClientProps) {
     updateLocalProgress,
   } = useStudySetBundle(setId);
 
+  // Clean simple default mode + full V3 session configuration
+  const [objective, setObjective] = React.useState<LearnObjective>("master");
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
+  const [selectedTagId, setSelectedTagId] = React.useState<string>("all");
+  const [onlyNew, setOnlyNew] = React.useState(false);
+  const [onlyIncorrect, setOnlyIncorrect] = React.useState(false);
+  const [onlyDue, setOnlyDue] = React.useState(false);
+  const [onlyLowConfidence, setOnlyLowConfidence] = React.useState(false);
+  const [onlyStarred, setOnlyStarred] = React.useState(false);
+  const [maxItems, setMaxItems] = React.useState<string>("all");
   const [roundSize, setRoundSize] = React.useState<number>(7);
-  const [queueState, setQueueState] = React.useState<LearnQueueState | null>(
+  const [forcedCorrection, setForcedCorrection] = React.useState<boolean>(false);
+  const [confidenceOverride, setConfidenceOverride] = React.useState<
+    boolean | null
+  >(null);
+  const confidenceEnabled =
+    confidenceOverride ?? Boolean(preferences.confidence_enabled);
+  const setConfidenceEnabled = React.useCallback((next: boolean) => {
+    setConfidenceOverride(next);
+  }, []);
+  const [configNonce, setConfigNonce] = React.useState(0);
+
+  // Active Learn state
+  const [learnState, setLearnState] = React.useState<AdaptiveLearnState | null>(
     null,
   );
   const [completedDurationSeconds, setCompletedDurationSeconds] =
     React.useState(1);
+
+  // Per-item interaction state
   const [selectedOptionIds, setSelectedOptionIds] = React.useState<string[]>([]);
   const [typedAnswer, setTypedAnswer] = React.useState("");
-  const [feedback, setFeedback] = React.useState<{
-    submitted: boolean;
-    isCorrect: boolean;
-    expectedText: string;
+  const [forcedCorrectionDraft, setForcedCorrectionDraft] = React.useState("");
+  const [blankAnswers, setBlankAnswers] = React.useState<Record<string, string>>(
+    {},
+  );
+  const [numericalValue, setNumericalValue] = React.useState("");
+  const [numericalUnit, setNumericalUnit] = React.useState("");
+  const [orderedIds, setOrderedIds] = React.useState<string[]>([]);
+  const [matchingPairs, setMatchingPairs] = React.useState<
+    Record<string, string>
+  >({});
+  const [hotspotClicks, setHotspotClicks] = React.useState<NormalizedPoint[]>(
+    [],
+  );
+  const [selectedConfidence, setSelectedConfidence] =
+    React.useState<ConfidenceLevel | null>(null);
+  const [pendingNextState, setPendingNextState] =
+    React.useState<AdaptiveLearnState | null>(null);
+  const [feedback, setFeedback] = React.useState<LearnFeedbackState | null>(null);
+  const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+
+  // Checkpoint resume banner state
+  const sessionKey = React.useMemo(
+    () =>
+      makeCheckpointSessionKey(
+        "learn",
+        setId,
+        `${objective}_${selectedChapter}`,
+      ),
+    [objective, selectedChapter, setId],
+  );
+  const [pendingResume, setPendingResume] = React.useState<{
+    source: "remote" | "local";
+    currentIndex: number;
+    totalItems: number;
+    progressPercent: number;
+    updatedAt: string | null;
+    removedCount: number;
+    restoredState: AdaptiveLearnState;
   } | null>(null);
-  const [turnCounter, setTurnCounter] = React.useState(0);
 
   const sessionIdRef = React.useRef<string | null>(null);
-  const initializedKeyRef = React.useRef<string | null>(null);
-  const startedAtRef = React.useRef<number>(0);
+  const sessionStartRef = React.useRef<number>(0);
   const cardStartRef = React.useRef<number>(0);
-  const lastCompositionEndRef = React.useRef<number | null>(null);
-  const bundleRef = React.useRef(bundle);
-
-  React.useEffect(() => {
-    bundleRef.current = bundle;
-  }, [bundle]);
-
-  React.useEffect(() => {
-    startedAtRef.current = Date.now();
-    cardStartRef.current = Date.now();
-  }, []);
+  const initializedKeyRef = React.useRef<string | null>(null);
 
   const bundleQuestions = bundle?.questions;
 
@@ -132,297 +229,781 @@ export function LearnClient({ setId }: LearnClientProps) {
     return map;
   }, [bundleQuestions]);
 
-  const filteredQuestions = React.useMemo(() => {
-    if (!bundleQuestions) return [];
-    if (selectedChapter === "all") return bundleQuestions;
-    return bundleQuestions.filter(
-      (q) => (q.chapter?.trim() || "") === selectedChapter,
-    );
-  }, [bundleQuestions, selectedChapter]);
+  const allTags = React.useMemo(() => {
+    const map = new Map<string, { id: string; name: string }>();
+    for (const q of bundleQuestions ?? []) {
+      for (const tag of q.tags ?? []) {
+        if (!map.has(tag.id)) map.set(tag.id, { id: tag.id, name: tag.name });
+      }
+    }
+    return Array.from(map.values());
+  }, [bundleQuestions]);
+
+  const filterConfig = React.useMemo<AdaptiveLearnFilterConfig>(() => {
+    return {
+      chapters: selectedChapter !== "all" ? [selectedChapter] : undefined,
+      tagIds: selectedTagId !== "all" ? [selectedTagId] : undefined,
+      onlyNew,
+      onlyIncorrect,
+      onlyDue,
+      onlyLowConfidence,
+      onlyStarred,
+      maxItems: maxItems === "all" ? null : Number(maxItems) || null,
+    };
+  }, [
+    maxItems,
+    onlyDue,
+    onlyIncorrect,
+    onlyLowConfidence,
+    onlyNew,
+    onlyStarred,
+    selectedChapter,
+    selectedTagId,
+  ]);
+
+  const filteredSeeds = React.useMemo<AdaptiveLearnItemSeed[]>(() => {
+    if (!bundleQuestions || !bundle) return [];
+    const seeds: AdaptiveLearnItemSeed[] = bundleQuestions.map((question) => ({
+      question,
+      progress: bundle.progressMap.get(question.id) ?? null,
+      isStarred: bundle.starredIds.has(question.id),
+    }));
+    return filterAdaptiveLearnSeeds(seeds, filterConfig);
+  }, [bundle, bundleQuestions, filterConfig]);
 
   const masterySummary = React.useMemo(() => {
     if (!bundle) {
       return { total: 0, new: 0, learning: 0, familiar: 0, mastered: 0, due: 0 };
     }
-    const items = filteredQuestions.map(
-      (q) => bundle.progressMap.get(q.id) ?? createInitialProgressState(),
+    return summarizeMastery(
+      filteredSeeds.map(
+        (s) => s.progress ?? createInitialProgressState(),
+      ),
     );
-    return summarizeMastery(items);
-  }, [bundle, filteredQuestions]);
+  }, [bundle, filteredSeeds]);
 
-  const initQueue = React.useCallback(
-    (questions: Question[], size: number, chapter: string) => {
-      const currentBundle = bundleRef.current;
-      if (!currentBundle) return;
-      const inputs: LearnItemInput[] = questions.map((q) => {
-        const p = currentBundle.progressMap.get(q.id);
-        return {
-          questionId: q.id,
-          masteryLevel: p?.mastery_level ?? "new",
-          nextReviewAt: p?.next_review_at ?? null,
-          wrongCount: p?.wrong_count ?? 0,
-        };
-      });
-      const initial = createLearnQueueState(inputs, {
-        roundSize: size,
-        reinsertGap: 4,
-      });
-      setQueueState(initial);
-      setSelectedOptionIds([]);
-      setTypedAnswer("");
-      setFeedback(null);
-      setTurnCounter((c) => c + 1);
-      startedAtRef.current = Date.now();
-      cardStartRef.current = Date.now();
-      sessionIdRef.current = null;
-
-      if (questions.length > 0) {
-        createStudySession({
-          study_set_id: setId,
-          mode: "learn",
-          config: { chapter, roundSize: size },
-          total_items: questions.length,
-        })
-          .then((s) => {
-            sessionIdRef.current = s.id;
-          })
-          .catch(() => {});
+  const clearCardInputs = React.useCallback((question?: Question | null) => {
+    setSelectedOptionIds([]);
+    setTypedAnswer("");
+    setForcedCorrectionDraft("");
+    setBlankAnswers({});
+    setNumericalValue("");
+    setNumericalUnit("");
+    setMatchingPairs({});
+    setHotspotClicks([]);
+    setSelectedConfidence(null);
+    setFeedback(null);
+    if (question?.type_payload?.type === "ordering") {
+      // Deterministic initial shuffle for ordering items
+      const items = question.type_payload.items;
+      const rng = createSeededRng(question.id.length * 31 + items.length);
+      const copy = [...items];
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
       }
-    },
-    [setId],
-  );
+      setOrderedIds(copy.map((it) => it.id));
+    } else {
+      setOrderedIds([]);
+    }
+  }, []);
 
-  // Initialize queue & study session STRICTLY ONCE per (studySetId, selectedChapter, roundSize).
-  // NEVER depends on mutable `bundle` object, preventing orphaned sessions & mid-feedback queue jumps (SH-008)!
-  const studySetIdLoaded = bundle?.studySet.id ?? null;
-  const sessionKey = studySetIdLoaded
-    ? `${studySetIdLoaded}:${selectedChapter}:${roundSize}`
-    : null;
+  // Initialize queue & session strictly ONCE per explicit config key (preserves SH-008 fix!)
+  const bundleRef = React.useRef(bundle);
+  const seedsRef = React.useRef(filteredSeeds);
+  React.useEffect(() => {
+    bundleRef.current = bundle;
+    seedsRef.current = filteredSeeds;
+  }, [bundle, filteredSeeds]);
+
+  const initConfigKey = [
+    setId,
+    objective,
+    selectedChapter,
+    selectedTagId,
+    onlyNew,
+    onlyIncorrect,
+    onlyDue,
+    onlyLowConfidence,
+    onlyStarred,
+    maxItems,
+    roundSize,
+    forcedCorrection,
+    configNonce,
+    bundleQuestions ? bundleQuestions.length : -1,
+  ].join("|");
 
   React.useEffect(() => {
-    if (!sessionKey || initializedKeyRef.current === sessionKey) return;
-    initializedKeyRef.current = sessionKey;
-    initQueue(filteredQuestions, roundSize, selectedChapter);
-  }, [filteredQuestions, initQueue, roundSize, selectedChapter, sessionKey]);
+    const activeBundle = bundleRef.current;
+    if (!activeBundle) return;
+    if (initializedKeyRef.current === initConfigKey) return;
+    initializedKeyRef.current = initConfigKey;
 
-  const currentCard = queueState ? getCurrentLearnCard(queueState) : null;
+    const currentSeeds = seedsRef.current;
+    const nextState = createAdaptiveLearnState(currentSeeds, {
+      objective,
+      batchSize: roundSize,
+      forcedCorrection,
+      maxForcedRetries: 2,
+    });
+    setLearnState(nextState);
+    const firstCard = getCurrentAdaptiveCard(nextState);
+    clearCardInputs(
+      firstCard ? activeBundle.questions.find((q) => q.id === firstCard.questionId) : null,
+    );
+    sessionStartRef.current = Date.now();
+    cardStartRef.current = Date.now();
+    sessionIdRef.current = null;
+
+    if (currentSeeds.length > 0) {
+      void createStudySession({
+        study_set_id: setId,
+        mode: "learn",
+        config: { objective, chapter: selectedChapter, roundSize, forcedCorrection },
+        total_items: currentSeeds.length,
+      })
+        .then((s) => {
+          sessionIdRef.current = s.id;
+        })
+        .catch(() => {});
+
+      // Check resumable checkpoints
+      const liveSet = new Set(currentSeeds.map((s) => s.question.id));
+      const localCp = loadLocalCheckpoint(activeBundle.studySet.owner_id, sessionKey);
+      void listCheckpoints({ studySetId: setId, mode: "learn", sessionKey })
+        .then((remotes) => {
+          const picked = pickNewestCheckpoint(remotes[0] ?? null, localCp);
+          if (picked.source === "none" || picked.progressPercent >= 100) {
+            setPendingResume(null);
+            return;
+          }
+          const saved = picked.stateJson as { learnState?: AdaptiveLearnState };
+          if (!saved.learnState) return;
+          const allSavedIds = [
+            ...saved.learnState.activeQueue.map((c) => c.questionId),
+            ...saved.learnState.pendingQueue.map((c) => c.questionId),
+          ];
+          const rec = reconcileCheckpointQuestions(allSavedIds, liveSet, 0);
+          if (rec.validIds.length === 0) {
+            setPendingResume(null);
+            return;
+          }
+          const cleaned: AdaptiveLearnState = {
+            ...saved.learnState,
+            activeQueue: saved.learnState.activeQueue.filter((c) =>
+              liveSet.has(c.questionId),
+            ),
+            pendingQueue: saved.learnState.pendingQueue.filter((c) =>
+              liveSet.has(c.questionId),
+            ),
+            graduatedIds: saved.learnState.graduatedIds.filter((id) =>
+              liveSet.has(id),
+            ),
+            missedIds: saved.learnState.missedIds.filter((id) =>
+              liveSet.has(id),
+            ),
+          };
+          if (cleaned.activeQueue.length === 0 && cleaned.pendingQueue.length > 0) {
+            cleaned.activeQueue = cleaned.pendingQueue.slice(0, cleaned.batchSize);
+            cleaned.pendingQueue = cleaned.pendingQueue.slice(cleaned.batchSize);
+          }
+          if (cleaned.activeQueue.length === 0) return;
+
+          setPendingResume({
+            source: picked.source,
+            currentIndex: cleaned.graduatedIds.length,
+            totalItems: cleaned.totalItems,
+            progressPercent: picked.progressPercent,
+            updatedAt: picked.updatedAt,
+            removedCount: rec.removedIds.length,
+            restoredState: cleaned,
+          });
+        })
+        .catch(() => {});
+    }
+  }, [
+    clearCardInputs,
+    forcedCorrection,
+    initConfigKey,
+    objective,
+    roundSize,
+    selectedChapter,
+    sessionKey,
+    setId,
+  ]);
+
+  const currentCard = learnState ? getCurrentAdaptiveCard(learnState) : null;
   const currentQuestion = currentCard
     ? questionMap.get(currentCard.questionId) ?? null
     : null;
 
+  // Build deterministic MC options for current question (including distractor generation for Flashcards!)
   const displayedOptions = React.useMemo<Array<DisplayedOption<QuestionOption>>>(() => {
-    if (!currentQuestion || !currentQuestion.options?.length) return [];
-    if (!preferences.default_shuffle_options) {
-      return withOptionDisplayLabels(currentQuestion.options);
+    if (!currentQuestion || !currentCard) return [];
+    const opts = currentQuestion.options ?? [];
+    if (opts.length > 0) {
+      const sorted = [...opts].sort((a, b) => a.position - b.position);
+      if (!preferences.default_shuffle_options) {
+        return withOptionDisplayLabels(sorted);
+      }
+      const rng = createSeededRng(
+        currentQuestion.id.length * 17 +
+          (learnState?.totalAttempts ?? 0) * 13 +
+          currentCard.stage,
+      );
+      return shuffleOptions(sorted, rng);
     }
-    const rng = createSeededRng(`${currentQuestion.id}-turn-${turnCounter}`);
-    return shuffleOptions(currentQuestion.options, rng);
-  }, [currentQuestion, preferences.default_shuffle_options, turnCounter]);
 
-  const persistLearnOutcome = React.useCallback(
+    // Generate deterministic recognition distractors for flashcard items at Stage 2
+    if (
+      currentCard.activity === "multiple_choice" &&
+      currentQuestion.back_text?.trim() &&
+      bundleQuestions &&
+      bundleQuestions.length >= 2
+    ) {
+      const correctOpt: QuestionOption = {
+        id: `fc-correct-${currentQuestion.id}`,
+        question_id: currentQuestion.id,
+        study_set_id: setId,
+        position: 0,
+        label: "A",
+        content: currentQuestion.back_text.trim(),
+        image_url: currentQuestion.back_image_url,
+        is_correct: true,
+        created_at: currentQuestion.created_at,
+      };
+      const distractors: QuestionOption[] = [];
+      const seen = new Set<string>([correctOpt.content.toLowerCase()]);
+      for (const other of bundleQuestions) {
+        if (other.id === currentQuestion.id) continue;
+        const candidateText = (
+          other.back_text ??
+          other.options?.find((o) => o.is_correct)?.content ??
+          ""
+        ).trim();
+        if (!candidateText || seen.has(candidateText.toLowerCase())) continue;
+        seen.add(candidateText.toLowerCase());
+        distractors.push({
+          id: `fc-dist-${other.id}`,
+          question_id: currentQuestion.id,
+          study_set_id: setId,
+          position: distractors.length + 1,
+          label: "",
+          content: candidateText,
+          image_url: other.back_image_url,
+          is_correct: false,
+          created_at: other.created_at,
+        });
+        if (distractors.length >= 3) break;
+      }
+      if (distractors.length >= 1) {
+        const rng = createSeededRng(
+          currentQuestion.id.length * 19 + (learnState?.totalAttempts ?? 0),
+        );
+        return shuffleOptions([correctOpt, ...distractors], rng);
+      }
+    }
+
+    return [];
+  }, [
+    bundleQuestions,
+    currentCard,
+    currentQuestion,
+    learnState?.totalAttempts,
+    preferences.default_shuffle_options,
+    setId,
+  ]);
+
+  const saveLearnCheckpoint = React.useCallback(
+    (nextState: AdaptiveLearnState) => {
+      if (!bundle) return;
+      if (nextState.sessionCompleted) {
+        clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+        void deleteCheckpoint({ sessionKey }).catch(() => {});
+        return;
+      }
+      const pct =
+        nextState.totalItems > 0
+          ? Math.round((nextState.graduatedIds.length / nextState.totalItems) * 100)
+          : 0;
+      const stateJson = { learnState: nextState };
+      saveLocalCheckpoint({
+        version: 1,
+        userId: bundle.studySet.owner_id,
+        studySetId: setId,
+        mode: "learn",
+        sessionKey,
+        currentIndex: nextState.graduatedIds.length,
+        totalItems: nextState.totalItems,
+        progressPercent: pct,
+        stateJson,
+        committedEventKeys: [],
+        updatedAt: new Date().toISOString(),
+      });
+      void upsertCheckpoint({
+        study_set_id: setId,
+        mode: "learn",
+        session_key: sessionKey,
+        state_json: stateJson,
+        progress_percent: pct,
+        current_index: nextState.graduatedIds.length,
+        total_items: nextState.totalItems,
+      }).catch(() => {});
+    },
+    [bundle, sessionKey, setId],
+  );
+
+  const persistProgressAndAdvance = React.useCallback(
     (
       question: Question,
       isCorrect: boolean,
-      chosenOptionIds: string[],
-      typed: string | null,
+      expectedText: string,
+      selectedIds: string[],
+      typedText: string,
+      structuredResponse: StructuredAnswerResponse | null,
+      skipImmediateFeedback: boolean = false,
     ) => {
-      if (!bundle) return;
-      const responseTimeMs = Math.max(0, Date.now() - cardStartRef.current);
-      const prevProgress = bundle.progressMap.get(question.id);
-      const nextSm2 = calculateNextReview(prevProgress, isCorrect);
+      if (!learnState || !currentCard || !bundle) return;
 
-      if (sessionIdRef.current) {
-        recordStudySessionAnswer(sessionIdRef.current, {
-          question_id: question.id,
-          selected_option_ids: chosenOptionIds,
-          typed_answer: typed,
-          is_correct: isCorrect,
-          response_time_ms: responseTimeMs,
-          update_progress: true,
-        })
-          .then((res) => {
-            if (res.progress) updateLocalProgress(res.progress);
-          })
-          .catch(() => {
-            upsertQuestionProgress({
-              study_set_id: setId,
-              question_id: question.id,
-              is_correct: isCorrect,
-              mastery_level: nextSm2.mastery_level,
-              ease_factor: nextSm2.ease_factor,
-              interval_days: nextSm2.interval_days,
-              repetitions: nextSm2.repetitions,
-              next_review_at: nextSm2.next_review_at,
-            })
-              .then(updateLocalProgress)
-              .catch(() => {});
-          });
-      } else {
-        upsertQuestionProgress({
-          study_set_id: setId,
-          question_id: question.id,
-          is_correct: isCorrect,
-          mastery_level: nextSm2.mastery_level,
-          ease_factor: nextSm2.ease_factor,
-          interval_days: nextSm2.interval_days,
-          repetitions: nextSm2.repetitions,
-          next_review_at: nextSm2.next_review_at,
-        })
-          .then(updateLocalProgress)
-          .catch(() => {});
+      const confidence = confidenceEnabled ? selectedConfidence : null;
+      const isRecognitionOnly = currentCard.stage <= 2;
+
+      // Record in SM-2 + Confidence engine (except pure Stage 1 exposure)
+      if (currentCard.stage >= 2) {
+        const prevProgress = bundle.progressMap.get(question.id) ?? null;
+        const sm2 = applyConfidenceToSm2({
+          previous: prevProgress ?? undefined,
+          isCorrect,
+          confidence,
+          isRecognitionOnly,
+        });
+        updateLocalProgress({
+          ...(prevProgress ?? {
+            id: `local-${question.id}`,
+            user_id: "",
+            study_set_id: setId,
+            question_id: question.id,
+            updated_at: new Date().toISOString(),
+          }),
+          ...sm2.next,
+          updated_at: new Date().toISOString(),
+        });
+
+        const responseTimeMs = Math.max(0, Date.now() - cardStartRef.current);
+        const safeSelectedIds = selectedIds.filter(isValidUuid);
+        const safeStructuredResponse: StructuredAnswerResponse | null =
+          structuredResponse?.kind === "options" &&
+          !structuredResponse.selected_option_ids.every(isValidUuid)
+            ? { kind: "text", value: typedText }
+            : structuredResponse;
+        if (sessionIdRef.current) {
+          void recordStudySessionAnswer(sessionIdRef.current, {
+            question_id: question.id,
+            selected_option_ids: safeSelectedIds,
+            typed_answer: typedText || null,
+            structured_response: safeStructuredResponse,
+            confidence,
+            is_correct: isCorrect,
+            response_time_ms: responseTimeMs,
+            update_progress: true,
+          }).catch(() => {});
+        } else {
+          void upsertQuestionProgress({
+            study_set_id: setId,
+            question_id: question.id,
+            is_correct: isCorrect,
+            confidence,
+            ...sm2.next,
+          }).catch(() => {});
+        }
       }
-    },
-    [bundle, setId, updateLocalProgress],
-  );
 
-  const handleSubmitChoice = React.useCallback(
-    (optionIds: string[]) => {
-      if (!currentQuestion || feedback?.submitted) return;
-      if (optionIds.length === 0) return;
-
-      const correctOpts = (currentQuestion.options ?? []).filter(
-        (o) => o.is_correct,
-      );
-      const correctIds = correctOpts.map((o) => o.id);
-      const isCorrect = gradeChoiceSelection(optionIds, correctIds);
-
-      setSelectedOptionIds(optionIds);
-      setFeedback({
-        submitted: true,
+      const stepRes = recordAdaptiveLearnStep(learnState, question, {
         isCorrect,
-        expectedText: correctOpts.map((o) => o.content).join(", "),
+        confidence,
       });
-      playFeedbackSound(isCorrect ? "correct" : "wrong");
-      persistLearnOutcome(currentQuestion, isCorrect, optionIds, null);
-    },
-    [currentQuestion, feedback?.submitted, persistLearnOutcome, playFeedbackSound],
-  );
 
-  const handleOptionSelect = React.useCallback(
-    (optionId: string) => {
-      if (!currentQuestion || feedback?.submitted) return;
-      if (currentQuestion.question_type === "multiple_choice") {
-        setSelectedOptionIds((prev) =>
-          prev.includes(optionId)
-            ? prev.filter((id) => id !== optionId)
-            : [...prev, optionId],
-        );
-      } else {
-        handleSubmitChoice([optionId]);
+      if (skipImmediateFeedback) {
+        setLearnState(stepRes.nextState);
+        saveLearnCheckpoint(stepRes.nextState);
+        const nextCard = getCurrentAdaptiveCard(stepRes.nextState);
+        clearCardInputs(nextCard ? questionMap.get(nextCard.questionId) : null);
+        cardStartRef.current = Date.now();
+        return;
       }
-    },
-    [currentQuestion, feedback?.submitted, handleSubmitChoice],
-  );
 
-  const handleSubmitTyped = React.useCallback(
-    (e?: React.FormEvent) => {
-      e?.preventDefault();
-      if (!currentQuestion || feedback?.submitted) return;
-      const trimmed = typedAnswer.trim();
-      if (!trimmed) return;
+      playFeedbackSound(isCorrect ? "correct" : "wrong");
 
-      const expected = getExpectedWriteAnswers(currentQuestion);
-      const graded = gradeWriteAnswer(trimmed, expected, { strict: false });
+      // If bounded forced correction engaged, keep current card active until corrected or skipped
+      if (stepRes.enteredForcedCorrection) {
+        setLearnState(stepRes.nextState);
+        setFeedback({
+          isCorrect: false,
+          expectedText,
+          explanation: question.explanation,
+          explanationRich: question.explanation_rich,
+          isForcedCorrectionPrompt: true,
+          stageMessage: lText(
+            locale,
+            "Hãy gõ lại đáp án đúng một lần để củng cố trí nhớ (hoặc bấm Bỏ qua để tiếp tục).",
+            "Retype the correct answer once to reinforce recall (or click Skip to continue).",
+          ),
+        });
+        return;
+      }
+
+      const stageMessage = stepRes.recognitionCannotMasterNotice
+        ? lText(
+            locale,
+            "Đã vượt qua Bước 2 (Nhận diện) — chuyển sang Bước 3 (Tự nhớ lại). Nhận diện đơn lẻ chưa đủ để đạt Thành thạo.",
+            "Passed Stage 2 (Recognition) — advancing to Stage 3 (Recall). Recognition alone never grants Mastered.",
+          )
+        : stepRes.cardGraduated
+          ? lText(
+              locale,
+              "Tuyệt vời! Bạn đã hoàn thành mục tiêu cho câu này.",
+              "Well done! You completed the objective for this item.",
+            )
+          : confidence === "guessing" && isCorrect
+            ? lText(
+                locale,
+                "Bạn chọn đúng nhưng đang Đoán mò — câu này sẽ được ôn lại để kiểm chứng độc lập.",
+                "Correct on a guess — scheduled back for independent verification.",
+              )
+            : confidence === "certain" && !isCorrect
+              ? lText(
+                  locale,
+                  "Lỗi tự tin cao (nhầm lẫn kiến thức) — ưu tiên xuất hiện lại sớm.",
+                  "High-confidence mistake flagged — prioritized for early review.",
+                )
+              : null;
 
       setFeedback({
-        submitted: true,
-        isCorrect: graded.isCorrect,
-        expectedText: expected.map((a) => a.answer_text).join(" / "),
+        isCorrect,
+        expectedText,
+        explanation: question.explanation,
+        explanationRich: question.explanation_rich,
+        stageMessage,
       });
-      playFeedbackSound(graded.isCorrect ? "correct" : "wrong");
-      persistLearnOutcome(currentQuestion, graded.isCorrect, [], trimmed);
+
+      // Defer queue transition until user clicks "Continue" so feedback never jumps mid-read (SH-008!)
+      setPendingNextState(stepRes.nextState);
     },
     [
-      currentQuestion,
-      feedback?.submitted,
-      persistLearnOutcome,
+      bundle,
+      clearCardInputs,
+      confidenceEnabled,
+      currentCard,
+      learnState,
+      locale,
       playFeedbackSound,
-      typedAnswer,
+      questionMap,
+      saveLearnCheckpoint,
+      selectedConfidence,
+      setId,
+      updateLocalProgress,
     ],
   );
 
   const handleContinueAfterFeedback = React.useCallback(() => {
-    if (!queueState || !feedback?.submitted) return;
-    const nextState = recordLearnAnswer(queueState, feedback.isCorrect);
-    setQueueState(nextState);
-    setSelectedOptionIds([]);
-    setTypedAnswer("");
-    setFeedback(null);
-    setTurnCounter((c) => c + 1);
-    cardStartRef.current = Date.now();
+    const nextState = pendingNextState;
+    if (!nextState) return;
+    setPendingNextState(null);
+    setLearnState(nextState);
+    saveLearnCheckpoint(nextState);
 
     if (nextState.sessionCompleted) {
-      playFeedbackSound("complete");
-      const durationSeconds = Math.max(
+      const dur = Math.max(
         1,
-        Math.round((Date.now() - startedAtRef.current) / 1000),
+        Math.round((Date.now() - sessionStartRef.current) / 1000),
       );
-      setCompletedDurationSeconds(durationSeconds);
+      setCompletedDurationSeconds(dur);
+      playFeedbackSound("complete");
       if (sessionIdRef.current) {
-        updateStudySession(sessionIdRef.current, {
+        void updateStudySession(sessionIdRef.current, {
           status: "completed",
-          completed_items: nextState.completedQuestionIds.length,
-          correct_items: nextState.correctAnswers,
-          duration_seconds: durationSeconds,
+          total_items: nextState.totalItems,
+          completed_items: nextState.graduatedIds.length,
+          correct_items: nextState.correctAttempts,
+          duration_seconds: dur,
         }).catch(() => {});
       }
+      return;
     }
-  }, [feedback, playFeedbackSound, queueState]);
 
-  const handleAdvanceRound = React.useCallback(() => {
-    if (!queueState) return;
-    const nextState = advanceLearnRound(queueState);
-    setQueueState(nextState);
-    setSelectedOptionIds([]);
-    setTypedAnswer("");
-    setFeedback(null);
-    setTurnCounter((c) => c + 1);
+    const nextCard = getCurrentAdaptiveCard(nextState);
+    clearCardInputs(nextCard ? questionMap.get(nextCard.questionId) : null);
     cardStartRef.current = Date.now();
-  }, [queueState]);
+  }, [
+    clearCardInputs,
+    pendingNextState,
+    playFeedbackSound,
+    questionMap,
+    saveLearnCheckpoint,
+  ]);
 
-  // Keyboard shortcuts (strictly guarding buttons/links on Enter/Space — LM-06!)
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditableEventTarget(event.target)) return;
+  const handleSubmitCurrentActivity = React.useCallback(
+    (overrideOptionIds?: string[]) => {
+      if (!currentQuestion || !currentCard || !learnState) return;
 
-      if (queueState?.roundCompleted && !queueState.sessionCompleted) {
-        if (event.key === "Enter" && !isInteractiveControlTarget(event.target)) {
-          event.preventDefault();
-          handleAdvanceRound();
+      // Bounded forced correction submission
+      if (currentCard.forcedCorrectionPending) {
+        const expected = getExpectedWriteAnswers(currentQuestion);
+        const check = gradeWriteAnswer(forcedCorrectionDraft, expected);
+        const stepRes = recordAdaptiveLearnStep(learnState, currentQuestion, {
+          isCorrect: check.isCorrect,
+          isForcedCorrectionAttempt: true,
+        });
+        setLearnState(stepRes.nextState);
+        if (!stepRes.enteredForcedCorrection) {
+          saveLearnCheckpoint(stepRes.nextState);
+          const nextCard = getCurrentAdaptiveCard(stepRes.nextState);
+          clearCardInputs(nextCard ? questionMap.get(nextCard.questionId) : null);
+          cardStartRef.current = Date.now();
+        } else {
+          toast.error(
+            lText(
+              locale,
+              "Chưa khớp đáp án chuẩn — hãy thử lại hoặc bấm Bỏ qua.",
+              "Not quite matching yet — try once more or click Skip.",
+            ),
+          );
         }
         return;
       }
 
-      if (!currentQuestion) return;
+      if (feedback) return;
+
+      const activity = currentCard.activity;
+
+      // Stage 1 Flashcard Familiarization
+      if (activity === "flashcard") {
+        persistProgressAndAdvance(
+          currentQuestion,
+          true,
+          "",
+          [],
+          "",
+          null,
+          true,
+        );
+        return;
+      }
+
+      // Multiple Choice / Image Choice / Reading MC / Listening MC
+      if (
+        activity === "multiple_choice" ||
+        activity === "reading_mc" ||
+        activity === "listening_mc"
+      ) {
+        const ids = overrideOptionIds ?? selectedOptionIds;
+        if (ids.length === 0) return;
+        const correctIds = displayedOptions
+          .filter((o) => o.is_correct)
+          .map((o) => o.id);
+        const isCorrect = gradeChoiceSelection(ids, correctIds);
+        const expectedText = displayedOptions
+          .filter((o) => o.is_correct)
+          .map((o) => o.content || o.label)
+          .join(" / ");
+        const answerPayload = buildSessionChoiceAnswerPayload(
+          ids,
+          displayedOptions,
+        );
+        persistProgressAndAdvance(
+          currentQuestion,
+          isCorrect,
+          expectedText,
+          answerPayload.selectedOptionIds,
+          answerPayload.typedAnswer,
+          answerPayload.structuredResponse,
+        );
+        return;
+      }
+
+      // Write / Spell recall
+      if (activity === "write" || activity === "spell") {
+        if (!typedAnswer.trim()) return;
+        const expected = getExpectedWriteAnswers(currentQuestion);
+        const isCorrect = gradeWriteAnswer(typedAnswer, expected).isCorrect;
+        persistProgressAndAdvance(
+          currentQuestion,
+          isCorrect,
+          expected.join(" / "),
+          [],
+          typedAnswer.trim(),
+          { kind: "text", value: typedAnswer.trim() },
+        );
+        return;
+      }
+
+      // Numerical recall
+      if (activity === "numerical" && currentQuestion.type_payload?.type === "numerical") {
+        if (!numericalValue.trim()) return;
+        const resp: StructuredAnswerResponse = {
+          kind: "numerical",
+          value: numericalValue.trim(),
+          unit: numericalUnit.trim() || null,
+        };
+        const grade = gradeQuestionResponse(currentQuestion, resp);
+        const expectedText = `${currentQuestion.type_payload.correct_value}${currentQuestion.type_payload.unit ? ` ${currentQuestion.type_payload.unit}` : ""}`;
+        persistProgressAndAdvance(
+          currentQuestion,
+          grade.isCorrect,
+          expectedText,
+          [],
+          `${numericalValue.trim()} ${numericalUnit.trim()}`.trim(),
+          resp,
+        );
+        return;
+      }
+
+      // Fill in the blank
+      if (activity === "fill_in_blank" && currentQuestion.type_payload?.type === "fill_in_blank") {
+        const resp: StructuredAnswerResponse = {
+          kind: "blanks",
+          answers: blankAnswers,
+        };
+        const grade = gradeQuestionResponse(currentQuestion, resp);
+        const expectedText = currentQuestion.type_payload.blanks
+          .map((b, i) => `(${i + 1}) ${b.accepted_answers.join(" / ")}`)
+          .join(" · ");
+        persistProgressAndAdvance(
+          currentQuestion,
+          grade.isCorrect,
+          expectedText,
+          [],
+          Object.values(blankAnswers).join(" | "),
+          resp,
+        );
+        return;
+      }
+
+      // Ordering
+      if (activity === "ordering" && currentQuestion.type_payload?.type === "ordering") {
+        const resp: StructuredAnswerResponse = {
+          kind: "ordering",
+          ordered_item_ids: orderedIds,
+        };
+        const grade = gradeQuestionResponse(currentQuestion, resp);
+        const expectedText = [...currentQuestion.type_payload.items]
+          .sort((a, b) => a.correct_position - b.correct_position)
+          .map((it, i) => `${i + 1}. ${it.text}`)
+          .join(" → ");
+        persistProgressAndAdvance(
+          currentQuestion,
+          grade.isCorrect,
+          expectedText,
+          [],
+          "",
+          resp,
+        );
+        return;
+      }
+
+      // Matching
+      if (activity === "matching" && currentQuestion.type_payload?.type === "matching") {
+        const resp: StructuredAnswerResponse = {
+          kind: "matching",
+          pairs: matchingPairs,
+        };
+        const grade = gradeQuestionResponse(currentQuestion, resp);
+        const expectedText = currentQuestion.type_payload.pairs
+          .map((p) => `${p.left_text} = ${p.right_text}`)
+          .join(" · ");
+        persistProgressAndAdvance(
+          currentQuestion,
+          grade.isCorrect,
+          expectedText,
+          [],
+          "",
+          resp,
+        );
+        return;
+      }
+
+      // Hotspot / Diagram Identify
+      if (
+        (activity === "hotspot" || activity === "diagram_identify") &&
+        currentQuestion.type_payload?.type === "image_hotspot"
+      ) {
+        if (hotspotClicks.length === 0) return;
+        const resp: StructuredAnswerResponse = {
+          kind: "hotspot",
+          clicks: hotspotClicks,
+        };
+        const grade = gradeQuestionResponse(currentQuestion, resp);
+        const expectedText = currentQuestion.type_payload.target_hotspots
+          .map((h) => h.label)
+          .join(", ");
+        persistProgressAndAdvance(
+          currentQuestion,
+          grade.isCorrect,
+          expectedText,
+          [],
+          "",
+          resp,
+        );
+      }
+    },
+    [
+      blankAnswers,
+      clearCardInputs,
+      currentCard,
+      currentQuestion,
+      displayedOptions,
+      feedback,
+      forcedCorrectionDraft,
+      hotspotClicks,
+      learnState,
+      locale,
+      matchingPairs,
+      numericalUnit,
+      numericalValue,
+      orderedIds,
+      persistProgressAndAdvance,
+      questionMap,
+      saveLearnCheckpoint,
+      selectedOptionIds,
+      typedAnswer,
+    ],
+  );
+
+  // Keyboard shortcuts (guarded against inputs & IME & buttons!)
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!currentCard || !currentQuestion) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      if (isEditableEventTarget(e.target)) return;
+
+      if (feedback && !feedback.isForcedCorrectionPrompt) {
+        if (e.key === "Enter" && !isInteractiveControlTarget(e.target)) {
+          e.preventDefault();
+          handleContinueAfterFeedback();
+        }
+        return;
+      }
 
       if (
-        feedback?.submitted &&
-        (event.key === "Enter" || event.code === "Space") &&
-        !isInteractiveControlTarget(event.target)
+        (currentCard.activity === "multiple_choice" ||
+          currentCard.activity === "reading_mc" ||
+          currentCard.activity === "listening_mc") &&
+        displayedOptions.length > 0
       ) {
-        event.preventDefault();
-        handleContinueAfterFeedback();
-        return;
-      }
-
-      if (!feedback?.submitted && displayedOptions.length > 0) {
-        let idx = -1;
-        if (/^[1-6]$/.test(event.key)) {
-          idx = Number(event.key) - 1;
-        } else if (/^[a-fA-F]$/.test(event.key)) {
-          idx = event.key.toUpperCase().charCodeAt(0) - 65;
-        }
-        if (idx >= 0 && idx < displayedOptions.length) {
-          event.preventDefault();
-          handleOptionSelect(displayedOptions[idx].id);
-        } else if (
-          event.key === "Enter" &&
-          currentQuestion.question_type === "multiple_choice" &&
-          selectedOptionIds.length > 0
-        ) {
-          event.preventDefault();
-          handleSubmitChoice(selectedOptionIds);
+        const num = Number(e.key);
+        if (!Number.isNaN(num) && num >= 1 && num <= displayedOptions.length) {
+          e.preventDefault();
+          const opt = displayedOptions[num - 1];
+          if (currentQuestion.question_type === "multiple_choice") {
+            setSelectedOptionIds((prev) =>
+              prev.includes(opt.id)
+                ? prev.filter((id) => id !== opt.id)
+                : [...prev, opt.id],
+            );
+          } else {
+            handleSubmitCurrentActivity([opt.id]);
+          }
         }
       }
     };
@@ -430,16 +1011,12 @@ export function LearnClient({ setId }: LearnClientProps) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    currentCard,
     currentQuestion,
     displayedOptions,
-    feedback?.submitted,
-    handleAdvanceRound,
+    feedback,
     handleContinueAfterFeedback,
-    handleOptionSelect,
-    handleSubmitChoice,
-    queueState?.roundCompleted,
-    queueState?.sessionCompleted,
-    selectedOptionIds,
+    handleSubmitCurrentActivity,
   ]);
 
   if (isLoading) {
@@ -462,243 +1039,462 @@ export function LearnClient({ setId }: LearnClientProps) {
     );
   }
 
-  const stats = queueState ? getLearnStats(queueState) : null;
+  const summary = learnState ? getAdaptiveLearnSummary(learnState) : null;
+  const isStarred = currentQuestion
+    ? bundle.starredIds.has(currentQuestion.id)
+    : false;
+  const projectedFlashcard = currentQuestion
+    ? projectQuestionToFlashcard(currentQuestion)
+    : null;
 
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
       title={bundle.studySet.title}
-      subtitle={lText(
-        locale,
-        "Chế độ Học thích ứng (SM-2)",
-        "Adaptive Learn Mode (SM-2)",
-      )}
-      progressCurrent={stats?.completedQuestions ?? 0}
-      progressTotal={stats?.totalQuestions ?? 0}
+      subtitle={lText(locale, "Chế độ Học thích ứng V3", "Adaptive Learn Mode")}
+      progressCurrent={summary?.graduatedCount ?? 0}
+      progressTotal={summary?.totalItems ?? 0}
+      headerRight={
+        <div className="flex items-center gap-1.5">
+          {summary ? (
+            <Badge variant="outline" className="hidden sm:inline-flex tabular-nums">
+              {lText(locale, `Vòng ${summary.roundNumber}`, `Round ${summary.roundNumber}`)} ·{" "}
+              {summary.graduatedCount}/{summary.totalItems}
+            </Badge>
+          ) : null}
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="min-h-10 sm:min-h-9"
+              >
+                <Settings2 className="size-4" aria-hidden="true" />
+                <span className="hidden sm:inline">
+                  {lText(locale, "Mục tiêu & Lọc", "Goal & Filters")}
+                </span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="learn-objective" className="text-xs font-semibold">
+                  {lText(locale, "Mục tiêu học (5 chế độ)", "Learning Objective")}
+                </Label>
+                <Select
+                  value={objective}
+                  onValueChange={(v) => setObjective(v as LearnObjective)}
+                >
+                  <SelectTrigger id="learn-objective" className="h-9 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LEARN_OBJECTIVES.map((obj) => (
+                      <SelectItem key={obj.id} value={obj.id}>
+                        {lText(locale, obj.viLabel, obj.enLabel)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="learn-batch" className="text-[11px]">
+                    {lText(locale, "Số câu / vòng", "Batch size")}
+                  </Label>
+                  <Select
+                    value={String(roundSize)}
+                    onValueChange={(v) => setRoundSize(Number(v))}
+                  >
+                    <SelectTrigger id="learn-batch" className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[5, 7, 10, 15, 20].map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <Label htmlFor="learn-limit" className="text-[11px]">
+                    {lText(locale, "Giới hạn phiên", "Session limit")}
+                  </Label>
+                  <Select value={maxItems} onValueChange={setMaxItems}>
+                    <SelectTrigger id="learn-limit" className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">
+                        {lText(locale, "Tất cả", "All")}
+                      </SelectItem>
+                      <SelectItem value="10">10</SelectItem>
+                      <SelectItem value="20">20</SelectItem>
+                      <SelectItem value="50">50</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {bundle.chapters.length > 0 ? (
+                <div className="space-y-1">
+                  <Label htmlFor="learn-chapter" className="text-[11px]">
+                    {lText(locale, "Chương", "Chapter")}
+                  </Label>
+                  <Select
+                    value={selectedChapter}
+                    onValueChange={setSelectedChapter}
+                  >
+                    <SelectTrigger id="learn-chapter" className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">
+                        {lText(locale, "Tất cả chương", "All chapters")}
+                      </SelectItem>
+                      {bundle.chapters.map((ch) => (
+                        <SelectItem key={ch} value={ch}>
+                          {ch}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+
+              {allTags.length > 0 ? (
+                <div className="space-y-1">
+                  <Label htmlFor="learn-tag" className="text-[11px]">
+                    {lText(locale, "Thẻ (Tag)", "Tag")}
+                  </Label>
+                  <Select value={selectedTagId} onValueChange={setSelectedTagId}>
+                    <SelectTrigger id="learn-tag" className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">
+                        {lText(locale, "Tất cả thẻ", "All tags")}
+                      </SelectItem>
+                      {allTags.map((tag) => (
+                        <SelectItem key={tag.id} value={tag.id}>
+                          #{tag.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+
+              <div className="space-y-2 border-t border-border pt-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-new" className="cursor-pointer">
+                    {lText(locale, "Chỉ câu mới", "New items only")}
+                  </Label>
+                  <Switch id="lf-new" checked={onlyNew} onCheckedChange={setOnlyNew} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-wrong" className="cursor-pointer">
+                    {lText(locale, "Chỉ câu đã sai", "Incorrect only")}
+                  </Label>
+                  <Switch
+                    id="lf-wrong"
+                    checked={onlyIncorrect}
+                    onCheckedChange={setOnlyIncorrect}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-due" className="cursor-pointer">
+                    {lText(locale, "Chỉ câu đến hạn SM-2", "Due for SM-2")}
+                  </Label>
+                  <Switch id="lf-due" checked={onlyDue} onCheckedChange={setOnlyDue} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-lowconf" className="cursor-pointer">
+                    {lText(locale, "Độ tự tin thấp / Nhầm lẫn", "Low confidence")}
+                  </Label>
+                  <Switch
+                    id="lf-lowconf"
+                    checked={onlyLowConfidence}
+                    onCheckedChange={setOnlyLowConfidence}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-star" className="cursor-pointer">
+                    {lText(locale, "Chỉ câu gắn sao", "Starred only")}
+                  </Label>
+                  <Switch
+                    id="lf-star"
+                    checked={onlyStarred}
+                    onCheckedChange={setOnlyStarred}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2 border-t border-border pt-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-conf" className="cursor-pointer">
+                    {lText(
+                      locale,
+                      "Hỏi mức độ tự tin trước đáp án",
+                      "Ask confidence pre-reveal",
+                    )}
+                  </Label>
+                  <Switch
+                    id="lf-conf"
+                    checked={confidenceEnabled}
+                    onCheckedChange={setConfidenceEnabled}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="lf-force" className="cursor-pointer">
+                    {lText(
+                      locale,
+                      "Bắt buộc gõ lại khi trả lời sai (tối đa 2 lần)",
+                      "Forced correction on mistakes (max 2 retries)",
+                    )}
+                  </Label>
+                  <Switch
+                    id="lf-force"
+                    checked={forcedCorrection}
+                    onCheckedChange={setForcedCorrection}
+                  />
+                </div>
+              </div>
+
+              <div className="border-t border-border pt-2.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-destructive"
+                  onClick={() => setResetDialogOpen(true)}
+                >
+                  <RotateCcw className="size-3.5" aria-hidden="true" />
+                  {lText(locale, "Đặt lại tiến độ học...", "Reset Learning Progress...")}
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+      }
     >
-      {/* Mastery Breakdown Strip + Controls */}
-      <div className="mx-auto mb-5 w-full max-w-3xl space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            <Badge variant="outline" className="tabular-nums">
-              {t("study.masteryNew")}: {masterySummary.new}
-            </Badge>
-            <Badge variant="warning" className="tabular-nums">
-              {t("study.masteryLearning")}: {masterySummary.learning}
-            </Badge>
-            <Badge variant="accent" className="tabular-nums">
-              {t("study.masteryFamiliar")}: {masterySummary.familiar}
-            </Badge>
-            <Badge variant="success" className="tabular-nums">
-              {t("study.masteryMastered")}: {masterySummary.mastered}
-            </Badge>
-            {masterySummary.due > 0 ? (
-              <Badge variant="destructive" className="tabular-nums">
-                <Clock className="size-3" aria-hidden="true" />
-                {lText(locale, "Đến hạn", "Due")}: {masterySummary.due}
-              </Badge>
-            ) : null}
+      <div className="mx-auto w-full max-w-3xl space-y-4">
+        {/* Compact Objective Selector Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card px-3 py-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {LEARN_OBJECTIVES.map((obj) => (
+              <Button
+                key={obj.id}
+                type="button"
+                size="sm"
+                variant={objective === obj.id ? "default" : "ghost"}
+                className="h-8 text-xs"
+                onClick={() => setObjective(obj.id)}
+              >
+                {lText(locale, obj.viLabel, obj.enLabel)}
+              </Button>
+            ))}
           </div>
 
-          <div className="flex items-center gap-2">
-            {bundle.chapters.length > 0 ? (
-              <Select
-                value={selectedChapter}
-                onValueChange={setSelectedChapter}
-              >
-                <SelectTrigger
-                  className="h-8 w-[160px] text-xs"
-                  aria-label={lText(locale, "Chọn chương", "Select chapter")}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    {lText(locale, "Tất cả chương", "All chapters")}
-                  </SelectItem>
-                  {bundle.chapters.map((ch) => (
-                    <SelectItem key={ch} value={ch}>
-                      {ch}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-
-            <Select
-              value={String(roundSize)}
-              onValueChange={(v) => setRoundSize(Number(v))}
-            >
-              <SelectTrigger
-                className="h-8 w-[120px] text-xs"
-                aria-label={lText(locale, "Số câu mỗi vòng", "Round size")}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="5">
-                  5 {lText(locale, "câu/vòng", "/ round")}
-                </SelectItem>
-                <SelectItem value="7">
-                  7 {lText(locale, "câu/vòng", "/ round")}
-                </SelectItem>
-                <SelectItem value="10">
-                  10 {lText(locale, "câu/vòng", "/ round")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
+            <span>
+              {lText(locale, "Thành thạo", "Mastered")}: {masterySummary.mastered}/
+              {masterySummary.total}
+            </span>
           </div>
         </div>
-      </div>
 
-      {filteredQuestions.length === 0 || !queueState ? (
-        <StudyEmptyState
-          setId={setId}
-          onResetFilters={
-            selectedChapter !== "all"
-              ? () => setSelectedChapter("all")
-              : undefined
-          }
-        />
-      ) : queueState.sessionCompleted ? (
-        <Card className="mx-auto my-6 w-full max-w-xl">
-          <CardContent className="space-y-6 py-8 text-center">
-            <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-success-subtle text-success-subtle-foreground">
-              <Brain className="size-7" aria-hidden="true" />
-            </div>
-            <div className="space-y-1">
-              <h2 className="text-xl font-bold">{t("study.sessionComplete")}</h2>
+        {/* Resume Checkpoint Banner */}
+        {pendingResume ? (
+          <ResumeSessionBanner
+            modeLabel={lText(locale, "Chế độ Học thích ứng", "Adaptive Learn")}
+            currentIndex={pendingResume.currentIndex}
+            totalItems={pendingResume.totalItems}
+            progressPercent={pendingResume.progressPercent}
+            updatedAt={pendingResume.updatedAt}
+            source={pendingResume.source}
+            removedQuestionsCount={pendingResume.removedCount}
+            onContinue={() => {
+              setLearnState(pendingResume.restoredState);
+              const first = getCurrentAdaptiveCard(pendingResume.restoredState);
+              clearCardInputs(first ? questionMap.get(first.questionId) : null);
+              setPendingResume(null);
+            }}
+            onRestart={() => {
+              setPendingResume(null);
+              clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+              void deleteCheckpoint({ sessionKey }).catch(() => {});
+              setConfigNonce((n) => n + 1);
+            }}
+            onDiscard={() => {
+              setPendingResume(null);
+              clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+              void deleteCheckpoint({ sessionKey }).catch(() => {});
+            }}
+          />
+        ) : null}
+
+        {/* Empty filtered state */}
+        {filteredSeeds.length === 0 ? (
+          <StudyEmptyState
+            setId={setId}
+            onResetFilters={() => {
+              setSelectedChapter("all");
+              setSelectedTagId("all");
+              setOnlyNew(false);
+              setOnlyIncorrect(false);
+              setOnlyDue(false);
+              setOnlyLowConfidence(false);
+              setOnlyStarred(false);
+              setMaxItems("all");
+            }}
+          />
+        ) : learnState?.sessionCompleted ? (
+          <Card>
+            <CardHeader className="text-center">
+              <div className="mx-auto mb-2 flex size-14 items-center justify-center rounded-full bg-success-subtle text-success-subtle-foreground">
+                <Brain className="size-7" aria-hidden="true" />
+              </div>
+              <CardTitle className="text-2xl">
+                {lText(locale, "Hoàn thành phiên Học!", "Learn Session Complete!")}
+              </CardTitle>
               <p className="text-sm text-muted-foreground">
                 {lText(
                   locale,
-                  `Bạn đã hoàn thành tất cả ${stats?.totalQuestions ?? 0} câu qua ${queueState.roundNumber} vòng học trong ${formatDuration(completedDurationSeconds)}.`,
-                  `Completed all ${stats?.totalQuestions ?? 0} items across ${queueState.roundNumber} rounds in ${formatDuration(completedDurationSeconds)}.`,
+                  `Hoàn thành ${learnState.graduatedIds.length}/${learnState.totalItems} câu trong ${formatDuration(completedDurationSeconds)}.`,
+                  `Completed ${learnState.graduatedIds.length}/${learnState.totalItems} items in ${formatDuration(completedDurationSeconds)}.`,
                 )}
               </p>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">{t("study.accuracy")}</p>
-                <p className="mt-1 text-xl font-bold text-primary tabular-nums">
-                  {stats?.accuracyPercent ?? 0}%
-                </p>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="rounded-lg border border-border bg-success-subtle/60 p-3">
+                  <p className="text-xs text-success-subtle-foreground">
+                    {lText(locale, "Độ chính xác", "Accuracy")}
+                  </p>
+                  <p className="mt-1 text-xl font-bold tabular-nums">
+                    {summary?.accuracyPercent ?? 0}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border bg-secondary/50 p-3">
+                  <p className="text-xs text-muted-foreground">
+                    {lText(locale, "Tổng lượt trả lời", "Attempts")}
+                  </p>
+                  <p className="mt-1 text-xl font-bold tabular-nums">
+                    {learnState.totalAttempts}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <p className="text-xs text-muted-foreground">
+                    <Clock className="mx-auto mb-0.5 size-3.5" aria-hidden="true" />
+                    {t("study.timeSpent")}
+                  </p>
+                  <p className="mt-1 font-mono text-xl font-bold tabular-nums">
+                    {formatDuration(completedDurationSeconds)}
+                  </p>
+                </div>
               </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
-                  {lText(locale, "Lượt trả lời", "Attempts")}
-                </p>
-                <p className="mt-1 text-xl font-bold tabular-nums">
-                  {stats?.totalAnswers ?? 0}
-                </p>
+
+              <div className="flex flex-wrap justify-center gap-3">
+                <Button
+                  type="button"
+                  onClick={() => setConfigNonce((n) => n + 1)}
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  {lText(locale, "Học vòng mới", "Start Another Session")}
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link href={`/sets/${setId}`}>
+                    {lText(locale, "Về học phần", "Back to Set")}
+                  </Link>
+                </Button>
               </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
-                  {lText(locale, "Đã củng cố", "Reinforced")}
-                </p>
-                <p className="mt-1 text-xl font-bold tabular-nums">
-                  {stats?.missedCount ?? 0}
-                </p>
-              </div>
-            </div>
-            <div className="flex flex-wrap justify-center gap-2">
+            </CardContent>
+          </Card>
+        ) : learnState?.roundCompleted && learnState.pendingQueue.length > 0 ? (
+          <Card>
+            <CardContent className="space-y-4 py-8 text-center">
+              <Badge variant="success" className="mx-auto">
+                {lText(
+                  locale,
+                  `Hoàn thành Vòng ${learnState.roundNumber}!`,
+                  `Round ${learnState.roundNumber} Complete!`,
+                )}
+              </Badge>
+              <p className="text-sm text-muted-foreground">
+                {lText(
+                  locale,
+                  `Còn ${learnState.pendingQueue.length} câu hỏi trong hàng đợi tiếp theo.`,
+                  `${learnState.pendingQueue.length} item(s) remaining in the next batch.`,
+                )}
+              </p>
               <Button
-                onClick={() =>
-                  initQueue(filteredQuestions, roundSize, selectedChapter)
-                }
+                type="button"
+                size="lg"
+                onClick={() => {
+                  const advanced = advanceAdaptiveLearnRound(learnState);
+                  setLearnState(advanced);
+                  saveLearnCheckpoint(advanced);
+                  const nextCard = getCurrentAdaptiveCard(advanced);
+                  clearCardInputs(
+                    nextCard ? questionMap.get(nextCard.questionId) : null,
+                  );
+                }}
               >
-                <RotateCcw className="size-4" aria-hidden="true" />
-                {t("study.studyAgain")}
+                <ArrowRight className="size-4" aria-hidden="true" />
+                {lText(locale, "Tiếp tục sang vòng tiếp theo", "Continue to Next Round")}
               </Button>
-              <Button variant="outline" asChild>
-                <Link href={`/sets/${setId}/test`}>
-                  {lText(locale, "Thi thử ngay", "Take Mock Exam")}
-                </Link>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ) : queueState.roundCompleted ? (
-        <Card className="mx-auto my-6 w-full max-w-xl">
-          <CardHeader className="text-center">
-            <CardTitle className="text-xl">
-              {lText(
-                locale,
-                `Hoàn thành vòng ${queueState.roundNumber}!`,
-                `Round ${queueState.roundNumber} Complete!`,
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-5 text-center">
-            <p className="text-sm text-muted-foreground">
-              {lText(
-                locale,
-                `Đã hoàn tất ${stats?.completedQuestions ?? 0}/${stats?.totalQuestions ?? 0} câu. Còn ${stats?.remainingInPool ?? 0} câu cho vòng tiếp theo.`,
-                `Completed ${stats?.completedQuestions ?? 0}/${stats?.totalQuestions ?? 0} items. ${stats?.remainingInPool ?? 0} items left for upcoming rounds.`,
-              )}
-            </p>
-            <Button size="lg" className="min-h-11" onClick={handleAdvanceRound}>
-              {lText(
-                locale,
-                `Tiếp tục vòng ${queueState.roundNumber + 1}`,
-                `Continue to Round ${queueState.roundNumber + 1}`,
-              )}
-              <ArrowRight className="size-4" aria-hidden="true" />
-            </Button>
-          </CardContent>
-        </Card>
-      ) : currentCard && currentQuestion ? (
-        <div className="mx-auto w-full max-w-3xl space-y-4">
-          <AnimatePresence mode="wait">
+            </CardContent>
+          </Card>
+        ) : currentCard && currentQuestion ? (
+          <AnimatePresence mode="wait" initial={false}>
             <motion.div
-              key={`${currentQuestion.id}-${turnCounter}`}
-              initial={{ opacity: 0, y: prefersReducedMotion ? 0 : 8 }}
+              key={`${currentQuestion.id}-st${currentCard.stage}-${learnState?.totalAttempts ?? 0}`}
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: prefersReducedMotion ? 0 : -8 }}
-              transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
+              exit={prefersReducedMotion ? undefined : { opacity: 0, y: -8 }}
+              transition={{ duration: 0.14 }}
             >
               <Card>
-                <CardContent className="space-y-5 py-6">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="tabular-nums">
-                        {lText(locale, "Vòng", "Round")} {queueState.roundNumber} ·{" "}
-                        {lText(locale, "Còn", "Left")}{" "}
-                        {queueState.activeQueue.length}
+                <CardContent className="space-y-5 p-5 sm:p-6">
+                  {/* Stage Badge & Question Context */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant="default" className="gap-1">
+                        <Layers className="size-3" aria-hidden="true" />
+                        {lText(
+                          locale,
+                          LEARN_STAGE_LABELS[currentCard.stage].vi,
+                          LEARN_STAGE_LABELS[currentCard.stage].en,
+                        )}
                       </Badge>
-                      {currentCard.missedInSession ? (
-                        <Badge variant="warning">
-                          {lText(
-                            locale,
-                            `Đang củng cố (${currentCard.streakInRound}/${currentCard.requiredCorrect})`,
-                            `Reinforcing (${currentCard.streakInRound}/${currentCard.requiredCorrect})`,
-                          )}
-                        </Badge>
-                      ) : null}
                       {currentQuestion.chapter ? (
-                        <Badge variant="secondary">{currentQuestion.chapter}</Badge>
+                        <Badge variant="outline">{currentQuestion.chapter}</Badge>
+                      ) : null}
+                      {currentCard.hadHighConfWrong ? (
+                        <Badge variant="destructive" className="text-[11px]">
+                          {lText(locale, "Ưu tiên sửa nhầm lẫn", "Misconception Focus")}
+                        </Badge>
                       ) : null}
                     </div>
 
                     <Button
+                      type="button"
                       variant="ghost"
                       size="icon"
-                      className="min-h-10 min-w-10"
-                      aria-pressed={bundle.starredIds.has(currentQuestion.id)}
-                      aria-label={
-                        bundle.starredIds.has(currentQuestion.id)
-                          ? t("study.unstarQuestion")
-                          : t("study.starQuestion")
-                      }
-                      onClick={() =>
-                        void toggleStar(currentQuestion.id).catch(() =>
-                          toast.error(t("common.errorGeneric")),
-                        )
-                      }
+                      aria-label={lText(locale, "Gắn sao câu này", "Toggle star")}
+                      aria-pressed={isStarred}
+                      onClick={() => void toggleStar(currentQuestion.id)}
                     >
                       <Star
                         className={cn(
                           "size-4",
-                          bundle.starredIds.has(currentQuestion.id)
+                          isStarred
                             ? "fill-warning text-warning"
                             : "text-muted-foreground",
                         )}
@@ -707,200 +1503,676 @@ export function LearnClient({ setId }: LearnClientProps) {
                     </Button>
                   </div>
 
-                  <div className="space-y-3">
-                    <h2 className="whitespace-pre-wrap text-lg font-medium leading-relaxed">
-                      {currentQuestion.prompt}
-                    </h2>
-                    {isSafeDisplayImageUrl(currentQuestion.prompt_image_url) ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={currentQuestion.prompt_image_url}
-                        alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
-                        className="max-h-60 rounded-lg border border-border object-contain"
+                  {/* Reading Passage Context if present */}
+                  {currentQuestion.type_payload?.type === "reading_passage" &&
+                  (currentQuestion.passage?.content_text ||
+                    currentQuestion.type_payload.passage_text) ? (
+                    <div className="rounded-lg border border-border bg-secondary/30 p-3.5 text-sm">
+                      {currentQuestion.passage?.title ||
+                      currentQuestion.type_payload.passage_title ? (
+                        <p className="mb-1.5 font-semibold text-foreground">
+                          {currentQuestion.passage?.title ??
+                            currentQuestion.type_payload.passage_title}
+                        </p>
+                      ) : null}
+                      <SafeRichText
+                        rich={
+                          currentQuestion.passage?.content_rich ??
+                          currentQuestion.type_payload.passage_rich
+                        }
+                        fallbackText={
+                          currentQuestion.passage?.content_text ??
+                          currentQuestion.type_payload.passage_text
+                        }
                       />
-                    ) : null}
+                    </div>
+                  ) : null}
+
+                  {/* Listening Audio Player if present */}
+                  {isSafeDisplayImageUrl(
+                    currentQuestion.audio_url ??
+                      (currentQuestion.type_payload?.type === "listening"
+                        ? currentQuestion.type_payload.audio_url
+                        : null),
+                  ) ? (
+                    <audio
+                      controls
+                      preload="metadata"
+                      src={
+                        (currentQuestion.audio_url ??
+                          (currentQuestion.type_payload?.type === "listening"
+                            ? currentQuestion.type_payload.audio_url
+                            : "")) ||
+                        ""
+                      }
+                      className="w-full"
+                    />
+                  ) : null}
+
+                  {/* Prompt & Prompt Images */}
+                  <div className="space-y-3">
+                    <SafeRichText
+                      rich={currentQuestion.prompt_rich}
+                      fallbackText={currentQuestion.prompt}
+                      className="text-base font-medium leading-relaxed sm:text-lg"
+                    />
+                    <ZoomableImage
+                      src={currentQuestion.prompt_image_url}
+                      alt={lText(locale, "Hình ảnh câu hỏi", "Question image")}
+                    />
                   </div>
 
-                  {displayedOptions.length > 0 ? (
-                    <div
-                      role={
-                        currentQuestion.question_type === "multiple_choice"
-                          ? "group"
-                          : "radiogroup"
-                      }
-                      className="space-y-2.5"
-                    >
-                      {displayedOptions.map((opt) => {
-                        const isSelected = selectedOptionIds.includes(opt.id);
-                        const submitted = Boolean(feedback?.submitted);
-                        let style =
-                          "border-border bg-card hover:bg-secondary/60 text-foreground";
-                        if (submitted) {
-                          if (opt.is_correct) {
-                            style =
-                              "border-success bg-success-subtle text-success-subtle-foreground";
-                          } else if (isSelected && !opt.is_correct) {
-                            style =
-                              "border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
-                          } else {
-                            style = "border-border opacity-75";
-                          }
-                        } else if (isSelected) {
-                          style =
-                            "border-primary bg-accent text-accent-foreground";
-                        }
+                  {/* Pre-Reveal Confidence Selector (Steps 2–4 only) */}
+                  {currentCard.stage >= 2 && !currentCard.forcedCorrectionPending ? (
+                    <ConfidenceSelector
+                      enabled={confidenceEnabled}
+                      disabled={Boolean(feedback)}
+                      value={selectedConfidence}
+                      onChange={setSelectedConfidence}
+                      keyboardMode="letters"
+                    />
+                  ) : null}
 
-                        return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            role={
-                              currentQuestion.question_type === "multiple_choice"
-                                ? "checkbox"
-                                : "radio"
-                            }
-                            aria-checked={isSelected}
-                            disabled={submitted}
-                            onClick={() => handleOptionSelect(opt.id)}
-                            className={cn(
-                              "flex min-h-12 w-full items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                              style,
-                            )}
-                          >
-                            <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-current/25 text-xs font-semibold">
-                              {opt.displayLabel}
-                            </span>
-                            <span className="flex-1 whitespace-pre-wrap text-sm sm:text-base leading-relaxed">
-                              {opt.content}
-                            </span>
-                            {submitted && opt.is_correct ? (
-                              <CheckCircle2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-                            ) : null}
-                            {submitted && isSelected && !opt.is_correct ? (
-                              <XCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-                            ) : null}
-                          </button>
-                        );
-                      })}
+                  {/* ACTIVITY RENDERER */}
+                  {currentCard.forcedCorrectionPending ? (
+                    <div className="space-y-3 rounded-xl border border-warning/60 bg-warning-subtle/40 p-4">
+                      <p className="text-sm font-medium text-warning-subtle-foreground">
+                        {feedback?.stageMessage}
+                      </p>
+                      <p className="rounded-md bg-background/80 px-3 py-2 text-sm font-semibold text-foreground">
+                        {lText(locale, "Đáp án chuẩn: ", "Correct answer: ")}
+                        {feedback?.expectedText}
+                      </p>
+                      <Input
+                        value={forcedCorrectionDraft}
+                        onChange={(e) => setForcedCorrectionDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (
+                            e.key === "Enter" &&
+                            !e.nativeEvent.isComposing &&
+                            e.keyCode !== 229
+                          ) {
+                            e.preventDefault();
+                            handleSubmitCurrentActivity();
+                          }
+                        }}
+                        placeholder={lText(
+                          locale,
+                          "Gõ lại đáp án đúng tại đây...",
+                          "Retype the correct answer here...",
+                        )}
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            if (!learnState) return;
+                            const skipped = recordAdaptiveLearnStep(
+                              learnState,
+                              currentQuestion,
+                              { isCorrect: false, skipForcedCorrection: true },
+                            );
+                            setLearnState(skipped.nextState);
+                            saveLearnCheckpoint(skipped.nextState);
+                            const nc = getCurrentAdaptiveCard(skipped.nextState);
+                            clearCardInputs(
+                              nc ? questionMap.get(nc.questionId) : null,
+                            );
+                          }}
+                        >
+                          <SkipForward className="size-4" aria-hidden="true" />
+                          {lText(locale, "Bỏ qua & học lại sau", "Skip for now")}
+                        </Button>
+                        <Button
+                          type="button"
+                          disabled={!forcedCorrectionDraft.trim()}
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Xác nhận sửa lỗi", "Confirm Correction")}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : currentCard.activity === "flashcard" && projectedFlashcard ? (
+                    <div className="space-y-4 rounded-xl border border-primary/25 bg-accent/25 p-4">
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-primary">
+                          {lText(locale, "Đáp án / Kiến thức cần nhớ", "Key Answer")}
+                        </p>
+                        <SafeRichText
+                          rich={projectedFlashcard.backRich}
+                          fallbackText={projectedFlashcard.backText}
+                          className="text-base font-medium text-foreground"
+                        />
+                        <ZoomableImage
+                          src={projectedFlashcard.backImageUrl}
+                          alt={lText(locale, "Hình ảnh đáp án", "Answer image")}
+                        />
+                        {projectedFlashcard.explanation ||
+                        projectedFlashcard.explanationRich ? (
+                          <div className="rounded-lg bg-background/80 p-3 text-xs text-muted-foreground">
+                            <SafeRichText
+                              rich={projectedFlashcard.explanationRich}
+                              fallbackText={projectedFlashcard.explanation}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                      <Button
+                        type="button"
+                        className="min-h-11 w-full sm:w-auto"
+                        onClick={() => handleSubmitCurrentActivity()}
+                      >
+                        <CheckCircle2 className="size-4" aria-hidden="true" />
+                        {lText(
+                          locale,
+                          "Đã ghi nhớ sơ bộ — chuyển sang Bước 2",
+                          "Got it — Advance to Stage 2",
+                        )}
+                      </Button>
+                    </div>
+                  ) : currentCard.activity === "multiple_choice" ||
+                    currentCard.activity === "reading_mc" ||
+                    currentCard.activity === "listening_mc" ? (
+                    <div className="space-y-2.5">
+                      <div
+                        className={cn(
+                          currentQuestion.question_type === "image_choice"
+                            ? "grid grid-cols-1 gap-3 sm:grid-cols-2"
+                            : "space-y-2.5",
+                        )}
+                      >
+                        {displayedOptions.map((opt) => {
+                          const isSelected = selectedOptionIds.includes(opt.id);
+                          const revealed = Boolean(feedback);
+                          const tone = revealed
+                            ? opt.is_correct
+                              ? "border-success bg-success-subtle/70"
+                              : isSelected
+                                ? "border-destructive bg-destructive-subtle/70"
+                                : "border-border opacity-70"
+                            : isSelected
+                              ? "border-primary bg-primary/10 ring-1 ring-primary/30"
+                              : "border-border bg-card hover:bg-muted/60";
+
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              disabled={revealed}
+                              aria-pressed={isSelected}
+                              onClick={() => {
+                                if (currentQuestion.question_type === "multiple_choice") {
+                                  setSelectedOptionIds((prev) =>
+                                    prev.includes(opt.id)
+                                      ? prev.filter((id) => id !== opt.id)
+                                      : [...prev, opt.id],
+                                  );
+                                } else {
+                                  setSelectedOptionIds([opt.id]);
+                                  handleSubmitCurrentActivity([opt.id]);
+                                }
+                              }}
+                              className={cn(
+                                "flex min-h-12 w-full flex-col gap-2 rounded-xl border p-3.5 text-left transition-colors",
+                                tone,
+                              )}
+                            >
+                              <div className="flex w-full items-start gap-3">
+                                <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-xs font-bold">
+                                  {opt.displayLabel}
+                                </span>
+                                <div className="flex-1 text-sm">
+                                  {opt.content || opt.content_rich ? (
+                                    <SafeRichText
+                                      rich={opt.content_rich}
+                                      fallbackText={opt.content}
+                                    />
+                                  ) : null}
+                                </div>
+                              </div>
+                              {isSafeDisplayImageUrl(opt.image_url) ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={opt.image_url}
+                                  alt={opt.image_alt ?? opt.content ?? opt.displayLabel}
+                                  className="max-h-40 rounded-md border border-border object-contain"
+                                />
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
 
                       {currentQuestion.question_type === "multiple_choice" &&
-                      !feedback?.submitted ? (
+                      !feedback ? (
                         <Button
-                          className="mt-2 min-h-11"
+                          type="button"
                           disabled={selectedOptionIds.length === 0}
-                          onClick={() => handleSubmitChoice(selectedOptionIds)}
+                          onClick={() => handleSubmitCurrentActivity()}
                         >
-                          {t("study.checkAnswer")}
+                          {lText(locale, "Kiểm tra đáp án", "Check Answer")}
                         </Button>
                       ) : null}
                     </div>
-                  ) : (
-                    <form onSubmit={handleSubmitTyped} className="space-y-3">
-                      <Label htmlFor="learn-typed-input">
-                        {t("study.yourAnswer")}
-                      </Label>
-                      <div className="flex gap-2">
+                  ) : currentCard.activity === "numerical" &&
+                    currentQuestion.type_payload?.type === "numerical" ? (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
                         <Input
-                          id="learn-typed-input"
-                          disabled={Boolean(feedback?.submitted)}
-                          value={typedAnswer}
-                          onChange={(e) => setTypedAnswer(e.target.value)}
-                          onCompositionEnd={(e) => {
-                            lastCompositionEndRef.current = e.timeStamp;
-                          }}
+                          type="text"
+                          inputMode="decimal"
+                          value={numericalValue}
+                          readOnly={Boolean(feedback)}
+                          onChange={(e) => setNumericalValue(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter") {
+                            if (
+                              e.key === "Enter" &&
+                              !e.nativeEvent.isComposing &&
+                              e.keyCode !== 229 &&
+                              !feedback
+                            ) {
                               e.preventDefault();
-                              if (
-                                e.nativeEvent.isComposing ||
-                                (lastCompositionEndRef.current !== null &&
-                                  Math.abs(
-                                    e.timeStamp - lastCompositionEndRef.current,
-                                  ) < 50)
-                              ) {
-                                return;
-                              }
-                              handleSubmitTyped();
+                              handleSubmitCurrentActivity();
                             }
                           }}
-                          placeholder={lText(
-                            locale,
-                            "Nhập đáp án rồi nhấn Enter...",
-                            "Type your answer and press Enter...",
-                          )}
+                          placeholder={lText(locale, "Nhập giá trị số...", "Enter numeric value...")}
+                          className="w-48 tabular-nums"
                         />
-                        <Button
-                          type="submit"
-                          disabled={
-                            Boolean(feedback?.submitted) || !typedAnswer.trim()
-                          }
-                        >
-                          {t("study.checkAnswer")}
-                        </Button>
+                        {currentQuestion.type_payload.unit ? (
+                          <Input
+                            value={numericalUnit}
+                            readOnly={Boolean(feedback)}
+                            onChange={(e) => setNumericalUnit(e.target.value)}
+                            placeholder={lText(
+                              locale,
+                              `Đơn vị (vd: ${currentQuestion.type_payload.unit})`,
+                              `Unit (e.g. ${currentQuestion.type_payload.unit})`,
+                            )}
+                            className="w-36"
+                          />
+                        ) : null}
                       </div>
-                    </form>
+                      {!feedback ? (
+                        <Button
+                          type="button"
+                          disabled={!numericalValue.trim()}
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Kiểm tra kết quả số", "Check Numerical Answer")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : currentCard.activity === "fill_in_blank" &&
+                    currentQuestion.type_payload?.type === "fill_in_blank" ? (
+                    <div className="space-y-3">
+                      {currentQuestion.type_payload.blanks.map((blank, idx) => (
+                        <div key={blank.blank_id} className="space-y-1">
+                          <Label htmlFor={`learn-blank-${blank.blank_id}`} className="text-xs">
+                            {lText(locale, `Ô trống #${idx + 1}`, `Blank #${idx + 1}`)}
+                            {blank.hint ? ` (${blank.hint})` : ""}
+                          </Label>
+                          <Input
+                            id={`learn-blank-${blank.blank_id}`}
+                            readOnly={Boolean(feedback)}
+                            value={blankAnswers[blank.blank_id] ?? ""}
+                            onChange={(e) =>
+                              setBlankAnswers((prev) => ({
+                                ...prev,
+                                [blank.blank_id]: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      ))}
+                      {!feedback ? (
+                        <Button
+                          type="button"
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Kiểm tra chỗ trống", "Check Blanks")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : currentCard.activity === "ordering" &&
+                    currentQuestion.type_payload?.type === "ordering" ? (
+                    <div className="space-y-2.5">
+                      {orderedIds.map((itemId, idx) => {
+                        const item =
+                          currentQuestion.type_payload?.type === "ordering"
+                            ? currentQuestion.type_payload.items.find(
+                                (it) => it.id === itemId,
+                              )
+                            : null;
+                        if (!item) return null;
+                        return (
+                          <div
+                            key={itemId}
+                            className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2.5"
+                          >
+                            <div className="flex items-center gap-2.5 text-sm">
+                              <Badge variant="outline" className="tabular-nums">
+                                {idx + 1}
+                              </Badge>
+                              <span>{item.text}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                disabled={Boolean(feedback) || idx === 0}
+                                aria-label={lText(locale, "Di chuyển lên", "Move up")}
+                                onClick={() => {
+                                  setOrderedIds((prev) => {
+                                    const copy = [...prev];
+                                    [copy[idx - 1], copy[idx]] = [
+                                      copy[idx],
+                                      copy[idx - 1],
+                                    ];
+                                    return copy;
+                                  });
+                                }}
+                              >
+                                <ArrowUp className="size-4" aria-hidden="true" />
+                              </Button>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                disabled={
+                                  Boolean(feedback) || idx === orderedIds.length - 1
+                                }
+                                aria-label={lText(locale, "Di chuyển xuống", "Move down")}
+                                onClick={() => {
+                                  setOrderedIds((prev) => {
+                                    const copy = [...prev];
+                                    [copy[idx], copy[idx + 1]] = [
+                                      copy[idx + 1],
+                                      copy[idx],
+                                    ];
+                                    return copy;
+                                  });
+                                }}
+                              >
+                                <ArrowDown className="size-4" aria-hidden="true" />
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!feedback ? (
+                        <Button
+                          type="button"
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Kiểm tra thứ tự", "Check Order")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : currentCard.activity === "matching" &&
+                    currentQuestion.type_payload?.type === "matching" ? (
+                    <div className="space-y-3">
+                      {currentQuestion.type_payload.pairs.map((pair) => {
+                        const rightChoices =
+                          currentQuestion.type_payload?.type === "matching"
+                            ? [
+                                ...currentQuestion.type_payload.pairs.map((p) => ({
+                                  id: p.right_id,
+                                  text: p.right_text,
+                                })),
+                                ...(currentQuestion.type_payload.distractors ?? []).map(
+                                  (d) => ({ id: d.right_id, text: d.right_text }),
+                                ),
+                              ]
+                            : [];
+                        return (
+                          <div
+                            key={pair.id}
+                            className="grid items-center gap-2 rounded-lg border border-border p-3 sm:grid-cols-2"
+                          >
+                            <span className="text-sm font-medium">
+                              {pair.left_text}
+                            </span>
+                            <Select
+                              disabled={Boolean(feedback)}
+                              value={matchingPairs[pair.id] ?? ""}
+                              onValueChange={(val) =>
+                                setMatchingPairs((prev) => ({
+                                  ...prev,
+                                  [pair.id]: val,
+                                }))
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue
+                                  placeholder={lText(
+                                    locale,
+                                    "Chọn đáp án ghép cặp...",
+                                    "Choose matching item...",
+                                  )}
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {rightChoices.map((rc) => (
+                                  <SelectItem key={rc.id} value={rc.id}>
+                                    {rc.text}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        );
+                      })}
+                      {!feedback ? (
+                        <Button
+                          type="button"
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Kiểm tra ghép cặp", "Check Matches")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : (currentCard.activity === "hotspot" ||
+                      currentCard.activity === "diagram_identify") &&
+                    currentQuestion.type_payload?.type === "image_hotspot" ? (
+                    <div className="space-y-3">
+                      <p className="text-xs text-muted-foreground">
+                        {lText(
+                          locale,
+                          "Nhấp vào vị trí đúng trên hình ảnh:",
+                          "Click or tap the target location on the image:",
+                        )}
+                      </p>
+                      {isSafeDisplayImageUrl(
+                        currentQuestion.type_payload.image_url,
+                      ) ? (
+                        <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-border">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={currentQuestion.type_payload.image_url}
+                            alt={lText(locale, "Hình ảnh điểm đánh dấu", "Hotspot image")}
+                            className="max-h-80 w-auto cursor-crosshair object-contain"
+                            onClick={(e) => {
+                              if (feedback) return;
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const x = (e.clientX - rect.left) / rect.width;
+                              const y = (e.clientY - rect.top) / rect.height;
+                              setHotspotClicks([
+                                {
+                                  x: Math.max(0, Math.min(1, x)),
+                                  y: Math.max(0, Math.min(1, y)),
+                                },
+                              ]);
+                            }}
+                          />
+                          {hotspotClicks.map((pt, i) => (
+                            <span
+                              key={i}
+                              style={{
+                                left: `${pt.x * 100}%`,
+                                top: `${pt.y * 100}%`,
+                              }}
+                              className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 size-5 rounded-full border-2 border-white bg-primary shadow"
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                      {!feedback ? (
+                        <div>
+                          <Button
+                            type="button"
+                            disabled={hotspotClicks.length === 0}
+                            onClick={() => handleSubmitCurrentActivity()}
+                          >
+                            {lText(locale, "Kiểm tra vị trí", "Check Location")}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    /* Default Recall Input (Write / Spell) */
+                    <div className="space-y-3">
+                      <Input
+                        value={typedAnswer}
+                        readOnly={Boolean(feedback)}
+                        onChange={(e) => {
+                          if (!feedback) setTypedAnswer(e.target.value);
+                        }}
+                        onKeyDown={(e) => {
+                          if (
+                            e.key === "Enter" &&
+                            !e.nativeEvent.isComposing &&
+                            e.keyCode !== 229 &&
+                            !feedback
+                          ) {
+                            e.preventDefault();
+                            handleSubmitCurrentActivity();
+                          }
+                        }}
+                        placeholder={lText(
+                          locale,
+                          "Nhập câu trả lời của bạn...",
+                          "Type your answer...",
+                        )}
+                        className="min-h-11"
+                      />
+                      {!feedback ? (
+                        <Button
+                          type="button"
+                          disabled={!typedAnswer.trim()}
+                          onClick={() => handleSubmitCurrentActivity()}
+                        >
+                          {lText(locale, "Kiểm tra đáp án", "Check Answer")}
+                        </Button>
+                      ) : null}
+                    </div>
                   )}
 
-                  {feedback?.submitted ? (
+                  {/* Feedback Banner (after standard check) */}
+                  {feedback && !feedback.isForcedCorrectionPrompt ? (
                     <div
                       role="status"
-                      aria-live="polite"
                       className={cn(
-                        "rounded-lg border p-4 space-y-2.5",
+                        "space-y-3 rounded-xl border p-4 text-sm",
                         feedback.isCorrect
-                          ? "border-success/40 bg-success-subtle text-success-subtle-foreground"
-                          : "border-destructive/40 bg-destructive-subtle text-destructive-subtle-foreground",
+                          ? "border-success/50 bg-success-subtle/60"
+                          : "border-destructive/50 bg-destructive-subtle/60",
                       )}
                     >
-                      <div className="flex items-center gap-2 font-semibold text-sm">
+                      <div className="flex items-center gap-2 font-semibold">
                         {feedback.isCorrect ? (
                           <>
-                            <CheckCircle2 className="size-4" aria-hidden="true" />
-                            <span>{t("study.correct")}</span>
+                            <CheckCircle2
+                              className="size-5 text-success"
+                              aria-hidden="true"
+                            />
+                            <span className="text-success-subtle-foreground">
+                              {lText(locale, "Chính xác!", "Correct!")}
+                            </span>
                           </>
                         ) : (
                           <>
-                            <XCircle className="size-4" aria-hidden="true" />
-                            <span>
-                              {lText(
-                                locale,
-                                "Chưa đúng — câu này sẽ xuất hiện lại sau vài thẻ để củng cố.",
-                                "Incorrect — this item will reappear in a few cards to reinforce.",
-                              )}
+                            <XCircle
+                              className="size-5 text-destructive"
+                              aria-hidden="true"
+                            />
+                            <span className="text-destructive-subtle-foreground">
+                              {lText(locale, "Chưa chính xác", "Incorrect")}
                             </span>
                           </>
                         )}
                       </div>
 
                       {!feedback.isCorrect && feedback.expectedText ? (
-                        <p className="text-sm text-foreground">
-                          <strong>{t("study.correctAnswer")}: </strong>
+                        <p className="text-xs text-foreground">
+                          <span className="font-semibold">
+                            {lText(locale, "Đáp án đúng: ", "Correct answer: ")}
+                          </span>
                           {feedback.expectedText}
                         </p>
                       ) : null}
 
-                      {currentQuestion.explanation ? (
-                        <p className="text-sm text-foreground/90 whitespace-pre-wrap">
-                          <strong>{t("study.explanation")}: </strong>
-                          {currentQuestion.explanation}
+                      {feedback.stageMessage ? (
+                        <p className="text-xs font-medium text-foreground/90">
+                          {feedback.stageMessage}
                         </p>
                       ) : null}
 
-                      <Button
-                        className="mt-1 min-h-10"
-                        onClick={handleContinueAfterFeedback}
-                      >
-                        {lText(locale, "Tiếp tục", "Continue")}
-                        <ArrowRight className="size-4" aria-hidden="true" />
-                      </Button>
+                      {feedback.explanation || feedback.explanationRich ? (
+                        <div className="border-t border-border/50 pt-2 text-xs text-muted-foreground">
+                          <span className="font-semibold text-foreground">
+                            {t("study.explanation")}:{" "}
+                          </span>
+                          <SafeRichText
+                            rich={feedback.explanationRich}
+                            fallbackText={feedback.explanation}
+                          />
+                        </div>
+                      ) : null}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <QuestionNotesAndReportBar
+                          studySetId={setId}
+                          questionId={currentQuestion.id}
+                          compact
+                        />
+                        <Button
+                          type="button"
+                          onClick={handleContinueAfterFeedback}
+                          className="min-h-10"
+                        >
+                          {lText(locale, "Tiếp tục", "Continue")}
+                          <ArrowRight className="size-4" aria-hidden="true" />
+                        </Button>
+                      </div>
                     </div>
                   ) : null}
                 </CardContent>
               </Card>
             </motion.div>
           </AnimatePresence>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
+
+      <ResetProgressDialog
+        open={resetDialogOpen}
+        onOpenChange={setResetDialogOpen}
+        defaultScope="study_set"
+        studySetId={setId}
+        studySetTitle={bundle.studySet.title}
+        subject={bundle.studySet.subject ?? undefined}
+        chapters={bundle.chapters}
+        mode="learn"
+        userId={bundle.studySet.owner_id}
+        onResetComplete={() => {
+          void refetch();
+          setConfigNonce((n) => n + 1);
+        }}
+      />
     </FocusModeShell>
   );
 }
+
+export const LearnSessionClient = LearnClient;

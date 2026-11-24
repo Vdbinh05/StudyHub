@@ -1,5 +1,6 @@
 import type {
   AllocationStrategy,
+  ConfidenceLevel,
   CoverageCycle,
   DifficultyLevel,
   ExamAttempt,
@@ -17,16 +18,27 @@ import type {
   ExamSubjectBreakdown,
   ExamTagBreakdown,
   Folder,
+  LearningSessionCheckpoint,
   MasteryLevel,
+  MistakeStatus,
   PracticePoolResponse,
+  ProgressResetRequest,
+  ProgressResetResult,
   Question,
+  QuestionReport,
+  QuestionReportCategory,
+  QuestionType,
+  RichTextDoc,
   SelectionPolicy,
   SelfRating,
   SessionStatus,
+  StructuredAnswerResponse,
   StudyMode,
   StudySession,
   StudySet,
+  UserQuestionNote,
   UserQuestionProgress,
+  V3StudyMode,
 } from "@/types/domain";
 
 export interface ApiEnvelope<T> {
@@ -296,11 +308,14 @@ export interface UpsertProgressPayload {
   question_id: string;
   is_correct: boolean;
   self_rating?: SelfRating | null;
+  confidence?: ConfidenceLevel | null;
+  hint_used?: boolean;
   mastery_level?: MasteryLevel;
   ease_factor?: number;
   interval_days?: number;
   repetitions?: number;
   next_review_at?: string | null;
+  mistake_status?: MistakeStatus;
 }
 
 export async function upsertQuestionProgress(
@@ -437,15 +452,24 @@ export interface MistakeItem {
   question_id: string;
   study_set_id: string;
   study_set_title?: string;
+  subject?: string | null;
   chapter?: string | null;
   wrong_count: number;
   correct_count: number;
   consecutive_correct: number;
+  consecutive_wrong?: number;
   mastery_level: MasteryLevel;
   last_wrong_at?: string | null;
   last_reviewed_at?: string | null;
+  next_review_at?: string | null;
   last_selected_option_ids?: string[];
   last_typed_answer?: string | null;
+  last_confidence?: ConfidenceLevel | null;
+  low_confidence_count?: number;
+  high_conf_wrong_count?: number;
+  guess_correct_count?: number;
+  mistake_status?: MistakeStatus;
+  recent_exam_attempt_id?: string | null;
   needs_review: boolean;
   is_starred?: boolean;
   question: Question;
@@ -453,9 +477,22 @@ export interface MistakeItem {
 
 export interface ListMistakesParams {
   studySetId?: string;
+  subject?: string;
   chapter?: string;
+  tagId?: string;
+  questionType?: QuestionType;
   minWrongCount?: number;
+  minConsecutiveWrong?: number;
   includeResolved?: boolean;
+  mistakeStatus?: MistakeStatus;
+  confidence?: ConfidenceLevel;
+  highConfWrongOnly?: boolean;
+  guessCorrectOnly?: boolean;
+  lowConfidenceOnly?: boolean;
+  dueOnly?: boolean;
+  starredOnly?: boolean;
+  masteryLevel?: MasteryLevel;
+  examAttemptId?: string;
   days?: number;
   page?: number;
   pageSize?: number;
@@ -466,10 +503,24 @@ export async function fetchMistakes(
 ): Promise<{ items: MistakeItem[]; total: number }> {
   const qs = new URLSearchParams();
   if (params.studySetId) qs.set("studySetId", params.studySetId);
+  if (params.subject) qs.set("subject", params.subject);
   if (params.chapter) qs.set("chapter", params.chapter);
+  if (params.tagId) qs.set("tagId", params.tagId);
+  if (params.questionType) qs.set("questionType", params.questionType);
   if (params.minWrongCount)
     qs.set("minWrongCount", String(params.minWrongCount));
+  if (params.minConsecutiveWrong)
+    qs.set("minConsecutiveWrong", String(params.minConsecutiveWrong));
   qs.set("includeResolved", params.includeResolved ? "true" : "false");
+  if (params.mistakeStatus) qs.set("mistakeStatus", params.mistakeStatus);
+  if (params.confidence) qs.set("confidence", params.confidence);
+  if (params.highConfWrongOnly) qs.set("highConfWrongOnly", "true");
+  if (params.guessCorrectOnly) qs.set("guessCorrectOnly", "true");
+  if (params.lowConfidenceOnly) qs.set("lowConfidenceOnly", "true");
+  if (params.dueOnly) qs.set("dueOnly", "true");
+  if (params.starredOnly) qs.set("starredOnly", "true");
+  if (params.masteryLevel) qs.set("masteryLevel", params.masteryLevel);
+  if (params.examAttemptId) qs.set("examAttemptId", params.examAttemptId);
   if (params.days) qs.set("days", String(params.days));
   qs.set("page", String(params.page ?? 1));
   qs.set("pageSize", String(Math.min(200, params.pageSize ?? 100)));
@@ -489,7 +540,7 @@ export async function fetchMistakes(
         const prog = obj.progress as UserQuestionProgress;
         const q = obj.question as Question;
         const studySetObj = obj.study_set as
-          | { id?: string; title?: string }
+          | { id?: string; title?: string; subject?: string | null }
           | null
           | undefined;
         const lastWrong = obj.last_wrong_answer as
@@ -497,6 +548,7 @@ export async function fetchMistakes(
               selected_option_ids?: string[];
               typed_answer?: string | null;
               answered_at?: string;
+              attempt_id?: string | null;
             }
           | null
           | undefined;
@@ -505,15 +557,26 @@ export async function fetchMistakes(
           question_id: prog.question_id,
           study_set_id: prog.study_set_id,
           study_set_title: studySetObj?.title,
+          subject: studySetObj?.subject ?? null,
           chapter: q.chapter,
           wrong_count: prog.wrong_count,
           correct_count: prog.correct_count,
           consecutive_correct: prog.consecutive_correct,
+          consecutive_wrong: prog.consecutive_wrong ?? 0,
           mastery_level: prog.mastery_level,
-          last_wrong_at: lastWrong?.answered_at ?? prog.last_reviewed_at,
+          last_wrong_at:
+            prog.last_wrong_at ?? lastWrong?.answered_at ?? prog.last_reviewed_at,
           last_reviewed_at: prog.last_reviewed_at,
+          next_review_at: prog.next_review_at,
           last_selected_option_ids: lastWrong?.selected_option_ids ?? [],
           last_typed_answer: lastWrong?.typed_answer ?? null,
+          last_confidence: prog.last_confidence ?? null,
+          low_confidence_count: prog.low_confidence_count ?? 0,
+          high_conf_wrong_count: prog.high_conf_wrong_count ?? 0,
+          guess_correct_count: prog.guess_correct_count ?? 0,
+          mistake_status:
+            prog.mistake_status ?? (resolved ? "resolved" : "active"),
+          recent_exam_attempt_id: lastWrong?.attempt_id ?? null,
           needs_review: !resolved,
           is_starred: Boolean(obj.is_starred),
           question: q,
@@ -566,6 +629,9 @@ export async function recordStudySessionAnswer(
     question_id: string;
     selected_option_ids?: string[];
     typed_answer?: string | null;
+    structured_response?: StructuredAnswerResponse | null;
+    confidence?: ConfidenceLevel | null;
+    hint_used?: boolean;
     is_correct?: boolean;
     self_rating?: SelfRating | null;
     response_time_ms?: number | null;
@@ -584,6 +650,9 @@ export async function recordStudySessionAnswer(
       question_id: payload.question_id,
       selected_option_ids: payload.selected_option_ids ?? [],
       typed_answer: payload.typed_answer ?? null,
+      structured_response: payload.structured_response ?? null,
+      confidence: payload.confidence ?? null,
+      hint_used: payload.hint_used ?? false,
       is_correct: payload.is_correct,
       self_rating: payload.self_rating ?? null,
       response_time_ms: payload.response_time_ms ?? null,
@@ -766,6 +835,9 @@ export interface ExamAnswerSaveItem {
   attempt_question_id: string;
   selected_option_ids: string[];
   typed_answer?: string | null;
+  structured_response?: StructuredAnswerResponse | null;
+  confidence?: ConfidenceLevel | null;
+  hint_used?: boolean;
   is_flagged: boolean;
   client_seq?: number;
 }
@@ -1020,5 +1092,128 @@ export async function restartCoverageCycleApi(
       body: JSON.stringify(options ?? {}),
     },
   );
+  return res.data;
+}
+
+// ============================================================================
+// V3.0 Learning Session Checkpoints (Resume Learning)
+// ============================================================================
+
+export async function listCheckpoints(params?: {
+  studySetId?: string;
+  mode?: V3StudyMode;
+  sessionKey?: string;
+}): Promise<LearningSessionCheckpoint[]> {
+  const qs = new URLSearchParams();
+  if (params?.studySetId) qs.set("studySetId", params.studySetId);
+  if (params?.mode) qs.set("mode", params.mode);
+  if (params?.sessionKey) qs.set("sessionKey", params.sessionKey);
+  const query = qs.toString();
+  const res = await requestJson<
+    LearningSessionCheckpoint[] | { checkpoints: LearningSessionCheckpoint[] }
+  >(`/api/checkpoints${query ? `?${query}` : ""}`);
+  if (Array.isArray(res.data)) return res.data;
+  if (res.data && "checkpoints" in res.data) return res.data.checkpoints;
+  return [];
+}
+
+export interface UpsertCheckpointPayload {
+  study_set_id?: string | null;
+  mode: V3StudyMode;
+  session_key: string;
+  state_json: Record<string, unknown>;
+  progress_percent: number;
+  current_index: number;
+  total_items: number;
+  device_id?: string | null;
+}
+
+export async function upsertCheckpoint(
+  payload: UpsertCheckpointPayload,
+): Promise<LearningSessionCheckpoint> {
+  const res = await requestJson<LearningSessionCheckpoint>("/api/checkpoints", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function deleteCheckpoint(params: {
+  id?: string;
+  sessionKey?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams();
+  if (params.id) qs.set("id", params.id);
+  if (params.sessionKey) qs.set("sessionKey", params.sessionKey);
+  await requestJson<unknown>(`/api/checkpoints?${qs.toString()}`, {
+    method: "DELETE",
+  });
+}
+
+// ============================================================================
+// V3.0 Scoped Reset Learning Progress
+// ============================================================================
+
+export async function resetLearningProgress(
+  payload: ProgressResetRequest,
+): Promise<ProgressResetResult> {
+  const res = await requestJson<ProgressResetResult>("/api/progress/reset", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+// ============================================================================
+// V3.0 Personal Question Notes & Question Reports
+// ============================================================================
+
+export async function listQuestionNotes(params?: {
+  studySetId?: string;
+  questionId?: string;
+}): Promise<UserQuestionNote[]> {
+  const qs = new URLSearchParams();
+  if (params?.studySetId) qs.set("studySetId", params.studySetId);
+  if (params?.questionId) qs.set("questionId", params.questionId);
+  const query = qs.toString();
+  const res = await requestJson<
+    UserQuestionNote[] | { notes: UserQuestionNote[] }
+  >(`/api/notes${query ? `?${query}` : ""}`);
+  if (Array.isArray(res.data)) return res.data;
+  if (res.data && "notes" in res.data) return res.data.notes;
+  return [];
+}
+
+export async function upsertQuestionNote(payload: {
+  study_set_id: string;
+  question_id: string;
+  content_text: string;
+  content_rich?: RichTextDoc | null;
+  base_version?: number | null;
+}): Promise<UserQuestionNote> {
+  const res = await requestJson<UserQuestionNote>("/api/notes", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function deleteQuestionNote(questionId: string): Promise<void> {
+  await requestJson<unknown>(
+    `/api/notes?questionId=${encodeURIComponent(questionId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function submitQuestionReport(payload: {
+  study_set_id: string;
+  question_id: string;
+  category: QuestionReportCategory;
+  description: string;
+}): Promise<QuestionReport> {
+  const res = await requestJson<QuestionReport>("/api/reports", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
   return res.data;
 }

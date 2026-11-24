@@ -526,3 +526,39 @@ Executes inside a single PostgreSQL transaction via `public.submit_exam_attempt(
 7. Update `exam_attempt_answers.is_correct` and `exam_attempts` (`answered_count`, `correct_count`, `wrong_count`, `unanswered_count`, `score_percent`, `passed`, `submitted_at`, `status`).
 8. Upsert `user_question_progress` for each answered question where `question_id IS NOT NULL`.
 9. Commit and return graded result (now safely including `correct_option_ids`, `accepted_answers_snapshot`, and `explanation_snapshot`).
+
+---
+
+## 8. StudyHub V2.0–V3.0 Additive Schema Extensions (Migrations `0005`–`0016` — 36 RLS Tables Live on PG 17.12)
+
+Migrations `0001`–`0004` (20 V1.0 tables) and `0005`–`0012` (V2.0/V2.1) remain strictly frozen and immutable (`git diff v2.1-verified -- 0001..0012` empty). StudyHub V3.0 adds **10 new RLS-enabled tables** in `0013`–`0014`, upgraded 12-type/search/reset/sync RPCs in `0015`, and PG 17.12 live fixes in `0016` — totaling **36 public tables (36/36 RLS enabled, `0` Security Advisor errors, `0` `unindexed_foreign_keys`)**:
+
+### 8.1 V2.0–V2.1 Extensions (`0005`–`0012`, +6 Tables = 26)
+- **Tables:** `exam_presets`, `exam_preset_sources`, `exam_attempt_sources`, `coverage_cycles`, `coverage_cycle_questions`, `coverage_cycle_attempts`.
+- **Hardening (`0006`–`0012`):** Moved `pg_trgm` to `extensions`; revoked default Supabase Cloud `anon` EXECUTE on 27 `SECURITY DEFINER` functions; fixed PG 17.12 RLS recursion (`0007` `is_folder_owner()`, `0009` `can_read_tag()`), MVCC `INSERT ... RETURNING *` (`0008`), window-in-aggregate in `clone_study_set()` (`0010`), FK `ON DELETE SET NULL` in `prevent_exam_snapshot_update()` (`0011`), and cascading account delete in `release_coverage_cycle_on_attempt_delete()` (`0012`).
+
+### 8.2 V3.0 Complete Learning Tables (`0013`–`0014`, +10 Tables = 36)
+
+| # | Table | Migration | Purpose & Key Constraints | RLS Policy Summary (`(SELECT auth.uid())`) |
+| --- | --- | --- | --- | --- |
+| 27 | `media_assets` | `0013` | Private uploaded images (`<=5 MB`) & audio (`<=10 MB`) w/ per-owner `sha256_hash` dedup, MIME CHECK (4 raster + 9 audio, zero SVG/HTML) | Owner + study-set readers + historical exam owners; `DELETE` owner/set-owner only |
+| 28 | `content_media_relations` | `0013` | Polymorphic links (`question`, `question_option`, `diagram_set`, `shared_passage`, `exam_attempt_question`, `profile`) with **`ON DELETE RESTRICT`** on `media_id` + 6 polymorphic cleanup triggers | Scoped via owning entity / exam attempt; prevents deleting exam-referenced media (`23503`) |
+| 29 | `shared_passages` | `0013` | Reusable rich-text / media reading passages linked by `reading_passage` questions | Inherits parent `study_set_id` read/edit RLS |
+| 30 | `diagram_sets` | `0013` | Visual Diagram containers referencing base diagram `media_assets` & parent `study_set_id` | Inherits parent `study_set_id` read/edit RLS |
+| 31 | `diagram_hotspots` | `0013` | Normalized `[0,1]` `point`, `rect`, and `polygon` hotspot definitions & labels | Inherits parent `diagram_set` / `study_set` read/edit RLS |
+| 32 | `user_question_notes` | `0014` | Private per-user notes (`content_text`, `content_rich` AST v1, optimistic `version`) | **Strict self-only (`user_id = (SELECT auth.uid())`)** across all operations & search |
+| 33 | `question_reports` | `0014` | 9-category student error reports (`open`/`resolved`/`dismissed`) | Set readers `INSERT`; reporter & set editors/owners `SELECT`; set editors/owners `UPDATE`; reporter/owner `DELETE` |
+| 34 | `learning_session_checkpoints` | `0014` | Resumable mid-session checkpoints keyed by `(user_id, session_key)` | Strict `user_id = (SELECT auth.uid())` |
+| 35 | `learning_confidence_events` | `0014` | Metacognitive calibration telemetry (`certain`/`unsure`/`guessing`) | Strict `user_id = (SELECT auth.uid())` |
+| 36 | `learning_sync_events` | `0014` | Idempotent offline sync audit log keyed by `(user_id, event_id)` | `SELECT` self-only; `INSERT` strictly via `SECURITY DEFINER` `sync_offline_learning_events()` (direct client insert denied `42501`) |
+
+### 8.3 V3.0 Upgraded Constraints, Storage & RPCs (`0013`, `0015`, `0016`)
+- **`study-media` Bucket (`0013`):** Upgraded to `file_size_limit = 10485760` (`10 MB`), `public = false`, 4 raster + 9 audio MIMEs (zero SVG/HTML). `ALTER POLICY "study_media_select"` preserves read access to historical exam snapshot media even after source study-set share revocation.
+- **Widened Core Tables (`0013`, `0016`):** `questions` widened to all 13 `question_type` values + `prompt_rich`, `explanation_rich`, `type_payload`, `passage_id`, `diagram_id`, `audio_media_id`, `audio_url` + image-only/audio-only prompt support (`0016` dropped PG 17 `btrim` legacy `questions_prompt_check`); `question_options` widened with `content_rich`, `media_asset_id`, and image-only options; `study_sessions.mode` widened with `'spell'`, `'diagram'`, `'custom_practice'`; `import_jobs.source_format` widened with `'pdf_text'`, `'docx_multimedia'`; `user_preferences` extended with `confidence_enabled`, `mode_preferences`, `progress_generation`; `user_question_progress` extended with `high_conf_wrong_count`, `guess_correct_count`, `low_confidence_count`, `independent_recall_count`, `consecutive_wrong`, `mistake_status`.
+- **Exam Snapshot Anti-Leak (`0013`, `0015`):** Column-level `REVOKE` blocks `type_payload_snapshot` & `explanation_rich_snapshot` (alongside `correct_option_ids`, `accepted_answers_snapshot`, `explanation_snapshot`) with PG **`42501`**; `prevent_exam_snapshot_update()` freezes all V3 snapshot columns while keeping FK `ON DELETE SET NULL` intact.
+- **V3.0 RPCs (`0015`, `0016` — all `SECURITY DEFINER`, `SET search_path = ''`, explicit `REVOKE ALL FROM PUBLIC, anon`):**
+  - `point_in_hotspot()`, `sanitize_pre_submit_type_payload()`, `grade_v3_exam_answer()`
+  - Upgraded `create_exam_attempt_v2()`, `save_exam_attempt_answers()`, `get_exam_attempt_detail()`, `submit_exam_attempt()` (12-type scoring, confidence-neutral exam scores, `-0.54`/`-0.59` SM-2 ease & `guessing`/`unsure`/`hint_used` mastery caps), and `clone_study_set()` (clones passages, diagrams, hotspots, JSONB IDs & option media relations)
+  - New `reset_learning_progress()` (6 scopes, bumps `progress_generation`, preserves `exam_attempts`), `global_library_search()` (8 entity types, `pg_trgm`, LIKE escaping, private-note isolation), and `sync_offline_learning_events()` (PgBouncer-safe zero-temp-table CTEs).
+
+See [`docs/audit/v3/DB_BACKEND_AUDIT.md`](audit/v3/DB_BACKEND_AUDIT.md) for live PG 17.12 verification (`16/16` live RPC tests PASS).

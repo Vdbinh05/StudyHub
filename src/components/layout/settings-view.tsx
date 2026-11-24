@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
@@ -11,12 +11,18 @@ import {
   Download,
   Eye,
   EyeOff,
+  Gauge,
   KeyRound,
+  Keyboard,
   Loader2,
+  RotateCcw,
   Save,
+  ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Upload,
   User,
+  WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -26,7 +32,15 @@ import {
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { PageHeader } from "@/components/layout/page-header";
+import { useShortcuts } from "@/components/layout/ShortcutProvider";
+import { ResetProgressDialog } from "@/components/learning/ResetProgressDialog";
 import { FadeIn } from "@/components/motion";
+import { InstallAppCard } from "@/components/pwa/InstallAppCard";
+import { OfflineManagerPanel } from "@/components/pwa/OfflineManagerPanel";
+import {
+  clearOfflineDataForLogout,
+  useOptionalPwa,
+} from "@/components/pwa/PwaProvider";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -59,9 +73,27 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/lib/i18n";
-import { useUserPreferences } from "@/lib/preferences";
+import {
+  DEFAULT_MODE_PREFERENCES,
+  useUserPreferences,
+} from "@/lib/preferences";
 import { tryCreateClient } from "@/lib/supabase/client";
-import type { Locale, ThemePreference } from "@/types/domain";
+import type {
+  DiagramStudyMode,
+  Locale,
+  ModePreferences,
+  ThemePreference,
+} from "@/types/domain";
+
+type SettingsTabKey = "preferences" | "modes" | "offline" | "reset" | "account";
+
+const VALID_TABS = new Set<SettingsTabKey>([
+  "preferences",
+  "modes",
+  "offline",
+  "reset",
+  "account",
+]);
 
 interface RestoreSummary {
   restored?: {
@@ -86,13 +118,27 @@ function clampGoal(raw: string): number {
   return Math.max(1, Math.min(500, parsed));
 }
 
-export function SettingsView() {
+function resolveTabParam(raw: string | null): SettingsTabKey {
+  if (raw && VALID_TABS.has(raw as SettingsTabKey)) {
+    return raw as SettingsTabKey;
+  }
+  return "preferences";
+}
+
+function SettingsViewInner() {
   const { locale, setLocale, t } = useI18n();
   const vi = locale === "vi";
   const { setTheme } = useTheme();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const configured = isSupabaseConfiguredClient();
+  const pwa = useOptionalPwa();
+  const { openHelp, setShortcutsEnabled } = useShortcuts();
+
+  const urlTab = resolveTabParam(searchParams.get("tab"));
+  const [selectedTab, setSelectedTab] = React.useState<SettingsTabKey | null>(null);
+  const activeTab: SettingsTabKey = selectedTab ?? urlTab;
 
   const {
     preferences,
@@ -114,6 +160,11 @@ export function SettingsView() {
   const instantFeedback = preferences.show_instant_feedback;
   const soundEffects = preferences.sound_effects;
   const reducedMotion = preferences.reduced_motion;
+  const confidenceEnabled = preferences.confidence_enabled;
+  const modePrefs: ModePreferences = preferences.mode_preferences ?? DEFAULT_MODE_PREFERENCES;
+
+  // Progress Reset Dialog
+  const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
 
   // Password change
   const [newPassword, setNewPassword] = React.useState("");
@@ -136,6 +187,23 @@ export function SettingsView() {
   );
   const [confirmPhrase, setConfirmPhrase] = React.useState("");
 
+  const patchModeSection = <K extends keyof ModePreferences>(
+    section: K,
+    patch: NonNullable<ModePreferences[K]>,
+  ) => {
+    const nextSection = {
+      ...(modePrefs[section] ?? {}),
+      ...patch,
+    } as NonNullable<ModePreferences[K]>;
+    if (section === "shortcuts" && "enabled" in patch && typeof patch.enabled === "boolean") {
+      setShortcutsEnabled(patch.enabled);
+    }
+    void updatePreferences(
+      { mode_preferences: { [section]: nextSection } },
+      { persistRemote: false },
+    );
+  };
+
   const handleSavePreferences = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const goal = clampGoal(dailyGoalDraft);
@@ -152,6 +220,7 @@ export function SettingsView() {
           show_instant_feedback: instantFeedback,
           sound_effects: soundEffects,
           reduced_motion: reducedMotion,
+          confidence_enabled: confidenceEnabled,
         },
         { persistRemote: configured, throwOnError: true },
       );
@@ -168,6 +237,38 @@ export function SettingsView() {
           vi
             ? "Đã lưu tùy chọn trên trình duyệt này."
             : "Preferences saved locally in this browser.",
+        );
+        return;
+      }
+      toast.error(getFriendlyErrorMessage(err, locale));
+    }
+  };
+
+  const handleSaveModePreferences = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    try {
+      await updatePreferences(
+        {
+          confidence_enabled: confidenceEnabled,
+          mode_preferences: modePrefs,
+        },
+        { persistRemote: configured, throwOnError: true },
+      );
+      toast.success(
+        configured
+          ? t("settings.savedSuccess")
+          : vi
+            ? "Đã lưu tùy chọn chế độ học trên trình duyệt này."
+            : "Mode preferences saved locally in this browser.",
+      );
+    } catch (err) {
+      if (isServiceUnavailableError(err)) {
+        toast.success(
+          vi
+            ? "Đã lưu tùy chọn chế độ học trên trình duyệt này."
+            : "Mode preferences saved locally in this browser.",
         );
         return;
       }
@@ -331,6 +432,7 @@ export function SettingsView() {
       setConfirmPhrase("");
       queryClient.clear();
       if (scope === "account") {
+        await clearOfflineDataForLogout(pwa?.activeUserId);
         await fetch("/auth/signout", { method: "POST", credentials: "same-origin" });
         toast.success(
           vi ? "Đã xóa dữ liệu và đăng xuất." : "Account data cleared and signed out.",
@@ -348,8 +450,21 @@ export function SettingsView() {
     },
   });
 
+  const handleTabChange = (val: string) => {
+    const next = resolveTabParam(val);
+    setSelectedTab(next);
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "preferences") {
+      params.delete("tab");
+    } else {
+      params.set("tab", next);
+    }
+    const qs = params.toString();
+    router.replace(`/settings${qs ? `?${qs}` : ""}`, { scroll: false });
+  };
+
   return (
-    <FadeIn aboveFold className="mx-auto max-w-3xl space-y-6">
+    <FadeIn aboveFold className="mx-auto max-w-4xl space-y-6">
       <PageHeader
         title={t("settings.title")}
         description={t("settings.subtitle")}
@@ -363,12 +478,27 @@ export function SettingsView() {
         }
       />
 
-      <Tabs defaultValue="preferences">
-        <TabsList>
-          <TabsTrigger value="preferences">{t("settings.preferencesTab")}</TabsTrigger>
-          <TabsTrigger value="account">{t("settings.accountTab")}</TabsTrigger>
-        </TabsList>
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <div className="overflow-x-auto pb-1">
+          <TabsList className="w-max min-w-full sm:min-w-0">
+            <TabsTrigger value="preferences">{t("settings.preferencesTab")}</TabsTrigger>
+            <TabsTrigger value="modes">
+              <SlidersHorizontal className="size-3.5" aria-hidden="true" />
+              <span>{t("settings.modePrefsTab")}</span>
+            </TabsTrigger>
+            <TabsTrigger value="offline">
+              <WifiOff className="size-3.5" aria-hidden="true" />
+              <span>{t("settings.offlineTab")}</span>
+            </TabsTrigger>
+            <TabsTrigger value="reset">
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              <span>{t("settings.resetTab")}</span>
+            </TabsTrigger>
+            <TabsTrigger value="account">{t("settings.accountTab")}</TabsTrigger>
+          </TabsList>
+        </div>
 
+        {/* TAB 1: General Study Preferences & Confidence Toggle */}
         <TabsContent value="preferences" className="mt-4">
           {prefsLoading ? (
             <Skeleton className="h-80 w-full rounded-xl" />
@@ -387,7 +517,10 @@ export function SettingsView() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <form onSubmit={(e) => void handleSavePreferences(e)} className="space-y-5">
+                <form
+                  onSubmit={(e) => void handleSavePreferences(e)}
+                  className="space-y-5"
+                >
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label htmlFor="pref-language">{t("settings.language")}</Label>
@@ -461,6 +594,34 @@ export function SettingsView() {
                   <Separator />
 
                   <div className="space-y-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label
+                          htmlFor="pref-confidence"
+                          className="flex cursor-pointer items-center gap-1.5 font-medium"
+                        >
+                          <Gauge className="text-primary size-4" aria-hidden="true" />
+                          <span>{t("confidence.enableToggle")}</span>
+                        </Label>
+                        <p className="text-muted-foreground text-xs leading-relaxed">
+                          {t("confidence.enableDescription")}{" "}
+                          {t("confidence.examDisclaimer")}
+                        </p>
+                      </div>
+                      <Switch
+                        id="pref-confidence"
+                        checked={confidenceEnabled}
+                        onCheckedChange={(val) => {
+                          void updatePreferences(
+                            { confidence_enabled: val },
+                            { persistRemote: false },
+                          );
+                        }}
+                      />
+                    </div>
+
+                    <Separator />
+
                     <div className="flex items-center justify-between gap-4">
                       <Label htmlFor="pref-shuffle-q" className="cursor-pointer font-normal">
                         {t("settings.defaultShuffleQuestions")}
@@ -560,6 +721,486 @@ export function SettingsView() {
           )}
         </TabsContent>
 
+        {/* TAB 2: Learning Mode Preferences, Shortcuts & Accessibility (§29) */}
+        <TabsContent value="modes" className="mt-4">
+          {prefsLoading ? (
+            <Skeleton className="h-96 w-full rounded-xl" />
+          ) : (
+            <form
+              onSubmit={(e) => void handleSaveModePreferences(e)}
+              className="space-y-4"
+            >
+              {/* Flashcards & Multiple Choice */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.flashcardsSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mp-fc-side">{t("modePrefs.cardFrontSide")}</Label>
+                      <Select
+                        value={modePrefs.flashcards?.start_side ?? "front"}
+                        onValueChange={(v) =>
+                          patchModeSection("flashcards", {
+                            start_side: v as "front" | "back",
+                          })
+                        }
+                      >
+                        <SelectTrigger id="mp-fc-side">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="front">
+                            {vi ? "Mặt trước (Câu hỏi / Thuật ngữ)" : "Front (Prompt / Term)"}
+                          </SelectItem>
+                          <SelectItem value="back">
+                            {vi ? "Mặt sau (Đáp án / Định nghĩa)" : "Back (Answer / Definition)"}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-fc-audio" className="cursor-pointer font-normal">
+                        {t("modePrefs.autoPlayAudio")}
+                      </Label>
+                      <Switch
+                        id="mp-fc-audio"
+                        checked={Boolean(modePrefs.flashcards?.auto_play_audio)}
+                        onCheckedChange={(val) =>
+                          patchModeSection("flashcards", { auto_play_audio: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-fc-hints" className="cursor-pointer font-normal">
+                        {t("modePrefs.showHints")}
+                      </Label>
+                      <Switch
+                        id="mp-fc-hints"
+                        checked={modePrefs.flashcards?.show_hints ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("flashcards", { show_hints: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.practiceSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mp-mc-advance">{t("modePrefs.autoAdvance")}</Label>
+                      <Select
+                        value={String(modePrefs.mc?.auto_advance_ms ?? 0)}
+                        onValueChange={(v) => {
+                          const ms = Number(v);
+                          patchModeSection("mc", {
+                            auto_advance_ms: ms > 0 ? ms : null,
+                          });
+                        }}
+                      >
+                        <SelectTrigger id="mp-mc-advance">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">{vi ? "Tắt (tự bấm tiếp)" : "Off (manual)"}</SelectItem>
+                          <SelectItem value="800">0.8s</SelectItem>
+                          <SelectItem value="1500">1.5s</SelectItem>
+                          <SelectItem value="2500">2.5s</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-mc-shuffle" className="cursor-pointer font-normal">
+                        {t("study.shuffleOptions")}
+                      </Label>
+                      <Switch
+                        id="mp-mc-shuffle"
+                        checked={modePrefs.mc?.shuffle_options ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("mc", { shuffle_options: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-mc-expl" className="cursor-pointer font-normal">
+                        {vi
+                          ? "Hiện giải thích ngay cả khi chọn đúng"
+                          : "Show explanation even when correct"}
+                      </Label>
+                      <Switch
+                        id="mp-mc-expl"
+                        checked={modePrefs.mc?.show_explanation_on_correct ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("mc", { show_explanation_on_correct: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Adaptive Learn & Write */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.learnSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mp-learn-obj">{t("learnV3.objectiveLabel")}</Label>
+                      <Select
+                        value={modePrefs.learn?.objective ?? "exam_prep"}
+                        onValueChange={(v) =>
+                          patchModeSection("learn", {
+                            objective: v as
+                              | "quick_familiarity"
+                              | "exam_prep"
+                              | "long_term_retention",
+                          })
+                        }
+                      >
+                        <SelectTrigger id="mp-learn-obj">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="quick_familiarity">
+                            {t("learnV3.objectiveQuickReview")}
+                          </SelectItem>
+                          <SelectItem value="exam_prep">
+                            {t("learnV3.objectiveExamPrep")}
+                          </SelectItem>
+                          <SelectItem value="long_term_retention">
+                            {t("learnV3.objectiveMasterAll")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-learn-write" className="cursor-pointer font-normal">
+                        {vi ? "Bật câu hỏi gõ gợi nhớ trong Học sâu" : "Enable written recall stage"}
+                      </Label>
+                      <Switch
+                        id="mp-learn-write"
+                        checked={modePrefs.learn?.enable_written_recall ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("learn", { enable_written_recall: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-learn-indep" className="cursor-pointer font-normal">
+                        {vi
+                          ? "Yêu cầu trả lời không dùng gợi ý để thành thạo"
+                          : "Require hint-free recall for mastery"}
+                      </Label>
+                      <Switch
+                        id="mp-learn-indep"
+                        checked={modePrefs.learn?.require_independent_recall ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("learn", { require_independent_recall: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-learn-conf" className="cursor-pointer font-normal">
+                        {t("modePrefs.showConfidencePrompt")}
+                      </Label>
+                      <Switch
+                        id="mp-learn-conf"
+                        checked={Boolean(modePrefs.learn?.ask_confidence)}
+                        onCheckedChange={(val) =>
+                          patchModeSection("learn", { ask_confidence: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.writeSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-write-case" className="cursor-pointer font-normal">
+                        {vi ? "Bỏ qua chữ hoa / thường" : "Ignore uppercase / lowercase"}
+                      </Label>
+                      <Switch
+                        id="mp-write-case"
+                        checked={modePrefs.write?.ignore_case ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("write", { ignore_case: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-write-diac" className="cursor-pointer font-normal">
+                        {vi ? "Bỏ qua dấu tiếng Việt khi chấm" : "Ignore diacritics when grading"}
+                      </Label>
+                      <Switch
+                        id="mp-write-diac"
+                        checked={Boolean(modePrefs.write?.ignore_diacritics)}
+                        onCheckedChange={(val) =>
+                          patchModeSection("write", { ignore_diacritics: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-write-override" className="cursor-pointer font-normal">
+                        {vi
+                          ? "Cho phép tự xác nhận 'Tôi đã trả lời đúng'"
+                          : "Allow manual 'Override: I was right'"}
+                      </Label>
+                      <Switch
+                        id="mp-write-override"
+                        checked={modePrefs.write?.allow_override ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("write", { allow_override: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Spell & Diagram */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.spellSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mp-spell-rate">{t("modePrefs.ttsRate")}</Label>
+                      <Select
+                        value={String(modePrefs.spell?.speech_rate ?? 1)}
+                        onValueChange={(v) =>
+                          patchModeSection("spell", { speech_rate: Number(v) })
+                        }
+                      >
+                        <SelectTrigger id="mp-spell-rate">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0.6">0.6x ({vi ? "Chậm" : "Slow"})</SelectItem>
+                          <SelectItem value="0.8">0.8x</SelectItem>
+                          <SelectItem value="1">1.0x ({vi ? "Chuẩn" : "Normal"})</SelectItem>
+                          <SelectItem value="1.25">1.25x</SelectItem>
+                          <SelectItem value="1.5">1.5x ({vi ? "Nhanh" : "Fast"})</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-spell-auto" className="cursor-pointer font-normal">
+                        {t("modePrefs.autoPlayAudio")}
+                      </Label>
+                      <Switch
+                        id="mp-spell-auto"
+                        checked={modePrefs.spell?.auto_play_prompt ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("spell", { auto_play_prompt: val })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-spell-diac" className="cursor-pointer font-normal">
+                        {t("modePrefs.strictAccents")}
+                      </Label>
+                      <Switch
+                        id="mp-spell-diac"
+                        checked={modePrefs.spell?.strict_diacritics ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("spell", { strict_diacritics: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      {t("modePrefs.diagramSection")}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mp-diag-mode">
+                        {vi ? "Chế độ học sơ đồ mặc định" : "Default diagram study mode"}
+                      </Label>
+                      <Select
+                        value={modePrefs.diagram?.default_mode ?? "identify_location"}
+                        onValueChange={(v) =>
+                          patchModeSection("diagram", {
+                            default_mode: v as DiagramStudyMode,
+                          })
+                        }
+                      >
+                        <SelectTrigger id="mp-diag-mode">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="explore">{t("diagram.modeExplore")}</SelectItem>
+                          <SelectItem value="identify_location">
+                            {t("diagram.modeIdentify")}
+                          </SelectItem>
+                          <SelectItem value="name_location">
+                            {t("diagram.modeName")}
+                          </SelectItem>
+                          <SelectItem value="multiple_choice">
+                            {t("diagram.modeMultipleChoice")}
+                          </SelectItem>
+                          <SelectItem value="hidden_labels">
+                            {t("diagram.modeHiddenLabels")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="mp-diag-hints" className="cursor-pointer font-normal">
+                        {t("modePrefs.showHints")}
+                      </Label>
+                      <Switch
+                        id="mp-diag-hints"
+                        checked={modePrefs.diagram?.show_hotspot_hints ?? true}
+                        onCheckedChange={(val) =>
+                          patchModeSection("diagram", { show_hotspot_hints: val })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Shortcuts & Accessibility */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Keyboard className="text-primary size-4" aria-hidden="true" />
+                    <span>{t("modePrefs.accessibilitySection")}</span>
+                  </CardTitle>
+                  <CardDescription>{t("shortcuts.imeSafetyNote")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <Label htmlFor="mp-sc-enabled" className="cursor-pointer font-normal">
+                      {t("shortcuts.enableShortcuts")}
+                    </Label>
+                    <Switch
+                      id="mp-sc-enabled"
+                      checked={modePrefs.shortcuts?.enabled ?? true}
+                      onCheckedChange={(val) =>
+                        patchModeSection("shortcuts", { enabled: val })
+                      }
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <Label htmlFor="mp-a11y-focus" className="cursor-pointer font-normal">
+                      {t("modePrefs.highContrastFocus")}
+                    </Label>
+                    <Switch
+                      id="mp-a11y-focus"
+                      checked={Boolean(modePrefs.accessibility?.high_contrast_focus)}
+                      onCheckedChange={(val) =>
+                        patchModeSection("accessibility", { high_contrast_focus: val })
+                      }
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <Label htmlFor="mp-a11y-text" className="cursor-pointer font-normal">
+                      {t("modePrefs.largeText")}
+                    </Label>
+                    <Switch
+                      id="mp-a11y-text"
+                      checked={Boolean(modePrefs.accessibility?.large_reading_text)}
+                      onCheckedChange={(val) =>
+                        patchModeSection("accessibility", { large_reading_text: val })
+                      }
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                    <Button type="button" variant="outline" size="sm" onClick={openHelp}>
+                      <Keyboard className="size-4" aria-hidden="true" />
+                      <span>{t("shortcuts.openHelp")}</span>
+                    </Button>
+                    <Button type="submit" disabled={prefsSaving}>
+                      {prefsSaving ? (
+                        <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Save className="size-4" aria-hidden="true" />
+                      )}
+                      <span>{t("settings.saveChanges")}</span>
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </form>
+          )}
+        </TabsContent>
+
+        {/* TAB 3: PWA Install & Offline Learning Manager (§25–27) */}
+        <TabsContent value="offline" className="mt-4 space-y-6">
+          <InstallAppCard />
+          <OfflineManagerPanel
+            onStudySetOffline={(setId) =>
+              router.push(`/offline?setId=${encodeURIComponent(setId)}`)
+            }
+          />
+        </TabsContent>
+
+        {/* TAB 4: Scoped / Account-Wide Progress Reset (§19) */}
+        <TabsContent value="reset" className="mt-4 space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <RotateCcw className="text-primary size-4" aria-hidden="true" />
+                <span>{t("resume.resetTitle")}</span>
+              </CardTitle>
+              <CardDescription>{t("resume.resetSubtitle")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="border-success/30 bg-success-subtle text-success-subtle-foreground flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm">
+                <ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <p className="leading-relaxed">
+                  {t("resume.resetPreserveHistoryNotice")}
+                </p>
+              </div>
+              <p className="text-muted-foreground text-sm leading-relaxed">
+                {vi
+                  ? "Muốn đặt lại riêng một học phần hoặc một chương cụ thể? Hãy mở trang chi tiết học phần đó và chọn nút Đặt lại tiến độ."
+                  : "Want to reset a single study set or chapter instead? Open that study set's overview page and choose Reset Progress."}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={!configured}
+                onClick={() => setResetDialogOpen(true)}
+              >
+                <RotateCcw className="size-4" aria-hidden="true" />
+                <span>
+                  {vi ? "Đặt lại toàn bộ tiến độ học tập..." : "Reset all study progress..."}
+                </span>
+              </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* TAB 5: Account Security, JSON Backup & Danger Zone */}
         <TabsContent value="account" className="mt-4 space-y-6">
           {/* Change Password */}
           <Card>
@@ -575,7 +1216,11 @@ export function SettingsView() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={(e) => void handlePasswordUpdate(e)} noValidate className="space-y-4">
+              <form
+                onSubmit={(e) => void handlePasswordUpdate(e)}
+                noValidate
+                className="space-y-4"
+              >
                 <div className="space-y-1.5 sm:max-w-md">
                   <Label htmlFor="settings-new-password">
                     {vi ? "Mật khẩu mới" : "New password"}
@@ -743,8 +1388,8 @@ export function SettingsView() {
               </CardTitle>
               <CardDescription>
                 {vi
-                  ? "Các thao tác bên dưới sẽ xóa vĩnh viễn dữ liệu khỏi cơ sở dữ liệu và không thể hoàn tác."
-                  : "Actions below permanently delete your data from the database and cannot be undone."}
+                  ? "Các thao tác bên dưới sẽ xóa vĩnh viễn dữ liệu khỏi cơ sở dữ liệu và không thể hoàn tác. (Nếu bạn chỉ muốn học lại từ đầu mà giữ nguyên câu hỏi và lịch sử thi, hãy dùng mục Đặt lại tiến độ.)"
+                  : "Actions below permanently delete your data from the database and cannot be undone. (If you only want to study fresh while preserving sets & exam history, use Reset Progress instead.)"}
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-3">
@@ -776,6 +1421,20 @@ export function SettingsView() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Account-Wide Progress Reset Dialog */}
+      <ResetProgressDialog
+        open={resetDialogOpen}
+        onOpenChange={setResetDialogOpen}
+        defaultScope="all"
+        allowedScopes={["all"]}
+        userId={pwa?.activeUserId ?? undefined}
+        pendingOfflineEventsCount={pwa?.syncSummary?.pendingCount ?? 0}
+        onResetComplete={() => {
+          queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+          queryClient.invalidateQueries({ queryKey: ["statistics"] });
+        }}
+      />
 
       {/* Confirm Backup Restore Dialog */}
       <AlertDialog open={restoreConfirmOpen} onOpenChange={setRestoreConfirmOpen}>
@@ -849,7 +1508,9 @@ export function SettingsView() {
           <AlertDialogFooter>
             <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
-              disabled={confirmPhrase !== "DELETE_MY_DATA" || deleteDataMutation.isPending}
+              disabled={
+                confirmPhrase !== "DELETE_MY_DATA" || deleteDataMutation.isPending
+              }
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={(e) => {
                 e.preventDefault();
@@ -867,5 +1528,20 @@ export function SettingsView() {
         </AlertDialogContent>
       </AlertDialog>
     </FadeIn>
+  );
+}
+
+export function SettingsView() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="mx-auto max-w-4xl space-y-6">
+          <Skeleton className="h-12 w-64" />
+          <Skeleton className="h-96 w-full rounded-xl" />
+        </div>
+      }
+    >
+      <SettingsViewInner />
+    </React.Suspense>
   );
 }

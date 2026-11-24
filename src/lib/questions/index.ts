@@ -1,0 +1,33 @@
+export {
+  QUESTION_TYPE_REGISTRY,
+  extractQuestionPlainText,
+  getCompatibleModesForQuestion,
+  getQuestionTypeDescriptor,
+  gradeQuestionResponse,
+  validateQuestionByType,
+  validateResponseByType,
+  type QuestionLike,
+  type QuestionTypeDescriptor,
+  type QuestionValidationResult,
+  type ResponseValidationResult,
+} from "./registry";
+
+export {
+  gradeFillInBlankResponse,
+  gradeImageHotspotResponse,
+  gradeMatchingResponse,
+  gradeMultipleChoiceByUuid,
+  gradeNumericalResponse,
+  gradeOrderingResponse,
+  gradeShortAnswerResponse,
+  gradeSingleChoiceByUuid,
+  isPointInsideHotspot,
+  normalizeAnswerForMode,
+  normalizeNumericString,
+  parseNumericalInput,
+  stripDiacritics,
+  type GradeAcceptedAnswerLike,
+  type GradeOptionLike,
+  type GradeOptions,
+  type QuestionGradeResult,
+} from "./scoring";

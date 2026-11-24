@@ -135,3 +135,30 @@ Every parsed item runs through `validateParsedQuestion()` before Step 4 & before
 - `UNPARSED_BLOCK` / `INVALID_FORMAT` (`warning`/`error`): Unrecognized text block or malformed structure.
 
 **Commit Integrity Rule:** Rows with `severity === 'error'` can NEVER be silently inserted as broken questions; the user must either fix them inline in Step 4 or explicitly choose "Skip invalid rows" in Step 5.
+
+---
+
+## 5. StudyHub V2.0–V3.0 Format Extensions (11 Import Formats + 5-Mode Vietnamese PDF Export)
+
+### 5.1 Institutional 2-Row Merged Excel & Real-File Hardening (V2.0)
+- `xlsx-parser.ts` deterministically detects 2-row merged institutional headers (e.g., `SC`/`MC`/`TF` answer-type columns, `U+FEFF`/prefix cleanup), achieving **100% live parity** across all 4 real aviation `sample-data/` benchmarks (`133`, `24`, `62`, `62`).
+- Composite duplicate fingerprinting `(normalized prompt + sorted options + correct answers)` prevents false-positive deduplication on questions sharing a stem with different option sets, while O(1) per-keystroke Step-5 edit validation (`0.029 ms` at 10,000 questions) keeps the virtualized Wizard at 60fps.
+
+### 5.2 Multimedia DOCX Import (`docx_multimedia`, V3.0)
+- Inspects `<w:drawing>` / `<a:blip r:embed="rIdX"/>` references across BOTH paragraphs (`<w:p>`) AND Word tables (`<w:tbl>`), extracting validated raster media (`png`, `jpg`, `webp`, `gif`; strictly rejecting embedded SVG/WMF/script/ZIP bombs).
+- Supports image-only question prompts, multi-image prompts, and `image_choice` image-only answer options (`content = ""` + option `image_url`).
+- On `POST /api/import/commit`, uploads unique images to private `study-media` Storage with **SHA-256 owner deduplication** (verified live: `55` embedded `<w:drawing>` refs backed by `15` unique PNGs -> exactly `15` Storage objects `-72.7%` + `54` `content_media_relations` rows) and writes durable `/api/uploads/signed-url?...` proxy URLs.
+
+### 5.3 Deterministic Selectable-Text PDF Import (`pdf_text`, V3.0 — Zero AI / Zero OCR)
+- Powered by `pdfjs-dist` configured as `serverExternalPackages: ["pdfjs-dist"]` in `next.config.ts` with `globalThis.pdfjsWorker` preload (`V3-PERF-01`) and strict sandbox flags: `isEvalSupported: false`, `disableAutoFetch: true`, `useSystemFonts: false`, `disableFontFace: true` (`V3-SEC-05`).
+- Preserves full Vietnamese Unicode diacritics, deterministically strips repeating page headers/footers, supports two-column reading order & page-range filters, handles cross-page question continuation, and maps end-of-document `"BẢNG ĐÁP ÁN"` answer keys.
+- **Honest Scanned-PDF Detection:** Image-only / zero-text-layer PDFs return HTTP `200` with `isScannedPdf: true` and an explicit student-facing warning (never guessing with OCR/AI or returning silent garbage). Corrupted, encrypted, spoofed, and `>15 MB` PDFs fail closed safely.
+
+### 5.4 Deterministic Vietnamese-Complete PDF Export (`POST /api/export/pdf`, V3.0)
+- Server-only generator (`pdf-lib` + `@pdf-lib/fontkit` + bundled `NotoSans` TTF, `0 B` client bundle leakage) rendering 100% Vietnamese diacritics and embedded raster images across **5 modes**:
+  1. `question_paper` (blank printable exam paper, zero answer-key leak)
+  2. `paper_and_key` (exam paper + separate post-shuffle answer-key grid)
+  3. `paper_with_explanations` (study sheet with full solutions)
+  4. `incorrect_review` (submitted exam missed-question review loaded via `rpcGetExamAttemptDetail()`)
+  5. `flashcard_sheets` (printable cut-out flashcard grid)
+- **Security & Headers:** Enforces authentication (`401`), ownership/`allow_clone = false` (`403`), blocks non-`question_paper` modes on `in_progress` and `discarded` exam attempts (`403`), sets `Cache-Control: private, no-store`, and emits RFC 5987 `Content-Disposition: attachment; filename="..."; filename*=UTF-8''...` for Vietnamese filenames (`V3-SEC-01`). Verified live on 50Q multimedia (`1.28 MB`) and 250Q (`888 KB`) sets.

@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { ApiError } from "@/components/layout/api-client";
+import { ShortcutProvider } from "@/components/layout/ShortcutProvider";
+import { PwaProvider } from "@/components/pwa/PwaProvider";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { I18nProvider, useI18n } from "@/lib/i18n";
@@ -110,6 +112,7 @@ const EXACT_ROUTE_TITLES: Record<string, { vi: string; en: string }> = {
     en: "Profile | StudyHub",
   },
   "/settings": { vi: "Cài đặt | StudyHub", en: "Settings | StudyHub" },
+  "/offline": { vi: "Học ngoại tuyến | StudyHub", en: "Offline Study | StudyHub" },
 };
 
 function resolveLocalizedTitle(pathname: string, locale: Locale): string | null {
@@ -138,8 +141,20 @@ function resolveLocalizedTitle(pathname: string, locale: Locale): string | null 
   if (/^\/sets\/[^/]+\/write$/.test(pathname)) {
     return locale === "vi" ? "Gõ đáp án | StudyHub" : "Write Mode | StudyHub";
   }
+  if (/^\/sets\/[^/]+\/spell$/.test(pathname)) {
+    return locale === "vi" ? "Nghe & Gõ (Spell) | StudyHub" : "Spell Mode | StudyHub";
+  }
   if (/^\/sets\/[^/]+\/match$/.test(pathname)) {
     return locale === "vi" ? "Ghép thẻ | StudyHub" : "Match Mode | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/diagrams$/.test(pathname)) {
+    return locale === "vi" ? "Sơ đồ tương tác | StudyHub" : "Interactive Diagrams | StudyHub";
+  }
+  if (/^\/diagrams\/[^/]+\/edit$/.test(pathname)) {
+    return locale === "vi" ? "Biên tập sơ đồ | StudyHub" : "Edit Diagram | StudyHub";
+  }
+  if (/^\/diagrams\/[^/]+\/study$/.test(pathname)) {
+    return locale === "vi" ? "Học sơ đồ tương tác | StudyHub" : "Diagram Study | StudyHub";
   }
   if (/^\/sets\/[^/]+\/test$/.test(pathname)) {
     return locale === "vi" ? "Phòng thi thử | StudyHub" : "Mock Exam | StudyHub";
@@ -251,7 +266,11 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       <QueryClientProvider client={queryClient}>
         <I18nProvider defaultLocale="vi">
           <PreferencesProvider>
-            <PreferencesMotionShell>{children}</PreferencesMotionShell>
+            <PwaProvider>
+              <ShortcutProvider>
+                <PreferencesMotionShell>{children}</PreferencesMotionShell>
+              </ShortcutProvider>
+            </PwaProvider>
           </PreferencesProvider>
         </I18nProvider>
       </QueryClientProvider>

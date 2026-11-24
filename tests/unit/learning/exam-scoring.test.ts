@@ -4,6 +4,7 @@ import {
   formatCountdownMs,
   gradeExamQuestion,
   isExamExpired,
+  normalizeMatchingExamPayload,
   sanitizeExamQuestionsForClient,
   scoreExamAttempt,
 } from "@/lib/learning/exam-scoring";
@@ -333,5 +334,45 @@ describe("Deterministic Exam Scoring & Wall-Clock Timer Engine (exam-scoring.ts)
     expect(gradeExamQuestion(numHundred, { typed_answer: "100.0" }).isCorrect).toBe(
       true,
     );
+  });
+
+  it("normalizes both pre-submit sanitized matching payloads (left_items/right_items) and post-submit pairs without throwing (V3-UX-05)", () => {
+    // Pre-submit anti-leak shape from PostgreSQL sanitize_pre_submit_type_payload (NO `pairs` field!)
+    const preSubmit = normalizeMatchingExamPayload({
+      type: "matching",
+      left_items: [
+        { id: "p1", left_text: "METAR", left_rich_text: null, left_image_url: null },
+        { id: "p2", left_text: "TAF", left_rich_text: null, left_image_url: null },
+      ],
+      right_items: [
+        { right_id: "r2", right_text: "Forecast", right_rich_text: null, right_image_url: null },
+        { right_id: "r1", right_text: "Observation", right_rich_text: null, right_image_url: null },
+      ],
+    });
+    expect(preSubmit.leftItems).toHaveLength(2);
+    expect(preSubmit.leftItems[0]).toMatchObject({ id: "p1", left_text: "METAR" });
+    expect(preSubmit.rightItems).toHaveLength(2);
+    expect(preSubmit.rightItems[0]).toMatchObject({ right_id: "r2", right_text: "Forecast" });
+
+    // Post-submit / stored DB shape with pairs + distractors
+    const postSubmit = normalizeMatchingExamPayload({
+      type: "matching",
+      pairs: [
+        { id: "p1", left_text: "Lift", right_id: "r1", right_text: "Upward force" },
+      ],
+      distractors: [{ right_id: "d1", right_text: "Distractor" }],
+    });
+    expect(postSubmit.leftItems).toHaveLength(1);
+    expect(postSubmit.rightItems.map((r) => r.right_id)).toEqual(["r1", "d1"]);
+
+    // Null/malformed defensive safety
+    expect(normalizeMatchingExamPayload(null)).toEqual({
+      leftItems: [],
+      rightItems: [],
+    });
+    expect(normalizeMatchingExamPayload({ type: "matching" })).toEqual({
+      leftItems: [],
+      rightItems: [],
+    });
   });
 });

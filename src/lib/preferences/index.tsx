@@ -10,9 +10,15 @@ import {
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { useI18n } from "@/lib/i18n";
-import type { Locale, ThemePreference, UserPreferences } from "@/types/domain";
+import type {
+  Locale,
+  ModePreferences,
+  ThemePreference,
+  UserPreferences,
+} from "@/types/domain";
 
 const STORAGE_KEY = "studyhub-user-preferences";
+const SHORTCUTS_ENABLED_KEY = "studyhub-shortcuts-enabled";
 
 const PUBLIC_UNAUTH_PATHS = new Set([
   "/",
@@ -35,6 +41,8 @@ export interface StudyHubPreferences {
   show_instant_feedback: boolean;
   sound_effects: boolean;
   reduced_motion: boolean;
+  confidence_enabled: boolean;
+  mode_preferences: ModePreferences;
 }
 
 export interface UpdateUserPreferencesInput {
@@ -47,6 +55,8 @@ export interface UpdateUserPreferencesInput {
   show_instant_feedback?: boolean;
   sound_effects?: boolean;
   reduced_motion?: boolean;
+  confidence_enabled?: boolean;
+  mode_preferences?: ModePreferences;
 }
 
 export interface UpdatePreferencesOptions {
@@ -67,6 +77,55 @@ export interface PreferencesContextValue {
   playFeedbackSound: (kind: FeedbackSoundKind) => void;
 }
 
+export const DEFAULT_MODE_PREFERENCES: ModePreferences = {
+  flashcards: {
+    start_side: "front",
+    auto_play_audio: false,
+    show_hints: true,
+    show_keyboard_hints: true,
+  },
+  mc: {
+    instant_feedback: true,
+    auto_advance_ms: null,
+    shuffle_options: true,
+    show_explanation_on_correct: true,
+  },
+  learn: {
+    objective: "exam_prep",
+    batch_size: 10,
+    enable_written_recall: true,
+    require_independent_recall: true,
+    ask_confidence: false,
+  },
+  write: {
+    ignore_diacritics: false,
+    ignore_case: true,
+    allow_override: true,
+  },
+  spell: {
+    speech_rate: 1.0,
+    preferred_voice: null,
+    preferred_lang: "vi-VN",
+    auto_play_prompt: true,
+    show_hint_letters: true,
+    strict_diacritics: true,
+  },
+  diagram: {
+    default_mode: "identify_location",
+    show_hotspot_hints: true,
+    point_tolerance_scale: 1.0,
+  },
+  shortcuts: {
+    enabled: true,
+    show_hints: true,
+  },
+  accessibility: {
+    high_contrast_focus: false,
+    large_reading_text: false,
+    reduce_motion_override: false,
+  },
+};
+
 export const DEFAULT_USER_PREFERENCES: StudyHubPreferences = {
   language: "vi",
   theme: "system",
@@ -77,7 +136,31 @@ export const DEFAULT_USER_PREFERENCES: StudyHubPreferences = {
   show_instant_feedback: true,
   sound_effects: false,
   reduced_motion: false,
+  confidence_enabled: false,
+  mode_preferences: DEFAULT_MODE_PREFERENCES,
 };
+
+function mergeModePrefs(
+  base: ModePreferences | null | undefined,
+  incoming: ModePreferences | null | undefined,
+): ModePreferences {
+  const b = base ?? DEFAULT_MODE_PREFERENCES;
+  const inc = incoming ?? {};
+  return {
+    flashcards: { ...DEFAULT_MODE_PREFERENCES.flashcards, ...b.flashcards, ...inc.flashcards },
+    mc: { ...DEFAULT_MODE_PREFERENCES.mc, ...b.mc, ...inc.mc },
+    learn: { ...DEFAULT_MODE_PREFERENCES.learn, ...b.learn, ...inc.learn },
+    write: { ...DEFAULT_MODE_PREFERENCES.write, ...b.write, ...inc.write },
+    spell: { ...DEFAULT_MODE_PREFERENCES.spell, ...b.spell, ...inc.spell },
+    diagram: { ...DEFAULT_MODE_PREFERENCES.diagram, ...b.diagram, ...inc.diagram },
+    shortcuts: { ...DEFAULT_MODE_PREFERENCES.shortcuts, ...b.shortcuts, ...inc.shortcuts },
+    accessibility: {
+      ...DEFAULT_MODE_PREFERENCES.accessibility,
+      ...b.accessibility,
+      ...inc.accessibility,
+    },
+  };
+}
 
 function clampDailyGoal(value: unknown, fallback = 20): number {
   const num = typeof value === "number" ? value : Number(value);
@@ -105,6 +188,18 @@ function normalizePreferences(
       ? raw.theme
       : base.theme;
 
+  const rawConfidence =
+    "confidence_enabled" in raw && typeof raw.confidence_enabled === "boolean"
+      ? raw.confidence_enabled
+      : base.confidence_enabled;
+
+  const rawModePrefs =
+    "mode_preferences" in raw &&
+    raw.mode_preferences &&
+    typeof raw.mode_preferences === "object"
+      ? (raw.mode_preferences as ModePreferences)
+      : undefined;
+
   return {
     language,
     theme,
@@ -130,6 +225,8 @@ function normalizePreferences(
       typeof raw.reduced_motion === "boolean"
         ? raw.reduced_motion
         : base.reduced_motion,
+    confidence_enabled: rawConfidence,
+    mode_preferences: mergeModePrefs(base.mode_preferences, rawModePrefs),
   };
 }
 
@@ -319,15 +416,35 @@ export function PreferencesProvider({
     },
   });
 
-  // Apply reduced_motion attribute onto <html> so CSS respects the in-app toggle
+  // Apply reduced_motion & accessibility attributes onto <html> so CSS respects Settings toggles
   React.useEffect(() => {
     if (typeof document === "undefined") return;
-    if (preferences.reduced_motion) {
+    const reduce =
+      preferences.reduced_motion ||
+      Boolean(preferences.mode_preferences?.accessibility?.reduce_motion_override);
+    if (reduce) {
       document.documentElement.dataset.reducedMotion = "true";
     } else {
       delete document.documentElement.dataset.reducedMotion;
     }
-  }, [preferences.reduced_motion]);
+
+    if (preferences.mode_preferences?.accessibility?.high_contrast_focus) {
+      document.documentElement.dataset.highContrastFocus = "true";
+    } else {
+      delete document.documentElement.dataset.highContrastFocus;
+    }
+
+    if (preferences.mode_preferences?.accessibility?.large_reading_text) {
+      document.documentElement.dataset.largeText = "true";
+    } else {
+      delete document.documentElement.dataset.largeText;
+    }
+  }, [
+    preferences.reduced_motion,
+    preferences.mode_preferences?.accessibility?.reduce_motion_override,
+    preferences.mode_preferences?.accessibility?.high_contrast_focus,
+    preferences.mode_preferences?.accessibility?.large_reading_text,
+  ]);
 
   const updatePreferences = React.useCallback(
     async (
@@ -343,6 +460,19 @@ export function PreferencesProvider({
       if (patch.theme) {
         setTheme(patch.theme);
       }
+      if (
+        patch.mode_preferences?.shortcuts?.enabled !== undefined &&
+        typeof window !== "undefined"
+      ) {
+        try {
+          window.localStorage.setItem(
+            SHORTCUTS_ENABLED_KEY,
+            patch.mode_preferences.shortcuts.enabled ? "true" : "false",
+          );
+        } catch {
+          // Ignore storage errors
+        }
+      }
 
       if (options?.persistRemote === false || !isSupabaseConfiguredClient()) {
         return next;
@@ -350,7 +480,7 @@ export function PreferencesProvider({
 
       setIsSaving(true);
       try {
-        const payload: Partial<UserPreferences> = {};
+        const payload: Record<string, unknown> = {};
         if (patch.language !== undefined) payload.language = next.language;
         if (patch.theme !== undefined) payload.theme = next.theme;
         if (
@@ -373,6 +503,12 @@ export function PreferencesProvider({
         }
         if (patch.reduced_motion !== undefined) {
           payload.reduced_motion = next.reduced_motion;
+        }
+        if (patch.confidence_enabled !== undefined) {
+          payload.confidence_enabled = next.confidence_enabled;
+        }
+        if (patch.mode_preferences !== undefined) {
+          payload.mode_preferences = patch.mode_preferences;
         }
 
         const res = await apiFetch<UserPreferences>("/api/preferences", {

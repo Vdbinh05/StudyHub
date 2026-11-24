@@ -68,8 +68,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const sinceDate = new Date(Date.now() - days * 86_400_000);
     const sinceIso = sinceDate.toISOString();
 
-    // SH-005 & SH-036: Paginate all analytics sources and strictly honor `?days=` on exams too!
-    const [progressRows, sessionRows, answerRows, examRows, setRows] =
+    // SH-005 & SH-036 + V3: Paginate all analytics sources including confidence calibration!
+    const [progressRows, sessionRows, answerRows, examRows, setRows, confidenceRows] =
       await Promise.all([
         fetchAllPages(async (from, to) =>
           supabase
@@ -118,6 +118,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             .select("id, title, subject, question_count")
             .eq("owner_id", user.id)
             .eq("is_archived", false)
+            .range(from, to),
+        ),
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("learning_confidence_events")
+            .select("confidence, is_correct, hint_used")
+            .eq("user_id", user.id)
+            .gte("created_at", sinceIso)
             .range(from, to),
         ),
       ]);
@@ -357,6 +365,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ? Math.round((totalCorrect / totalAttempts) * 10000) / 100
         : 0;
 
+    const confAgg = {
+      certain: { total: 0, correct: 0 },
+      unsure: { total: 0, correct: 0 },
+      guessing: { total: 0, correct: 0 },
+      high_conf_wrong: 0,
+      guess_correct: 0,
+    };
+    for (const ev of confidenceRows) {
+      const bucket = confAgg[ev.confidence as keyof Pick<typeof confAgg, "certain" | "unsure" | "guessing">];
+      if (!bucket) continue;
+      bucket.total += 1;
+      if (ev.is_correct) bucket.correct += 1;
+      if (ev.confidence === "certain" && !ev.is_correct) {
+        confAgg.high_conf_wrong += 1;
+      }
+      if (ev.confidence === "guessing" && ev.is_correct) {
+        confAgg.guess_correct += 1;
+      }
+    }
+
+    const pct = (c: number, t: number): number =>
+      t > 0 ? Math.round((c / t) * 10000) / 100 : 0;
+
     return apiSuccess({
       summary: {
         total_questions: totalOwnedQuestions,
@@ -369,6 +400,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ...streaks,
       },
       mastery_distribution: masteryDistribution,
+      confidence_calibration: {
+        certain: {
+          ...confAgg.certain,
+          accuracy_percent: pct(confAgg.certain.correct, confAgg.certain.total),
+        },
+        unsure: {
+          ...confAgg.unsure,
+          accuracy_percent: pct(confAgg.unsure.correct, confAgg.unsure.total),
+        },
+        guessing: {
+          ...confAgg.guessing,
+          accuracy_percent: pct(confAgg.guessing.correct, confAgg.guessing.total),
+        },
+        high_conf_wrong: confAgg.high_conf_wrong,
+        guess_correct: confAgg.guess_correct,
+        total_events: confidenceRows.length,
+      },
       daily_activity: Array.from(dailyMap.values()).map((d) => ({
         ...d,
         accuracy_percent:

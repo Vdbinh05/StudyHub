@@ -34,6 +34,7 @@ import {
 } from "@/lib/learning/api-client";
 import { getExpectedWriteAnswers } from "@/lib/learning/write-grader";
 import { lText } from "./learning-copy";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 
 export function StarredQuestionsClient() {
   const { locale, t } = useI18n();
@@ -362,9 +363,25 @@ export function StarredQuestionsClient() {
                     </Button>
                   </div>
 
-                  <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed sm:text-base">
-                    {q?.prompt ?? item.question_id}
-                  </p>
+                  <div className="space-y-2.5">
+                    <div className="text-sm font-medium leading-relaxed sm:text-base">
+                      <SafeRichText
+                        rich={q?.prompt_rich}
+                        fallbackText={q?.prompt ?? item.question_id}
+                      />
+                    </div>
+                    {q?.prompt_image_url ? (
+                      <ZoomableImage
+                        src={q.prompt_image_url}
+                        alt={lText(
+                          locale,
+                          "Hình ảnh câu hỏi",
+                          "Question illustration",
+                        )}
+                        lazy
+                      />
+                    ) : null}
+                  </div>
 
                   {correctDisplay ? (
                     <div className="rounded-lg border border-success/30 bg-success-subtle/50 p-3 text-xs sm:text-sm">

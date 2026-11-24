@@ -43,6 +43,7 @@ export async function GET(): Promise<NextResponse> {
       streakExams,
       streakSessions,
       { count: starredCount },
+      { data: activeCheckpoints },
     ] = await Promise.all([
       rpcGetMyProfile(supabase),
       supabase
@@ -109,6 +110,12 @@ export async function GET(): Promise<NextResponse> {
         .from("starred_questions")
         .select("question_id", { count: "exact", head: true })
         .eq("user_id", user.id),
+      supabase
+        .from("learning_session_checkpoints")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("updated_at", { ascending: false })
+        .limit(5),
     ]);
 
     if (examErr) throw examErr;
@@ -220,6 +227,7 @@ export async function GET(): Promise<NextResponse> {
       recent_sets: allSets.slice(0, 6),
       recent_exams: completedExams,
       in_progress_exams: inProgressExams,
+      active_checkpoints: activeCheckpoints ?? [],
       recent_sessions: (recentSessions ?? []).slice(0, 5),
       activity_14d: Array.from(dailyMap.values()),
     });

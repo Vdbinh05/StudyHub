@@ -1,6 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
-import type { MasteryLevel, SelfRating, UserQuestionProgress } from "@/types/domain";
+import type {
+  ConfidenceLevel,
+  MasteryLevel,
+  MistakeStatus,
+  SelfRating,
+  StudyMode,
+  UserQuestionProgress,
+} from "@/types/domain";
 
 const MIN_EASE_FACTOR = 1.3;
 const MAX_EASE_FACTOR = 4.0;
@@ -14,8 +21,13 @@ export interface Sm2UpdateInput {
   questionId: string;
   isCorrect: boolean;
   selfRating?: SelfRating | null;
+  confidence?: ConfidenceLevel | null;
+  hintUsed?: boolean;
+  mode?: StudyMode | "exam";
+  responseTimeMs?: number | null;
   overrides?: {
     mastery_level?: MasteryLevel;
+    mistake_status?: MistakeStatus;
     ease_factor?: number;
     interval_days?: number;
     repetitions?: number;
@@ -137,36 +149,150 @@ export function computeDeterministicSm2(
 export async function upsertQuestionProgress(
   params: Sm2UpdateInput,
 ): Promise<UserQuestionProgress> {
-  const { supabase, userId, studySetId, questionId, isCorrect, selfRating, overrides } =
-    params;
+  const {
+    supabase,
+    userId,
+    studySetId,
+    questionId,
+    isCorrect,
+    selfRating,
+    confidence,
+    hintUsed = false,
+    mode,
+    responseTimeMs = null,
+    overrides,
+  } = params;
 
-  const { data: existing, error: fetchErr } = await supabase
-    .from("user_question_progress")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("question_id", questionId)
-    .maybeSingle();
+  const [{ data: existing, error: fetchErr }, { data: prefRow }] =
+    await Promise.all([
+      supabase
+        .from("user_question_progress")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("question_id", questionId)
+        .maybeSingle(),
+      supabase
+        .from("user_preferences")
+        .select("progress_generation")
+        .eq("user_id", userId)
+        .maybeSingle(),
+    ]);
 
   if (fetchErr) throw fetchErr;
 
-  const computed = computeDeterministicSm2(existing, isCorrect, selfRating);
+  const now = new Date();
+  const computed = computeDeterministicSm2(existing, isCorrect, selfRating, now);
+  const passed = computed.consecutive_correct > 0;
+  const prevMastery = (existing?.mastery_level ?? "new") as MasteryLevel;
+  const prevReps = existing?.repetitions ?? 0;
+  const prevMistakeStatus = (existing?.mistake_status ?? "active") as MistakeStatus;
+
+  let finalEase = computed.ease_factor;
+  let finalInterval = computed.interval_days;
+  let finalReps = computed.repetitions;
+  let finalStreak = computed.consecutive_correct;
+  let finalMastery: MasteryLevel = computed.mastery_level;
+  let independentDelta = 0;
+
+  const capBelowMastered = (level: MasteryLevel): MasteryLevel =>
+    level === "mastered" ? "familiar" : level;
+
+  if (passed) {
+    if (confidence === "guessing") {
+      finalInterval = 1;
+      finalReps = Math.min(prevReps, 1);
+      finalStreak = Math.min(computed.consecutive_correct, 2);
+      finalMastery =
+        prevMastery === "mastered"
+          ? "familiar"
+          : capBelowMastered(
+              finalStreak >= 2 || finalInterval >= 6 ? "familiar" : "learning",
+            );
+    } else if (confidence === "unsure") {
+      finalInterval = Math.min(computed.interval_days, 4);
+      finalMastery = capBelowMastered(
+        finalStreak >= 2 || finalInterval >= 6 ? "familiar" : "learning",
+      );
+    } else if (hintUsed) {
+      finalInterval = Math.min(computed.interval_days, 6);
+      finalMastery = capBelowMastered(
+        finalStreak >= 2 || finalInterval >= 6 ? "familiar" : "learning",
+      );
+    } else {
+      independentDelta = 1;
+    }
+  } else if (confidence === "certain") {
+    // High-confidence misconception gets extra -0.05 ease adjustment (matching confidence.ts:268)
+    finalEase =
+      Math.round(Math.max(MIN_EASE_FACTOR, computed.ease_factor - 0.05) * 100) /
+      100;
+  }
+
+  const finalNextReviewAt = new Date(
+    now.getTime() + finalInterval * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const prevConsecWrong = existing?.consecutive_wrong ?? 0;
+  const nextConsecWrong = passed ? 0 : prevConsecWrong + 1;
+  const nextLastWrongAt = passed
+    ? (existing?.last_wrong_at ?? null)
+    : now.toISOString();
+
+  const nextLowConf =
+    (existing?.low_confidence_count ?? 0) +
+    (confidence === "unsure" || confidence === "guessing" ? 1 : 0);
+  const nextHighConfWrong =
+    (existing?.high_conf_wrong_count ?? 0) +
+    (!passed && confidence === "certain" ? 1 : 0);
+  const nextGuessCorrect =
+    (existing?.guess_correct_count ?? 0) +
+    (passed && confidence === "guessing" ? 1 : 0);
+  const nextIndepRecall =
+    (existing?.independent_recall_count ?? 0) + independentDelta;
+  const nextHintUsed = (existing?.hint_used_count ?? 0) + (hintUsed ? 1 : 0);
+
+  let derivedMistakeStatus: MistakeStatus;
+  if (!passed) {
+    derivedMistakeStatus = "active";
+  } else if (computed.wrong_count > 0) {
+    if (confidence === "guessing" || hintUsed) {
+      derivedMistakeStatus =
+        prevMistakeStatus === "resolved" ? "improving" : prevMistakeStatus;
+    } else if (finalStreak >= 2) {
+      derivedMistakeStatus = "resolved";
+    } else {
+      derivedMistakeStatus = "improving";
+    }
+  } else {
+    derivedMistakeStatus = "resolved";
+  }
 
   const payload = {
     user_id: userId,
     study_set_id: studySetId,
     question_id: questionId,
-    mastery_level: overrides?.mastery_level ?? computed.mastery_level,
+    mastery_level: overrides?.mastery_level ?? finalMastery,
     correct_count: computed.correct_count,
     wrong_count: computed.wrong_count,
-    consecutive_correct: computed.consecutive_correct,
-    ease_factor: overrides?.ease_factor ?? computed.ease_factor,
-    interval_days: overrides?.interval_days ?? computed.interval_days,
-    repetitions: overrides?.repetitions ?? computed.repetitions,
+    consecutive_correct: finalStreak,
+    consecutive_wrong: nextConsecWrong,
+    ease_factor: overrides?.ease_factor ?? finalEase,
+    interval_days: overrides?.interval_days ?? finalInterval,
+    repetitions: overrides?.repetitions ?? finalReps,
     last_reviewed_at: computed.last_reviewed_at,
+    last_wrong_at: nextLastWrongAt,
     next_review_at:
       overrides?.next_review_at !== undefined
         ? overrides.next_review_at
-        : computed.next_review_at,
+        : finalNextReviewAt,
+    last_confidence: confidence ?? existing?.last_confidence ?? null,
+    low_confidence_count: nextLowConf,
+    high_conf_wrong_count: nextHighConfWrong,
+    guess_correct_count: nextGuessCorrect,
+    independent_recall_count: nextIndepRecall,
+    hint_used_count: nextHintUsed,
+    mistake_status: overrides?.mistake_status ?? derivedMistakeStatus,
+    progress_generation: prefRow?.progress_generation ?? 1,
   };
 
   const { data, error } = await supabase
@@ -176,5 +302,19 @@ export async function upsertQuestionProgress(
     .single();
 
   if (error) throw error;
+
+  if (confidence && mode) {
+    await supabase.from("learning_confidence_events").insert({
+      user_id: userId,
+      study_set_id: studySetId,
+      question_id: questionId,
+      mode,
+      confidence,
+      is_correct: passed,
+      hint_used: hintUsed,
+      response_time_ms: responseTimeMs,
+    });
+  }
+
   return data as UserQuestionProgress;
 }

@@ -88,8 +88,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       questionId: qRow.id,
       isCorrect: input.is_correct,
       selfRating: input.self_rating ?? null,
+      confidence: input.confidence ?? null,
+      hintUsed: input.hint_used ?? false,
       overrides: {
         mastery_level: input.mastery_level,
+        mistake_status: input.mistake_status,
         ease_factor: input.ease_factor,
         interval_days: input.interval_days,
         repetitions: input.repetitions,

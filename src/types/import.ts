@@ -15,12 +15,14 @@ export type ImportFormat =
   | "eduquiz_txt"
   | "word_answer_key"
   | "docx_ooxml"
+  | "docx_multimedia"
   | "xlsx_wayground"
   | "xlsx_generic"
   | "quizlet_tsv"
   | "csv"
   | "json"
-  | "txt_generic";
+  | "txt_generic"
+  | "pdf_text";
 
 export type AnswerDetectionSource =
   | "asterisk_prefix"
@@ -62,12 +64,39 @@ export type ImportValidationIssueCode =
   | "DUPLICATE_OPTIONS"
   | "ANSWER_SIGNAL_CONFLICT"
   | "AMBIGUOUS_ANSWER_KEY_MAPPING"
+  | "AMBIGUOUS_MEDIA_MAPPING"
+  | "SCANNED_PDF_DETECTED"
+  | "MEDIA_PREVIEW_BUDGET_EXCEEDED"
   | "EMPTY_FLASHCARD_BACK"
   | "DUPLICATE_QUESTION_IN_BATCH"
   | "INVALID_CORRECT_ANSWER"
   | "EMBEDDED_IMAGE_SKIPPED"
   | "UNPARSED_BLOCK"
   | "INVALID_FORMAT";
+
+export interface ParsedMediaAttachment {
+  /** Deterministic temporary attachment ID for preview UI editing & reassignment */
+  id: string;
+  /** Source relationship / extraction key (e.g. DOCX rId or PDF object ID) */
+  rId: string;
+  fileName: string;
+  mimeType: string;
+  ext: string;
+  byteLength: number;
+  /** Logical temporary preview path (e.g. `/docx-media/diagram1.png`) */
+  previewPath: string;
+  /**
+   * Transient safe raster `data:image/...;base64,...` URL for Step 4/5 preview & upload on commit.
+   * NEVER persisted raw into `questions` or `question_options` DB columns!
+   */
+  dataUrl?: string;
+  /** Whether the image was strictly inline (`wp:inline`) or floating (`wp:anchor`) */
+  anchorType: "inline" | "floating";
+  /** True when layout placement is uncertain (e.g. floating anchor) and needs user review */
+  ambiguous?: boolean;
+  /** Optional accessibility alt text extracted from Word docPr / caption */
+  alt?: string;
+}
 
 export interface ImportValidationIssue {
   id: string;
@@ -94,6 +123,8 @@ export interface ParsedOption {
   content: string;
   isCorrect: boolean;
   imageUrl?: string | null;
+  /** V3 extracted multimedia attachments belonging to this option */
+  media?: ParsedMediaAttachment[];
   detectedBy: AnswerDetectionSource[];
   formatting?: OptionFormattingMeta;
 }
@@ -112,6 +143,10 @@ export interface ParsedQuestion {
   questionType: QuestionType;
   prompt: string;
   promptImageUrl?: string | null;
+  /** V3 extracted multimedia attachments (supports multiple images per question) */
+  promptMedia?: ParsedMediaAttachment[];
+  /** True when floating/uncertain media placement needs manual user confirmation */
+  ambiguousMedia?: boolean;
   backText?: string | null;
   backImageUrl?: string | null;
   explanation?: string | null;
@@ -166,6 +201,10 @@ export interface ImportPreviewResult {
   detectedColumns?: string[];
   sampleRows?: string[][];
   suggestedMapping?: ColumnMapping;
+  /** True when a PDF has no selectable text layer (scanned/image-only PDF) */
+  isScannedPdf?: boolean;
+  pdfPageCount?: number;
+  pdfExtractedPages?: number;
   questions: ParsedQuestion[];
   issues: ImportValidationIssue[];
   summary: ImportPreviewSummary;
@@ -182,6 +221,12 @@ export interface ImportOptions {
   csvDelimiter?: string;
   termDelimiter?: string;
   cardDelimiter?: string;
+  /** Optional PDF page range selector, e.g. "1-5, 8" */
+  pdfPageRange?: string;
+  /** Optional deterministic two-column PDF reading order toggle */
+  pdfTwoColumn?: boolean;
+  /** Preserve safe raster preview data URLs for V3 multimedia import review */
+  preserveMediaPreviews?: boolean;
   defaultQuestionType?: QuestionType;
   defaultChapter?: string;
   defaultTags?: string[];

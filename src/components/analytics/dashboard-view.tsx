@@ -3,7 +3,8 @@
 import * as React from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   ArrowRight,
@@ -21,6 +22,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   apiFetch,
   ApiError,
@@ -30,6 +32,7 @@ import {
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
+import { ResumeSessionBanner } from "@/components/learning/ResumeSessionBanner";
 import { FadeIn } from "@/components/motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,7 +46,13 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
-import type { ExamAttempt, StudySession, StudySet } from "@/types/domain";
+import type {
+  ExamAttempt,
+  LearningSessionCheckpoint,
+  StudySession,
+  StudySet,
+  V3StudyMode,
+} from "@/types/domain";
 import {
   normalizeActivityPoints,
   type DashboardSummary,
@@ -80,6 +89,9 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
     : [];
   const recentSessions = Array.isArray(obj.recentSessions ?? obj.recent_sessions)
     ? ((obj.recentSessions ?? obj.recent_sessions) as StudySession[])
+    : [];
+  const activeCheckpoints = Array.isArray(obj.active_checkpoints ?? obj.activeCheckpoints)
+    ? ((obj.active_checkpoints ?? obj.activeCheckpoints) as LearningSessionCheckpoint[])
     : [];
 
   const continueSet =
@@ -119,6 +131,7 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
     recentSets,
     recentExams,
     recentSessions,
+    activeCheckpoints,
     activitySeries: normalizeActivityPoints(
       obj.activity_14d ??
         obj.activitySeries ??
@@ -129,9 +142,50 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
   };
 }
 
+function getCheckpointModeLabel(mode: V3StudyMode, vi: boolean): string {
+  switch (mode) {
+    case "flashcards":
+      return "Flashcards";
+    case "learn":
+      return vi ? "Học sâu (Learn)" : "Adaptive Learn";
+    case "practice":
+      return vi ? "Luyện trắc nghiệm" : "Practice";
+    case "write":
+      return vi ? "Gõ đáp án (Write)" : "Write";
+    case "spell":
+      return vi ? "Nghe & Gõ (Spell)" : "Spell";
+    case "match":
+      return vi ? "Ghép thẻ (Match)" : "Match";
+    case "diagram":
+      return vi ? "Sơ đồ tương tác" : "Diagram";
+    case "custom_practice":
+      return vi ? "Luyện tập tùy chọn" : "Custom Practice";
+    case "review":
+      return vi ? "Ôn câu sai" : "Review Mistakes";
+  }
+}
+
+function resolveCheckpointHref(
+  checkpoint: LearningSessionCheckpoint,
+  fresh = false,
+): string {
+  const qs = fresh ? "?fresh=1" : "";
+  if (checkpoint.mode === "custom_practice") return `/practice${qs}`;
+  if (checkpoint.mode === "review") return `/review${qs}`;
+  if (checkpoint.study_set_id) {
+    if (checkpoint.mode === "diagram") {
+      return `/sets/${checkpoint.study_set_id}/diagrams`;
+    }
+    return `/sets/${checkpoint.study_set_id}/${checkpoint.mode}${qs}`;
+  }
+  return "/library";
+}
+
 export function DashboardView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const configured = isSupabaseConfiguredClient();
 
   const { data, isLoading, error, refetch } = useQuery<DashboardSummary>({
@@ -140,6 +194,21 @@ export function DashboardView() {
     queryFn: async () => {
       const res = await apiFetch<unknown>("/api/dashboard");
       return parseDashboardResponse(res.data);
+    },
+  });
+
+  const discardCheckpointMutation = useMutation({
+    mutationFn: async (checkpointId: string) => {
+      await apiFetch(`/api/checkpoints?id=${encodeURIComponent(checkpointId)}`, {
+        method: "DELETE",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success(vi ? "Đã bỏ phiên học dở." : "In-progress session discarded.");
+    },
+    onError: (err) => {
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -320,6 +389,49 @@ export function DashboardView() {
           />
         </div>
       </div>
+
+      {/* V3.0 Continue Learning Active Session Checkpoints */}
+      {summary.activeCheckpoints.length > 0 && (
+        <section aria-labelledby="continue-checkpoints-heading" className="space-y-3">
+          <h2
+            id="continue-checkpoints-heading"
+            className="text-foreground text-sm font-semibold"
+          >
+            {t("resume.continueLearning")}
+          </h2>
+          <div className="space-y-2.5">
+            {summary.activeCheckpoints.slice(0, 2).map((cp) => {
+              const matchedSet =
+                summary.recentSets.find((s) => s.id === cp.study_set_id) ??
+                (summary.continueSet?.id === cp.study_set_id
+                  ? summary.continueSet
+                  : null);
+              const modeTitle = getCheckpointModeLabel(cp.mode, vi);
+              const label = matchedSet
+                ? `${matchedSet.title} · ${modeTitle}`
+                : modeTitle;
+              return (
+                <ResumeSessionBanner
+                  key={cp.id}
+                  modeLabel={label}
+                  currentIndex={cp.current_index}
+                  totalItems={cp.total_items}
+                  progressPercent={cp.progress_percent}
+                  updatedAt={cp.updated_at}
+                  source="remote"
+                  isBusy={discardCheckpointMutation.isPending}
+                  onContinue={() => router.push(resolveCheckpointHref(cp, false))}
+                  onRestart={async () => {
+                    await discardCheckpointMutation.mutateAsync(cp.id).catch(() => {});
+                    router.push(resolveCheckpointHref(cp, true));
+                  }}
+                  onDiscard={() => discardCheckpointMutation.mutate(cp.id)}
+                />
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* KPI Strip */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

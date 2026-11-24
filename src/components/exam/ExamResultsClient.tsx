@@ -8,22 +8,35 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   CheckCircle2,
   Clock,
+  FileDown,
   Flag,
+  Gauge,
   HelpCircle,
   Layers,
   Loader2,
   Play,
   RotateCcw,
   Search,
+  ShieldAlert,
   Shuffle,
   Target,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { AudioPlayer } from "@/components/audio/AudioPlayer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
   Select,
@@ -32,6 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -43,6 +57,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FocusModeShell } from "@/components/learning/FocusModeShell";
 import { lText } from "@/components/learning/learning-copy";
+import { QuestionNotesAndReportBar } from "@/components/learning/QuestionNotesAndReportBar";
+import { SafeRichText, ZoomableImage } from "@/components/learning/SafeRichText";
 import {
   StudyErrorState,
   StudyLoadingSkeleton,
@@ -55,13 +71,16 @@ import {
   issueCoverageNextExam,
   type ExamAttemptPayload,
 } from "@/lib/learning/api-client";
+import { summarizeConfidenceCalibration } from "@/lib/learning/confidence";
 import { scoreExamAttempt } from "@/lib/learning/exam-scoring";
 import { indexToOptionLabel } from "@/lib/learning/shuffle";
 import type {
   ExamChapterBreakdown,
+  ExamSnapshotQuestion,
   ExamSourceInput,
   ExamSubjectBreakdown,
   ExamTagBreakdown,
+  StructuredAnswerResponse,
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 
@@ -70,6 +89,88 @@ type ReviewFilter = "all" | "incorrect" | "unanswered" | "flagged" | "correct";
 interface ExamResultsClientProps {
   setId?: string | null;
   attemptId: string;
+}
+
+function formatStructuredExamAnswer(
+  q: ExamSnapshotQuestion,
+  sr: StructuredAnswerResponse | null | undefined,
+  fallbackTyped: string | null | undefined,
+): { yours: string; expected: string } {
+  const payload = q.type_payload_snapshot;
+  if (payload?.type === "numerical") {
+    const yours =
+      sr?.kind === "numerical"
+        ? `${sr.value}${sr.unit ? ` ${sr.unit}` : ""}`.trim()
+        : fallbackTyped || "—";
+    const expected = `${payload.correct_value}${payload.unit ? ` ${payload.unit}` : ""}`;
+    return { yours: yours || "—", expected };
+  }
+  if (payload?.type === "fill_in_blank") {
+    const blanks = Array.isArray(payload.blanks) ? payload.blanks : [];
+    const yours =
+      sr?.kind === "blanks"
+        ? blanks
+            .map((b, i) => `(${i + 1}) ${sr.answers[b.blank_id] || "—"}`)
+            .join(" · ")
+        : fallbackTyped || "—";
+    const expected = blanks
+      .map((b, i) => `(${i + 1}) ${(b.accepted_answers ?? []).join(" / ")}`)
+      .join(" · ");
+    return { yours: yours || "—", expected: expected || "—" };
+  }
+  if (payload?.type === "ordering") {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const itemMap = new Map(items.map((it) => [it.id, it.text]));
+    const yours =
+      sr?.kind === "ordering" && sr.ordered_item_ids.length > 0
+        ? sr.ordered_item_ids
+            .map((id, i) => `${i + 1}. ${itemMap.get(id) ?? id}`)
+            .join(" → ")
+        : "—";
+    const expected = [...items]
+      .sort((a, b) => (a.correct_position ?? 0) - (b.correct_position ?? 0))
+      .map((it, i) => `${i + 1}. ${it.text}`)
+      .join(" → ");
+    return { yours, expected: expected || "—" };
+  }
+  if (payload?.type === "matching") {
+    const pairs = Array.isArray(payload.pairs) ? payload.pairs : [];
+    const distractors = Array.isArray(payload.distractors)
+      ? payload.distractors
+      : [];
+    const rightMap = new Map<string, string>();
+    for (const p of pairs) rightMap.set(p.right_id, p.right_text);
+    for (const d of distractors) rightMap.set(d.right_id, d.right_text);
+    const yours =
+      sr?.kind === "matching" && pairs.length > 0
+        ? pairs
+            .map((p) => `${p.left_text} → ${rightMap.get(sr.pairs[p.id] ?? "") ?? "—"}`)
+            .join(" · ")
+        : "—";
+    const expected = pairs
+      .map((p) => `${p.left_text} → ${p.right_text}`)
+      .join(" · ");
+    return { yours: yours || "—", expected: expected || "—" };
+  }
+  if (payload?.type === "image_hotspot") {
+    const targets = Array.isArray(payload.target_hotspots)
+      ? payload.target_hotspots
+      : [];
+    const yours =
+      sr?.kind === "hotspot" && sr.clicks.length > 0
+        ? sr.clicks
+            .map((c) => `(${Math.round(c.x * 100)}%, ${Math.round(c.y * 100)}%)`)
+            .join(", ")
+        : "—";
+    const expected = targets.map((h) => h.label).join(", ");
+    return { yours, expected: expected || "—" };
+  }
+  return {
+    yours: fallbackTyped || "—",
+    expected:
+      (q.accepted_answers_snapshot ?? []).map((a) => a.answer_text).join(" / ") ||
+      "—",
+  };
 }
 
 export function ExamResultsClient({
@@ -87,6 +188,15 @@ export function ExamResultsClient({
   >("subject");
   const [isRetaking, setIsRetaking] = React.useState(false);
   const [isContinuingCoverage, setIsContinuingCoverage] = React.useState(false);
+  const [pdfDialogOpen, setPdfDialogOpen] = React.useState(false);
+  const [pdfMode, setPdfMode] = React.useState<
+    | "paper_and_key"
+    | "paper_with_explanations"
+    | "question_paper"
+    | "incorrect_review"
+  >("paper_with_explanations");
+  const [pdfIncludeImages, setPdfIncludeImages] = React.useState(true);
+  const [isExportingPdf, setIsExportingPdf] = React.useState(false);
 
   const reviewScrollRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -120,6 +230,82 @@ export function ExamResultsClient({
     }
     return map;
   }, [answers]);
+
+  // Post-exam metacognitive confidence calibration (strictly informational — NEVER changes score!)
+  const confidenceSummary = React.useMemo(() => {
+    const entries = questions.map((q) => {
+      const ans = answerMap.get(q.id);
+      return {
+        confidence: ans?.confidence ?? null,
+        isCorrect: Boolean(ans?.is_correct),
+      };
+    });
+    return summarizeConfidenceCalibration(entries);
+  }, [answerMap, questions]);
+
+  const handleExportPdf = React.useCallback(async () => {
+    if (!attempt || isExportingPdf) return;
+    setIsExportingPdf(true);
+    try {
+      const res = await fetch("/api/export/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attemptId: attempt.id,
+          mode: pdfMode,
+          locale,
+          includeImages: pdfIncludeImages,
+          grayscale: true,
+          title: attempt.study_set_title_snapshot,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(
+          errBody?.error?.message ||
+            lText(
+              locale,
+              "Không thể xuất tệp PDF lúc này.",
+              "Could not export PDF right now.",
+            ),
+        );
+      }
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+      const asciiMatch = /filename="([^"]+)"/i.exec(disposition);
+      let downloadName = `studyhub-exam-${attempt.id.slice(0, 8)}-${pdfMode}.pdf`;
+      if (utf8Match?.[1]) {
+        try {
+          downloadName = decodeURIComponent(utf8Match[1]);
+        } catch {
+          downloadName = asciiMatch?.[1] || downloadName;
+        }
+      } else if (asciiMatch?.[1]) {
+        downloadName = asciiMatch[1];
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = downloadName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setPdfDialogOpen(false);
+      toast.success(
+        lText(locale, "Đã tải xuống tệp PDF đề thi!", "Exam PDF downloaded!"),
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : lText(locale, "Lỗi khi xuất PDF.", "PDF export failed."),
+      );
+    } finally {
+      setIsExportingPdf(false);
+    }
+  }, [attempt, isExportingPdf, locale, pdfIncludeImages, pdfMode]);
 
   // Deterministic fallback summary (respecting server `answer.is_correct` whenever present!)
   const computedSummary = React.useMemo(() => {
@@ -577,6 +763,16 @@ export function ExamResultsClient({
                     {lText(locale, "Tạo đề ngẫu nhiên mới", "Generate New Random Exam")}
                   </Link>
                 </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-10"
+                  onClick={() => setPdfDialogOpen(true)}
+                >
+                  <FileDown className="size-4" aria-hidden="true" />
+                  {lText(locale, "Xuất PDF", "Export PDF")}
+                </Button>
               </div>
             </div>
 
@@ -620,6 +816,69 @@ export function ExamResultsClient({
             </div>
           </CardContent>
         </Card>
+
+        {/* Post-Exam Metacognitive Confidence Calibration (Strictly Informational — NEVER Changes Score) */}
+        {confidenceSummary.totalTagged > 0 ? (
+          <Card>
+            <CardHeader className="pb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Gauge className="size-4 text-primary" aria-hidden="true" />
+                  {lText(
+                    locale,
+                    "Phân tích mức độ tự tin (Metacognition)",
+                    "Confidence Calibration Summary",
+                  )}
+                </CardTitle>
+                <span className="text-xs text-muted-foreground">
+                  {lText(
+                    locale,
+                    "Chỉ dùng để tối ưu ôn tập — không ảnh hưởng điểm bài thi",
+                    "Study analytics only — never alters exam score",
+                  )}
+                </span>
+              </div>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {lText(locale, "Chắc chắn (Đúng)", "Certain Accuracy")}
+                </p>
+                <p className="mt-1 text-lg font-bold tabular-nums">
+                  {confidenceSummary.certain.correct}/{confidenceSummary.certain.total}{" "}
+                  <span className="text-xs font-normal text-muted-foreground">
+                    ({confidenceSummary.certain.accuracyPercent.toFixed(0)}%)
+                  </span>
+                </p>
+              </div>
+              <div className="rounded-lg border border-warning/50 bg-warning-subtle/50 p-3">
+                <p className="flex items-center gap-1 text-xs font-medium text-warning-subtle-foreground">
+                  <ShieldAlert className="size-3.5" aria-hidden="true" />
+                  {lText(locale, "Sai tự tin cao", "Misconceptions")}
+                </p>
+                <p className="mt-1 text-lg font-bold tabular-nums">
+                  {confidenceSummary.misconceptionCount}
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {lText(locale, "Phân vân (Đúng)", "Unsure Accuracy")}
+                </p>
+                <p className="mt-1 text-lg font-bold tabular-nums">
+                  {confidenceSummary.unsure.correct}/{confidenceSummary.unsure.total}
+                </p>
+              </div>
+              <div className="rounded-lg border border-primary/30 bg-accent/40 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {lText(locale, "Đoán mò mà đúng", "Guessing Hits")}
+                </p>
+                <p className="mt-1 text-lg font-bold tabular-nums">
+                  {confidenceSummary.guessingHitCount}/{confidenceSummary.guessing.total}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         {/* Per-Subject, Per-Chapter & Per-Tag Accuracy Breakdowns */}
         <Card>
@@ -1065,45 +1324,114 @@ export function ExamResultsClient({
                               ) : null}
                             </div>
 
-                            <p className="whitespace-pre-wrap text-base font-medium leading-relaxed">
-                              {q.prompt_snapshot}
-                            </p>
+                            <div className="space-y-2.5">
+                              {q.passage_snapshot?.content_text ||
+                              q.passage_snapshot?.content_rich ? (
+                                <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs">
+                                  <SafeRichText
+                                    rich={q.passage_snapshot.content_rich}
+                                    fallbackText={q.passage_snapshot.content_text}
+                                  />
+                                </div>
+                              ) : null}
 
-                            {isSafeDisplayImageUrl(q.prompt_image_url_snapshot) ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={q.prompt_image_url_snapshot}
-                                alt={lText(
-                                  locale,
-                                  "Hình ảnh câu hỏi",
-                                  "Question illustration",
-                                )}
-                                className="max-h-56 rounded-lg border border-border object-contain"
+                              {isSafeDisplayImageUrl(
+                                q.audio_url_snapshot ??
+                                  (q.type_payload_snapshot?.type === "listening"
+                                    ? q.type_payload_snapshot.audio_url
+                                    : null),
+                              ) ? (
+                                <AudioPlayer
+                                  src={
+                                    (q.audio_url_snapshot ??
+                                      (q.type_payload_snapshot?.type === "listening"
+                                        ? q.type_payload_snapshot.audio_url
+                                        : "")) ||
+                                    ""
+                                  }
+                                  transcript={
+                                    q.type_payload_snapshot?.type === "listening" &&
+                                    q.type_payload_snapshot
+                                      .show_transcript_after_submit !== false
+                                      ? q.type_payload_snapshot.transcript
+                                      : null
+                                  }
+                                  lazy
+                                  preload="none"
+                                  compact
+                                />
+                              ) : null}
+
+                              <SafeRichText
+                                rich={q.prompt_rich_snapshot}
+                                fallbackText={q.prompt_snapshot}
+                                className="text-base font-medium leading-relaxed"
                               />
-                            ) : null}
+
+                              <div className="flex flex-wrap gap-2">
+                                <ZoomableImage
+                                  src={q.prompt_image_url_snapshot}
+                                  alt={lText(
+                                    locale,
+                                    "Hình ảnh câu hỏi",
+                                    "Question illustration",
+                                  )}
+                                  className="max-h-56"
+                                  lazy
+                                />
+                                {(q.media_snapshot ?? [])
+                                  .filter(
+                                    (m) =>
+                                      m.mime_type.startsWith("image/") &&
+                                      isSafeDisplayImageUrl(m.proxy_url),
+                                  )
+                                  .map((m) => (
+                                    <ZoomableImage
+                                      key={m.media_id}
+                                      src={m.proxy_url}
+                                      alt={m.alt_text ?? ""}
+                                      caption={m.caption}
+                                      className="max-h-44"
+                                      lazy
+                                    />
+                                  ))}
+                              </div>
+                            </div>
 
                             {q.question_type === "short_answer" ||
+                            q.question_type === "numerical" ||
+                            q.question_type === "fill_in_blank" ||
+                            q.question_type === "ordering" ||
+                            q.question_type === "matching" ||
+                            q.question_type === "image_hotspot" ||
                             q.options_snapshot.length === 0 ? (
-                              <div className="grid gap-2 text-sm sm:grid-cols-2">
-                                <div className="rounded-lg border border-border bg-secondary/40 p-3">
-                                  <p className="text-xs font-semibold text-muted-foreground">
-                                    {t("study.yourAnswer")}
-                                  </p>
-                                  <p className="mt-1 whitespace-pre-wrap">
-                                    {ans?.typed_answer || "—"}
-                                  </p>
-                                </div>
-                                <div className="rounded-lg border border-success/40 bg-success-subtle/60 p-3">
-                                  <p className="text-xs font-semibold text-success-subtle-foreground">
-                                    {t("study.correctAnswer")}
-                                  </p>
-                                  <p className="mt-1 whitespace-pre-wrap text-foreground">
-                                    {(q.accepted_answers_snapshot ?? [])
-                                      .map((a) => a.answer_text)
-                                      .join(" / ") || "—"}
-                                  </p>
-                                </div>
-                              </div>
+                              (() => {
+                                const formatted = formatStructuredExamAnswer(
+                                  q,
+                                  ans?.structured_response,
+                                  ans?.typed_answer,
+                                );
+                                return (
+                                  <div className="grid gap-2 text-sm sm:grid-cols-2">
+                                    <div className="rounded-lg border border-border bg-secondary/40 p-3">
+                                      <p className="text-xs font-semibold text-muted-foreground">
+                                        {t("study.yourAnswer")}
+                                      </p>
+                                      <p className="mt-1 whitespace-pre-wrap">
+                                        {formatted.yours}
+                                      </p>
+                                    </div>
+                                    <div className="rounded-lg border border-success/40 bg-success-subtle/60 p-3">
+                                      <p className="text-xs font-semibold text-success-subtle-foreground">
+                                        {t("study.correctAnswer")}
+                                      </p>
+                                      <p className="mt-1 whitespace-pre-wrap text-foreground">
+                                        {formatted.expected}
+                                      </p>
+                                    </div>
+                                  </div>
+                                );
+                              })()
                             ) : (
                               <div className="space-y-2">
                                 {q.options_snapshot.map((opt, idx) => {
@@ -1122,35 +1450,48 @@ export function ExamResultsClient({
                                     <div
                                       key={opt.id}
                                       className={cn(
-                                        "flex items-start gap-3 rounded-lg border px-3.5 py-2.5 text-sm",
+                                        "flex flex-col gap-2 rounded-lg border px-3.5 py-2.5 text-sm",
                                         rowStyle,
                                       )}
                                     >
-                                      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded border border-current/25 text-xs font-semibold">
-                                        {indexToOptionLabel(idx)}
-                                      </span>
-                                      <span className="flex-1 whitespace-pre-wrap leading-relaxed">
-                                        {opt.content}
-                                      </span>
-                                      {isOptCorrect ? (
-                                        <Badge variant="success" className="shrink-0">
-                                          <CheckCircle2
-                                            className="size-3"
-                                            aria-hidden="true"
+                                      <div className="flex items-start gap-3">
+                                        <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded border border-current/25 text-xs font-semibold">
+                                          {indexToOptionLabel(idx)}
+                                        </span>
+                                        <div className="flex-1 leading-relaxed">
+                                          <SafeRichText
+                                            rich={opt.content_rich}
+                                            fallbackText={opt.content}
                                           />
-                                          {t("study.correctAnswer")}
-                                        </Badge>
-                                      ) : isOptSelected ? (
-                                        <Badge
-                                          variant="destructive"
-                                          className="shrink-0"
-                                        >
-                                          <XCircle
-                                            className="size-3"
-                                            aria-hidden="true"
-                                          />
-                                          {t("study.yourAnswer")}
-                                        </Badge>
+                                        </div>
+                                        {isOptCorrect ? (
+                                          <Badge variant="success" className="shrink-0">
+                                            <CheckCircle2
+                                              className="size-3"
+                                              aria-hidden="true"
+                                            />
+                                            {t("study.correctAnswer")}
+                                          </Badge>
+                                        ) : isOptSelected ? (
+                                          <Badge
+                                            variant="destructive"
+                                            className="shrink-0"
+                                          >
+                                            <XCircle
+                                              className="size-3"
+                                              aria-hidden="true"
+                                            />
+                                            {t("study.yourAnswer")}
+                                          </Badge>
+                                        ) : null}
+                                      </div>
+                                      {isSafeDisplayImageUrl(opt.image_url) ? (
+                                        <ZoomableImage
+                                          src={opt.image_url}
+                                          alt={opt.image_alt ?? opt.content ?? ""}
+                                          className="max-h-36"
+                                          lazy
+                                        />
                                       ) : null}
                                     </div>
                                   );
@@ -1158,12 +1499,29 @@ export function ExamResultsClient({
                               </div>
                             )}
 
-                            {q.explanation_snapshot ? (
-                              <div className="rounded-lg bg-secondary/60 p-3.5 text-sm text-muted-foreground whitespace-pre-wrap">
+                            {q.explanation_snapshot || q.explanation_rich_snapshot ? (
+                              <div className="rounded-lg bg-secondary/60 p-3.5 text-sm text-muted-foreground">
                                 <strong className="text-foreground">
                                   {t("study.explanation")}:{" "}
                                 </strong>
-                                {q.explanation_snapshot}
+                                <SafeRichText
+                                  rich={q.explanation_rich_snapshot}
+                                  fallbackText={q.explanation_snapshot}
+                                />
+                              </div>
+                            ) : null}
+
+                            {q.question_id &&
+                            (q.source_study_set_id ?? attempt.study_set_id) ? (
+                              <div className="border-t border-border/60 pt-2">
+                                <QuestionNotesAndReportBar
+                                  studySetId={
+                                    (q.source_study_set_id ??
+                                      attempt.study_set_id)!
+                                  }
+                                  questionId={q.question_id}
+                                  compact
+                                />
                               </div>
                             ) : null}
                           </CardContent>
@@ -1177,6 +1535,117 @@ export function ExamResultsClient({
           </div>
         )}
       </div>
+
+      {/* Export Exam Snapshot to Vietnamese UTF-8 PDF Dialog */}
+      <Dialog open={pdfDialogOpen} onOpenChange={setPdfDialogOpen}>
+        <DialogContent className="max-w-md overscroll-contain">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileDown className="size-4 text-primary" aria-hidden="true" />
+              {lText(locale, "Xuất đề thi ra PDF", "Export Exam to PDF")}
+            </DialogTitle>
+            <DialogDescription>
+              {lText(
+                locale,
+                "Tạo tệp PDF chuẩn Unicode tiếng Việt trực tiếp từ bản chụp đề thi này.",
+                "Generate a crisp printable UTF-8 PDF directly from this immutable exam snapshot.",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-1">
+            <div className="space-y-1.5">
+              <Label htmlFor="exam-pdf-mode">
+                {lText(locale, "Chế độ xuất PDF", "PDF Layout Mode")}
+              </Label>
+              <Select
+                value={pdfMode}
+                onValueChange={(v) =>
+                  setPdfMode(
+                    v as
+                      | "paper_and_key"
+                      | "paper_with_explanations"
+                      | "question_paper"
+                      | "incorrect_review",
+                  )
+                }
+              >
+                <SelectTrigger id="exam-pdf-mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="paper_with_explanations">
+                    {lText(
+                      locale,
+                      "Đề thi kèm đáp án & giải thích chi tiết",
+                      "Exam Paper + Answers & Explanations",
+                    )}
+                  </SelectItem>
+                  <SelectItem value="paper_and_key">
+                    {lText(
+                      locale,
+                      "Đề thi kèm bảng đáp án cuối trang",
+                      "Exam Paper + Answer Key",
+                    )}
+                  </SelectItem>
+                  <SelectItem value="question_paper">
+                    {lText(
+                      locale,
+                      "Chỉ đề thi (không đáp án để tự in làm)",
+                      "Clean Exam Paper Only",
+                    )}
+                  </SelectItem>
+                  <SelectItem value="incorrect_review">
+                    {lText(
+                      locale,
+                      "Tổng hợp các câu làm sai để ôn tập",
+                      "Incorrect Questions Review",
+                    )}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5 text-sm">
+              <Label htmlFor="exam-pdf-images" className="cursor-pointer">
+                {lText(
+                  locale,
+                  "Nhúng hình ảnh đính kèm vào PDF",
+                  "Embed attached images in PDF",
+                )}
+              </Label>
+              <Switch
+                id="exam-pdf-images"
+                checked={pdfIncludeImages}
+                onCheckedChange={setPdfIncludeImages}
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isExportingPdf}
+              onClick={() => setPdfDialogOpen(false)}
+            >
+              {lText(locale, "Hủy", "Cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={isExportingPdf}
+              onClick={() => void handleExportPdf()}
+            >
+              {isExportingPdf ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <FileDown className="size-4" aria-hidden="true" />
+              )}
+              {lText(locale, "Tải xuống PDF", "Download PDF")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </FocusModeShell>
   );
 }

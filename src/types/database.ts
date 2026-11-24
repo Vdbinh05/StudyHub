@@ -27,10 +27,22 @@ import type {
   ThemePreference,
   Visibility,
 } from "./domain";
-import type { ImportFormat } from "./import";
+import type {
+  ConfidenceLevel,
+  HotspotShape,
+  MediaAttachmentRole,
+  MediaEntityType,
+  MediaKind,
+  MistakeStatus,
+  OfflineSyncEventType,
+  QuestionReportCategory,
+  QuestionReportStatus,
+  SyncEventStatus,
+  V3ImportFormat,
+} from "./v3";
 
 /**
- * Typed Supabase PostgreSQL schema matching all 26 canonical tables in migrations `0001`–`0005`.
+ * Typed Supabase PostgreSQL schema matching all 36 canonical tables in migrations `0001`–`0015`.
  * Compatible with `@supabase/supabase-js` v2 generic client typing.
  */
 
@@ -87,6 +99,9 @@ export interface Database {
           show_instant_feedback: boolean;
           sound_effects: boolean;
           reduced_motion: boolean;
+          confidence_enabled: boolean;
+          mode_preferences: Json;
+          progress_generation: number;
           updated_at: string;
         };
         Insert: {
@@ -99,6 +114,9 @@ export interface Database {
           show_instant_feedback?: boolean;
           sound_effects?: boolean;
           reduced_motion?: boolean;
+          confidence_enabled?: boolean;
+          mode_preferences?: Json;
+          progress_generation?: number;
           updated_at?: string;
         };
         Update: {
@@ -110,6 +128,9 @@ export interface Database {
           show_instant_feedback?: boolean;
           sound_effects?: boolean;
           reduced_motion?: boolean;
+          confidence_enabled?: boolean;
+          mode_preferences?: Json;
+          progress_generation?: number;
           updated_at?: string;
         };
         Relationships: [
@@ -189,6 +210,7 @@ export interface Database {
           default_pass_threshold: number;
           is_archived: boolean;
           is_favorite: boolean;
+          content_version: number;
           last_studied_at: string | null;
           created_at: string;
           updated_at: string;
@@ -208,6 +230,7 @@ export interface Database {
           default_pass_threshold?: number;
           is_archived?: boolean;
           is_favorite?: boolean;
+          content_version?: number;
           last_studied_at?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -225,6 +248,7 @@ export interface Database {
           default_pass_threshold?: number;
           is_archived?: boolean;
           is_favorite?: boolean;
+          content_version?: number;
           last_studied_at?: string | null;
           updated_at?: string;
         };
@@ -342,11 +366,21 @@ export interface Database {
           position: number;
           chapter: string | null;
           prompt: string;
+          prompt_rich: Json | null;
           prompt_image_url: string | null;
           back_text: string | null;
+          back_rich: Json | null;
           back_image_url: string | null;
           explanation: string | null;
+          explanation_rich: Json | null;
           hint: string | null;
+          hint_rich: Json | null;
+          audio_media_id: string | null;
+          audio_url: string | null;
+          audio_transcript: string | null;
+          passage_id: string | null;
+          diagram_id: string | null;
+          type_payload: Json | null;
           difficulty: DifficultyLevel;
           source_metadata: Json;
           created_at: string;
@@ -358,12 +392,22 @@ export interface Database {
           question_type?: QuestionType;
           position?: number;
           chapter?: string | null;
-          prompt: string;
+          prompt?: string;
+          prompt_rich?: Json | null;
           prompt_image_url?: string | null;
           back_text?: string | null;
+          back_rich?: Json | null;
           back_image_url?: string | null;
           explanation?: string | null;
+          explanation_rich?: Json | null;
           hint?: string | null;
+          hint_rich?: Json | null;
+          audio_media_id?: string | null;
+          audio_url?: string | null;
+          audio_transcript?: string | null;
+          passage_id?: string | null;
+          diagram_id?: string | null;
+          type_payload?: Json | null;
           difficulty?: DifficultyLevel;
           source_metadata?: Json;
           created_at?: string;
@@ -374,11 +418,21 @@ export interface Database {
           position?: number;
           chapter?: string | null;
           prompt?: string;
+          prompt_rich?: Json | null;
           prompt_image_url?: string | null;
           back_text?: string | null;
+          back_rich?: Json | null;
           back_image_url?: string | null;
           explanation?: string | null;
+          explanation_rich?: Json | null;
           hint?: string | null;
+          hint_rich?: Json | null;
+          audio_media_id?: string | null;
+          audio_url?: string | null;
+          audio_transcript?: string | null;
+          passage_id?: string | null;
+          diagram_id?: string | null;
+          type_payload?: Json | null;
           difficulty?: DifficultyLevel;
           source_metadata?: Json;
           updated_at?: string;
@@ -401,7 +455,10 @@ export interface Database {
           position: number;
           label: string;
           content: string;
+          content_rich: Json | null;
           image_url: string | null;
+          media_id: string | null;
+          image_alt: string | null;
           is_correct: boolean;
           created_at: string;
         };
@@ -411,8 +468,11 @@ export interface Database {
           study_set_id: string;
           position?: number;
           label: string;
-          content: string;
+          content?: string;
+          content_rich?: Json | null;
           image_url?: string | null;
+          media_id?: string | null;
+          image_alt?: string | null;
           is_correct?: boolean;
           created_at?: string;
         };
@@ -420,7 +480,10 @@ export interface Database {
           position?: number;
           label?: string;
           content?: string;
+          content_rich?: Json | null;
           image_url?: string | null;
+          media_id?: string | null;
+          image_alt?: string | null;
           is_correct?: boolean;
         };
         Relationships: [
@@ -565,11 +628,21 @@ export interface Database {
           correct_count: number;
           wrong_count: number;
           consecutive_correct: number;
+          consecutive_wrong: number;
           ease_factor: number;
           interval_days: number;
           repetitions: number;
           last_reviewed_at: string | null;
+          last_wrong_at: string | null;
           next_review_at: string | null;
+          last_confidence: ConfidenceLevel | null;
+          low_confidence_count: number;
+          high_conf_wrong_count: number;
+          guess_correct_count: number;
+          independent_recall_count: number;
+          hint_used_count: number;
+          mistake_status: MistakeStatus;
+          progress_generation: number;
           updated_at: string;
         };
         Insert: {
@@ -581,11 +654,21 @@ export interface Database {
           correct_count?: number;
           wrong_count?: number;
           consecutive_correct?: number;
+          consecutive_wrong?: number;
           ease_factor?: number;
           interval_days?: number;
           repetitions?: number;
           last_reviewed_at?: string | null;
+          last_wrong_at?: string | null;
           next_review_at?: string | null;
+          last_confidence?: ConfidenceLevel | null;
+          low_confidence_count?: number;
+          high_conf_wrong_count?: number;
+          guess_correct_count?: number;
+          independent_recall_count?: number;
+          hint_used_count?: number;
+          mistake_status?: MistakeStatus;
+          progress_generation?: number;
           updated_at?: string;
         };
         Update: {
@@ -593,11 +676,21 @@ export interface Database {
           correct_count?: number;
           wrong_count?: number;
           consecutive_correct?: number;
+          consecutive_wrong?: number;
           ease_factor?: number;
           interval_days?: number;
           repetitions?: number;
           last_reviewed_at?: string | null;
+          last_wrong_at?: string | null;
           next_review_at?: string | null;
+          last_confidence?: ConfidenceLevel | null;
+          low_confidence_count?: number;
+          high_conf_wrong_count?: number;
+          guess_correct_count?: number;
+          independent_recall_count?: number;
+          hint_used_count?: number;
+          mistake_status?: MistakeStatus;
+          progress_generation?: number;
           updated_at?: string;
         };
         Relationships: [
@@ -732,6 +825,9 @@ export interface Database {
           question_id: string;
           selected_option_ids: string[];
           typed_answer: string | null;
+          structured_response: Json | null;
+          confidence: ConfidenceLevel | null;
+          hint_used: boolean;
           is_correct: boolean;
           self_rating: SelfRating | null;
           response_time_ms: number | null;
@@ -745,6 +841,9 @@ export interface Database {
           question_id: string;
           selected_option_ids?: string[];
           typed_answer?: string | null;
+          structured_response?: Json | null;
+          confidence?: ConfidenceLevel | null;
+          hint_used?: boolean;
           is_correct: boolean;
           self_rating?: SelfRating | null;
           response_time_ms?: number | null;
@@ -753,6 +852,9 @@ export interface Database {
         Update: {
           selected_option_ids?: string[];
           typed_answer?: string | null;
+          structured_response?: Json | null;
+          confidence?: ConfidenceLevel | null;
+          hint_used?: boolean;
           is_correct?: boolean;
           self_rating?: SelfRating | null;
           response_time_ms?: number | null;
@@ -1316,8 +1418,16 @@ export interface Database {
           chapter_snapshot: string | null;
           tags_snapshot: ExamTagSnapshot[];
           prompt_snapshot: string;
+          prompt_rich_snapshot: Json | null;
           prompt_image_url_snapshot: string | null;
+          audio_media_id_snapshot: string | null;
+          audio_url_snapshot: string | null;
+          passage_snapshot: Json | null;
+          diagram_snapshot: Json | null;
+          type_payload_snapshot: Json | null;
+          media_snapshot: Json;
           explanation_snapshot: string | null;
+          explanation_rich_snapshot: Json | null;
           options_snapshot: ExamSnapshotOption[];
           correct_option_ids: string[];
           accepted_answers_snapshot: ExamAcceptedAnswerSnapshot[];
@@ -1333,9 +1443,17 @@ export interface Database {
           source_subject_title?: string | null;
           chapter_snapshot?: string | null;
           tags_snapshot?: ExamTagSnapshot[];
-          prompt_snapshot: string;
+          prompt_snapshot?: string;
+          prompt_rich_snapshot?: Json | null;
           prompt_image_url_snapshot?: string | null;
+          audio_media_id_snapshot?: string | null;
+          audio_url_snapshot?: string | null;
+          passage_snapshot?: Json | null;
+          diagram_snapshot?: Json | null;
+          type_payload_snapshot?: Json | null;
+          media_snapshot?: Json;
           explanation_snapshot?: string | null;
+          explanation_rich_snapshot?: Json | null;
           options_snapshot?: ExamSnapshotOption[];
           correct_option_ids?: string[];
           accepted_answers_snapshot?: ExamAcceptedAnswerSnapshot[];
@@ -1374,6 +1492,9 @@ export interface Database {
           user_id: string;
           selected_option_ids: string[];
           typed_answer: string | null;
+          structured_response: Json | null;
+          confidence: ConfidenceLevel | null;
+          hint_used: boolean;
           is_flagged: boolean;
           is_correct: boolean | null;
           client_seq: number;
@@ -1386,6 +1507,9 @@ export interface Database {
           user_id: string;
           selected_option_ids?: string[];
           typed_answer?: string | null;
+          structured_response?: Json | null;
+          confidence?: ConfidenceLevel | null;
+          hint_used?: boolean;
           is_flagged?: boolean;
           is_correct?: boolean | null;
           client_seq?: number;
@@ -1394,6 +1518,9 @@ export interface Database {
         Update: {
           selected_option_ids?: string[];
           typed_answer?: string | null;
+          structured_response?: Json | null;
+          confidence?: ConfidenceLevel | null;
+          hint_used?: boolean;
           is_flagged?: boolean;
           is_correct?: boolean | null;
           client_seq?: number;
@@ -1476,7 +1603,7 @@ export interface Database {
           id: string;
           user_id: string;
           study_set_id: string | null;
-          source_format: ImportFormat;
+          source_format: V3ImportFormat;
           file_name: string;
           file_size_bytes: number;
           status: ImportJobStatus;
@@ -1494,7 +1621,7 @@ export interface Database {
           id?: string;
           user_id: string;
           study_set_id?: string | null;
-          source_format: ImportFormat;
+          source_format: V3ImportFormat;
           file_name: string;
           file_size_bytes: number;
           status?: ImportJobStatus;
@@ -1533,6 +1660,548 @@ export interface Database {
             columns: ["study_set_id"];
             isOneToOne: false;
             referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      media_assets: {
+        Row: {
+          id: string;
+          owner_id: string;
+          study_set_id: string | null;
+          kind: MediaKind;
+          storage_bucket: string;
+          storage_path: string;
+          mime_type: string;
+          file_name: string;
+          size_bytes: number;
+          sha256_hash: string | null;
+          width: number | null;
+          height: number | null;
+          duration_ms: number | null;
+          alt_text: string | null;
+          caption: string | null;
+          is_orphaned: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          owner_id: string;
+          study_set_id?: string | null;
+          kind: MediaKind;
+          storage_bucket?: string;
+          storage_path: string;
+          mime_type: string;
+          file_name: string;
+          size_bytes: number;
+          sha256_hash?: string | null;
+          width?: number | null;
+          height?: number | null;
+          duration_ms?: number | null;
+          alt_text?: string | null;
+          caption?: string | null;
+          is_orphaned?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          alt_text?: string | null;
+          caption?: string | null;
+          width?: number | null;
+          height?: number | null;
+          duration_ms?: number | null;
+          is_orphaned?: boolean;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "media_assets_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "media_assets_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      content_media_relations: {
+        Row: {
+          id: string;
+          media_id: string;
+          entity_type: MediaEntityType;
+          entity_id: string;
+          role: MediaAttachmentRole;
+          sort_order: number;
+          alt_text: string | null;
+          caption: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          media_id: string;
+          entity_type: MediaEntityType;
+          entity_id: string;
+          role: MediaAttachmentRole;
+          sort_order?: number;
+          alt_text?: string | null;
+          caption?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          sort_order?: number;
+          alt_text?: string | null;
+          caption?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "content_media_relations_media_id_fkey";
+            columns: ["media_id"];
+            isOneToOne: false;
+            referencedRelation: "media_assets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      shared_passages: {
+        Row: {
+          id: string;
+          study_set_id: string;
+          owner_id: string;
+          title: string;
+          content_text: string;
+          content_rich: Json | null;
+          audio_media_id: string | null;
+          transcript: string | null;
+          source_reference: string | null;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          study_set_id: string;
+          owner_id: string;
+          title: string;
+          content_text: string;
+          content_rich?: Json | null;
+          audio_media_id?: string | null;
+          transcript?: string | null;
+          source_reference?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          title?: string;
+          content_text?: string;
+          content_rich?: Json | null;
+          audio_media_id?: string | null;
+          transcript?: string | null;
+          source_reference?: string | null;
+          sort_order?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "shared_passages_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "shared_passages_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "shared_passages_audio_media_id_fkey";
+            columns: ["audio_media_id"];
+            isOneToOne: false;
+            referencedRelation: "media_assets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      diagram_sets: {
+        Row: {
+          id: string;
+          study_set_id: string;
+          owner_id: string;
+          title: string;
+          description: string | null;
+          base_media_id: string | null;
+          base_image_url: string;
+          image_width: number | null;
+          image_height: number | null;
+          content_version: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          study_set_id: string;
+          owner_id: string;
+          title: string;
+          description?: string | null;
+          base_media_id?: string | null;
+          base_image_url: string;
+          image_width?: number | null;
+          image_height?: number | null;
+          content_version?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          title?: string;
+          description?: string | null;
+          base_media_id?: string | null;
+          base_image_url?: string;
+          image_width?: number | null;
+          image_height?: number | null;
+          content_version?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "diagram_sets_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "diagram_sets_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "diagram_sets_base_media_id_fkey";
+            columns: ["base_media_id"];
+            isOneToOne: false;
+            referencedRelation: "media_assets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      diagram_hotspots: {
+        Row: {
+          id: string;
+          diagram_id: string;
+          study_set_id: string;
+          label: string;
+          accepted_alternatives: string[];
+          description: string | null;
+          hint: string | null;
+          shape: HotspotShape;
+          geometry: Json;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          diagram_id: string;
+          study_set_id: string;
+          label: string;
+          accepted_alternatives?: string[];
+          description?: string | null;
+          hint?: string | null;
+          shape: HotspotShape;
+          geometry: Json;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          label?: string;
+          accepted_alternatives?: string[];
+          description?: string | null;
+          hint?: string | null;
+          shape?: HotspotShape;
+          geometry?: Json;
+          sort_order?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "diagram_hotspots_diagram_id_fkey";
+            columns: ["diagram_id"];
+            isOneToOne: false;
+            referencedRelation: "diagram_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "diagram_hotspots_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      user_question_notes: {
+        Row: {
+          id: string;
+          user_id: string;
+          study_set_id: string;
+          question_id: string;
+          content_text: string;
+          content_rich: Json | null;
+          version: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          study_set_id: string;
+          question_id: string;
+          content_text: string;
+          content_rich?: Json | null;
+          version?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          content_text?: string;
+          content_rich?: Json | null;
+          version?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "user_question_notes_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "user_question_notes_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "user_question_notes_question_id_fkey";
+            columns: ["question_id"];
+            isOneToOne: false;
+            referencedRelation: "questions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      question_reports: {
+        Row: {
+          id: string;
+          study_set_id: string;
+          question_id: string;
+          reporter_id: string;
+          category: QuestionReportCategory;
+          description: string;
+          status: QuestionReportStatus;
+          resolution_note: string | null;
+          resolved_by: string | null;
+          resolved_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          study_set_id: string;
+          question_id: string;
+          reporter_id: string;
+          category: QuestionReportCategory;
+          description: string;
+          status?: QuestionReportStatus;
+          resolution_note?: string | null;
+          resolved_by?: string | null;
+          resolved_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          status?: QuestionReportStatus;
+          resolution_note?: string | null;
+          resolved_by?: string | null;
+          resolved_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "question_reports_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "question_reports_question_id_fkey";
+            columns: ["question_id"];
+            isOneToOne: false;
+            referencedRelation: "questions";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "question_reports_reporter_id_fkey";
+            columns: ["reporter_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      learning_session_checkpoints: {
+        Row: {
+          id: string;
+          user_id: string;
+          study_set_id: string | null;
+          mode: StudyMode;
+          session_key: string;
+          state_json: Json;
+          progress_percent: number;
+          current_index: number;
+          total_items: number;
+          device_id: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          study_set_id?: string | null;
+          mode: StudyMode;
+          session_key: string;
+          state_json?: Json;
+          progress_percent?: number;
+          current_index?: number;
+          total_items?: number;
+          device_id?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          state_json?: Json;
+          progress_percent?: number;
+          current_index?: number;
+          total_items?: number;
+          device_id?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "learning_session_checkpoints_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "learning_session_checkpoints_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      learning_confidence_events: {
+        Row: {
+          id: string;
+          user_id: string;
+          study_set_id: string;
+          question_id: string;
+          mode: StudyMode | "exam";
+          confidence: ConfidenceLevel;
+          is_correct: boolean;
+          hint_used: boolean;
+          response_time_ms: number | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          study_set_id: string;
+          question_id: string;
+          mode: StudyMode | "exam";
+          confidence: ConfidenceLevel;
+          is_correct: boolean;
+          hint_used?: boolean;
+          response_time_ms?: number | null;
+          created_at?: string;
+        };
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "learning_confidence_events_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "learning_confidence_events_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "learning_confidence_events_question_id_fkey";
+            columns: ["question_id"];
+            isOneToOne: false;
+            referencedRelation: "questions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      learning_sync_events: {
+        Row: {
+          event_id: string;
+          user_id: string;
+          event_type: OfflineSyncEventType;
+          study_set_id: string | null;
+          question_id: string | null;
+          client_timestamp: string;
+          progress_generation: number;
+          status: SyncEventStatus;
+          payload: Json;
+          result_detail: Json | null;
+          processed_at: string;
+        };
+        Insert: {
+          event_id: string;
+          user_id: string;
+          event_type: OfflineSyncEventType;
+          study_set_id?: string | null;
+          question_id?: string | null;
+          client_timestamp: string;
+          progress_generation?: number;
+          status?: SyncEventStatus;
+          payload?: Json;
+          result_detail?: Json | null;
+          processed_at?: string;
+        };
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "learning_sync_events_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
             referencedColumns: ["id"];
           },
         ];
@@ -1710,6 +2379,41 @@ export interface Database {
           avatar_url: string | null;
         }>;
       };
+      is_folder_owner: {
+        Args: { p_folder_id: string; p_user_id: string };
+        Returns: boolean;
+      };
+      can_read_tag: {
+        Args: { p_tag_id: string; p_user_id: string };
+        Returns: boolean;
+      };
+      reset_learning_progress: {
+        Args: {
+          p_scope: string;
+          p_study_set_id?: string | null;
+          p_subject?: string | null;
+          p_chapter?: string | null;
+          p_question_ids?: string[] | null;
+          p_mode?: string | null;
+          p_clear_mistakes?: boolean;
+          p_clear_starred?: boolean;
+          p_clear_checkpoints?: boolean;
+        };
+        Returns: Json;
+      };
+      global_library_search: {
+        Args: {
+          p_query: string;
+          p_types?: string[] | null;
+          p_limit?: number;
+          p_offset?: number;
+        };
+        Returns: Json;
+      };
+      sync_offline_learning_events: {
+        Args: { p_events: Json };
+        Returns: Json;
+      };
     };
     Enums: {
       study_set_type: StudySetType;
@@ -1726,7 +2430,7 @@ export interface Database {
       exam_status: ExamStatus;
       friendship_status: FriendshipStatus;
       import_job_status: ImportJobStatus;
-      import_format: ImportFormat;
+      import_format: V3ImportFormat;
     };
     CompositeTypes: Record<string, never>;
   };

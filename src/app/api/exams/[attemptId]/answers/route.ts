@@ -42,6 +42,9 @@ export async function PUT(
       attempt_question_id: item.attempt_question_id,
       selected_option_ids: item.selected_option_ids,
       typed_answer: item.typed_answer ?? null,
+      structured_response: item.structured_response ?? null,
+      confidence: item.confidence ?? null,
+      hint_used: item.hint_used ?? false,
       is_flagged: item.is_flagged,
       client_seq: item.client_seq ?? 0,
     }));

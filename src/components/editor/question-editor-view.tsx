@@ -1,16 +1,22 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertCircle,
-  Check,
+  CheckSquare,
+  Copy,
+  Eye,
+  Flag,
+  FolderInput,
   ImagePlus,
   Loader2,
   Plus,
+  Printer,
   Save,
   Search,
   Settings,
@@ -18,6 +24,7 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
+import { getQuestionTypeLabel } from "@/components/import/import-copy";
 import {
   apiFetch,
   getFriendlyErrorMessage,
@@ -26,6 +33,31 @@ import {
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
+import { RichContentRenderer } from "@/components/richtext/RichContentRenderer";
+import { computeQuestionDuplicateFingerprint } from "@/lib/import/validator";
+import { validateQuestionByType } from "@/lib/questions";
+import { PdfExportDialog } from "./PdfExportDialog";
+import { QuestionNotePanel } from "./QuestionNotePanel";
+import { QuestionReportDialog } from "./QuestionReportDialog";
+import { ReportsInboxPanel } from "./ReportsInboxPanel";
+import {
+  createDefaultPayloadForType,
+  isChoiceCapableDraft,
+  V3QuestionTypeFields,
+  type EditableAcceptedAnswer,
+  type EditableOption,
+  type QuestionDraft,
+} from "./V3QuestionTypeFields";
+import {
+  V3_QUESTION_TYPES,
+  type DiagramSet,
+  type SharedPassage,
+} from "@/types/v3";
+
+const RichTextEditor = dynamic(
+  () => import("@/components/richtext/RichTextEditor").then((m) => m.RichTextEditor),
+  { ssr: false },
+);
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,9 +93,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
-import { cn } from "@/lib/utils";
 import type {
-  AnswerMatchMode,
   DifficultyLevel,
   Folder,
   MemberRole,
@@ -79,36 +109,6 @@ interface StudySetEditorDetail extends StudySet {
   role?: MemberRole;
   chapters?: Array<string | { name: string; count: number }>;
   tags?: Tag[];
-}
-
-interface EditableOption {
-  /** Preserves existing UUID on edit; omitted for brand-new options */
-  id?: string;
-  localKey: string;
-  content: string;
-  is_correct: boolean;
-}
-
-interface EditableAcceptedAnswer {
-  id?: string;
-  localKey: string;
-  answer_text: string;
-  match_mode: AnswerMatchMode;
-}
-
-interface QuestionDraft {
-  id?: string;
-  question_type: QuestionType;
-  prompt: string;
-  prompt_image_url: string;
-  back_text: string;
-  chapter: string;
-  difficulty: DifficultyLevel;
-  explanation: string;
-  hint: string;
-  tagsText: string;
-  options: EditableOption[];
-  accepted_answers: EditableAcceptedAnswer[];
 }
 
 interface UploadedImageResponse {
@@ -137,22 +137,30 @@ function createEmptyDraft(defaultType: QuestionType = "single_choice"): Question
   return {
     question_type: defaultType,
     prompt: "",
+    prompt_rich: null,
     prompt_image_url: "",
     back_text: "",
+    back_rich: null,
     chapter: "",
     difficulty: "medium",
     explanation: "",
+    explanation_rich: null,
     hint: "",
     tagsText: "",
+    audio_url: "",
+    audio_transcript: "",
+    passage_id: "",
+    diagram_id: "",
     options: [
-      { localKey: "opt-0", content: "", is_correct: true },
-      { localKey: "opt-1", content: "", is_correct: false },
-      { localKey: "opt-2", content: "", is_correct: false },
-      { localKey: "opt-3", content: "", is_correct: false },
+      { localKey: "opt-0", content: "", image_url: "", is_correct: true },
+      { localKey: "opt-1", content: "", image_url: "", is_correct: false },
+      { localKey: "opt-2", content: "", image_url: "", is_correct: false },
+      { localKey: "opt-3", content: "", image_url: "", is_correct: false },
     ],
     accepted_answers: [
       { localKey: "ans-0", answer_text: "", match_mode: "case_insensitive" },
     ],
+    type_payload: createDefaultPayloadForType(defaultType),
   };
 }
 
@@ -163,11 +171,14 @@ function questionToDraft(q: Question): QuestionDraft {
           id: o.id,
           localKey: o.id || `opt-${i}`,
           content: o.content,
+          content_rich: o.content_rich ?? null,
+          image_url: o.image_url ?? "",
+          image_alt: o.image_alt ?? "",
           is_correct: o.is_correct,
         }))
       : [
-          { localKey: "opt-0", content: "", is_correct: true },
-          { localKey: "opt-1", content: "", is_correct: false },
+          { localKey: "opt-0", content: "", image_url: "", is_correct: true },
+          { localKey: "opt-1", content: "", image_url: "", is_correct: false },
         ];
 
   const accepted: EditableAcceptedAnswer[] =
@@ -184,15 +195,23 @@ function questionToDraft(q: Question): QuestionDraft {
     id: q.id,
     question_type: q.question_type,
     prompt: q.prompt,
+    prompt_rich: q.prompt_rich ?? null,
     prompt_image_url: q.prompt_image_url ?? "",
     back_text: q.back_text ?? "",
+    back_rich: q.back_rich ?? null,
     chapter: q.chapter ?? "",
     difficulty: q.difficulty,
     explanation: q.explanation ?? "",
+    explanation_rich: q.explanation_rich ?? null,
     hint: q.hint ?? "",
     tagsText: (q.tags ?? []).map((tag) => tag.name).join(", "),
+    audio_url: q.audio_url ?? "",
+    audio_transcript: q.audio_transcript ?? "",
+    passage_id: q.passage_id ?? "",
+    diagram_id: q.diagram_id ?? "",
     options,
     accepted_answers: accepted,
+    type_payload: q.type_payload ?? createDefaultPayloadForType(q.question_type),
   };
 }
 
@@ -213,7 +232,14 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [bulkChapter, setBulkChapter] = React.useState("");
+  const [bulkDifficulty, setBulkDifficulty] = React.useState<"keep" | DifficultyLevel>("keep");
+  const [bulkAddTags, setBulkAddTags] = React.useState("");
+  const [bulkRemoveTagId, setBulkRemoveTagId] = React.useState("none");
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = React.useState(false);
+  const [transferDialogOpen, setTransferDialogOpen] = React.useState(false);
+  const [transferMode, setTransferMode] = React.useState<"copy" | "move">("copy");
+  const [transferTargetSetId, setTransferTargetSetId] = React.useState("");
+  const [duplicateFinderOpen, setDuplicateFinderOpen] = React.useState(false);
   const [deletingQuestion, setDeletingQuestion] = React.useState<{
     id: string;
     num: number;
@@ -221,6 +247,8 @@ export function QuestionEditorView({ setId }: { setId: string }) {
   } | null>(null);
 
   const [editorOpen, setEditorOpen] = React.useState(false);
+  const [useRichPrompt, setUseRichPrompt] = React.useState(false);
+  const [showLivePreview, setShowLivePreview] = React.useState(false);
   const [draft, setDraft] = React.useState<QuestionDraft>(() => createEmptyDraft());
   const [uploadingImage, setUploadingImage] = React.useState(false);
 
@@ -260,6 +288,37 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     queryFn: async () => {
       const res = await apiFetch<Folder[]>("/api/folders");
       return Array.isArray(res.data) ? res.data : [];
+    },
+  });
+
+  const passagesQuery = useQuery<SharedPassage[]>({
+    queryKey: ["set-passages", setId],
+    enabled: configured,
+    queryFn: async () => {
+      const res = await apiFetch<SharedPassage[]>(
+        `/api/passages?studySetId=${encodeURIComponent(setId)}`,
+      );
+      return Array.isArray(res.data) ? res.data : [];
+    },
+  });
+
+  const diagramsQuery = useQuery<DiagramSet[]>({
+    queryKey: ["set-diagrams", setId],
+    enabled: configured,
+    queryFn: async () => {
+      const res = await apiFetch<DiagramSet[]>(`/api/sets/${setId}/diagrams`);
+      return Array.isArray(res.data) ? res.data : [];
+    },
+  });
+
+  const targetSetsQuery = useQuery<StudySet[]>({
+    queryKey: ["study-sets-transfer-targets"],
+    enabled: configured && transferDialogOpen,
+    queryFn: async () => {
+      const res = await apiFetch<StudySet[]>("/api/sets?pageSize=100");
+      return Array.isArray(res.data)
+        ? res.data.filter((s) => s.id !== setId)
+        : [];
     },
   });
 
@@ -307,33 +366,42 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
   const saveQuestionMutation = useMutation({
     mutationFn: async (current: QuestionDraft) => {
-      const isChoice =
-        current.question_type === "single_choice" ||
-        current.question_type === "multiple_choice" ||
-        current.question_type === "true_false";
+      const isChoice = isChoiceCapableDraft(current);
 
       const cleanOptions = isChoice
         ? current.options
-            .filter((o) => o.content.trim().length > 0)
+            .filter(
+              (o) => o.content.trim().length > 0 || Boolean(o.image_url?.trim()),
+            )
             .map((o, idx) => ({
               ...(o.id ? { id: o.id } : {}),
               position: idx,
               label: String.fromCharCode(65 + idx),
               content: o.content.trim(),
+              content_rich: o.content_rich ?? null,
+              image_url: o.image_url?.trim() || null,
+              image_alt: o.image_alt?.trim() || null,
               is_correct: o.is_correct,
             }))
         : undefined;
 
-      const cleanAccepted =
-        current.question_type === "flashcard" || current.question_type === "short_answer"
-          ? current.accepted_answers
-              .filter((a) => a.answer_text.trim().length > 0)
-              .map((a) => ({
-                ...(a.id ? { id: a.id } : {}),
-                answer_text: a.answer_text.trim(),
-                match_mode: a.match_mode,
-              }))
-          : undefined;
+      const needsAccepted =
+        current.question_type === "flashcard" ||
+        current.question_type === "short_answer" ||
+        (current.type_payload?.type === "reading_passage" &&
+          current.type_payload.sub_answer_kind === "short_answer") ||
+        (current.type_payload?.type === "listening" &&
+          current.type_payload.sub_answer_kind === "short_answer");
+
+      const cleanAccepted = needsAccepted
+        ? current.accepted_answers
+            .filter((a) => a.answer_text.trim().length > 0)
+            .map((a) => ({
+              ...(a.id ? { id: a.id } : {}),
+              answer_text: a.answer_text.trim(),
+              match_mode: a.match_mode,
+            }))
+        : undefined;
 
       const tags = current.tagsText
         .split(",")
@@ -343,12 +411,20 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       const payload = {
         question_type: current.question_type,
         prompt: current.prompt.trim(),
+        prompt_rich: current.prompt_rich ?? null,
         prompt_image_url: current.prompt_image_url.trim() || null,
         back_text: current.back_text.trim() || null,
+        back_rich: current.back_rich ?? null,
         chapter: current.chapter.trim() || null,
         difficulty: current.difficulty,
         explanation: current.explanation.trim() || null,
+        explanation_rich: current.explanation_rich ?? null,
         hint: current.hint.trim() || null,
+        audio_url: current.audio_url.trim() || null,
+        audio_transcript: current.audio_transcript.trim() || null,
+        passage_id: current.passage_id || null,
+        diagram_id: current.diagram_id || null,
+        type_payload: current.type_payload,
         options: cleanOptions,
         accepted_answers: cleanAccepted,
         tags,
@@ -397,20 +473,117 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
   const bulkUpdateMutation = useMutation({
     mutationFn: async () => {
+      const addTagsList = bulkAddTags
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const body: Record<string, unknown> = {
+        question_ids: Array.from(selectedIds),
+      };
+      if (bulkChapter.trim().length > 0) body.chapter = bulkChapter.trim();
+      if (bulkDifficulty !== "keep") body.difficulty = bulkDifficulty;
+      if (addTagsList.length > 0) body.add_tags = addTagsList;
+      if (bulkRemoveTagId !== "none") body.remove_tag_ids = [bulkRemoveTagId];
+
+      if (Object.keys(body).length === 1) {
+        throw new Error(
+          vi
+            ? "Chọn ít nhất một thay đổi (chương, độ khó hoặc thẻ) trước khi áp dụng."
+            : "Choose at least one update (chapter, difficulty, or tag) before applying.",
+        );
+      }
+
       await apiFetch(`/api/sets/${setId}/questions/bulk`, {
         method: "PATCH",
-        body: JSON.stringify({
-          question_ids: Array.from(selectedIds),
-          chapter: bulkChapter.trim() || null,
-        }),
+        body: JSON.stringify(body),
       });
     },
     onSuccess: () => {
       setSelectedIds(new Set());
       setBulkChapter("");
+      setBulkDifficulty("keep");
+      setBulkAddTags("");
+      setBulkRemoveTagId("none");
       queryClient.invalidateQueries({ queryKey: ["editor-questions", setId] });
       queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
       toast.success(vi ? "Đã cập nhật hàng loạt." : "Bulk update applied.");
+    },
+    onError: (err) => {
+      toast.error(getFriendlyErrorMessage(err, locale));
+    },
+  });
+
+  const bulkTransferMutation = useMutation({
+    mutationFn: async () => {
+      if (!transferTargetSetId) {
+        throw new Error(
+          vi ? "Vui lòng chọn học phần đích." : "Please select a destination study set.",
+        );
+      }
+      const selectedQuestions = (questionsQuery.data?.items ?? []).filter((q) =>
+        selectedIds.has(q.id),
+      );
+      if (selectedQuestions.length === 0) return;
+
+      const payloadQuestions = selectedQuestions.map((q) => ({
+        question_type: q.question_type,
+        chapter: q.chapter ?? null,
+        prompt: q.prompt,
+        prompt_rich: q.prompt_rich ?? null,
+        prompt_image_url: q.prompt_image_url ?? null,
+        back_text: q.back_text ?? null,
+        back_rich: q.back_rich ?? null,
+        back_image_url: q.back_image_url ?? null,
+        explanation: q.explanation ?? null,
+        explanation_rich: q.explanation_rich ?? null,
+        hint: q.hint ?? null,
+        audio_url: q.audio_url ?? null,
+        audio_transcript: q.audio_transcript ?? null,
+        type_payload: q.type_payload ?? null,
+        difficulty: q.difficulty,
+        options: (q.options ?? []).map((o, idx) => ({
+          position: idx,
+          label: o.label,
+          content: o.content,
+          content_rich: o.content_rich ?? null,
+          image_url: o.image_url ?? null,
+          image_alt: o.image_alt ?? null,
+          is_correct: o.is_correct,
+        })),
+        accepted_answers: (q.accepted_answers ?? []).map((a) => ({
+          answer_text: a.answer_text,
+          match_mode: a.match_mode,
+        })),
+        tags: (q.tags ?? []).map((t) => t.name),
+      }));
+
+      await apiFetch(`/api/sets/${transferTargetSetId}/questions/bulk`, {
+        method: "POST",
+        body: JSON.stringify({ questions: payloadQuestions }),
+      });
+
+      if (transferMode === "move") {
+        await apiFetch(`/api/sets/${setId}/questions/bulk`, {
+          method: "DELETE",
+          body: JSON.stringify({ question_ids: selectedQuestions.map((q) => q.id) }),
+        });
+      }
+    },
+    onSuccess: () => {
+      setSelectedIds(new Set());
+      setTransferDialogOpen(false);
+      setTransferTargetSetId("");
+      queryClient.invalidateQueries({ queryKey: ["editor-questions", setId] });
+      queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
+      toast.success(
+        transferMode === "move"
+          ? vi
+            ? "Đã di chuyển câu hỏi sang học phần đích (lịch sử thi cũ vẫn được bảo toàn)."
+            : "Questions moved to target study set (past exam history preserved)."
+          : vi
+            ? "Đã sao chép câu hỏi sang học phần đích."
+            : "Questions copied to target study set.",
+      );
     },
     onError: (err) => {
       toast.error(getFriendlyErrorMessage(err, locale));
@@ -567,6 +740,31 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     return Array.from(tagMap.values());
   }, [setQuery.data?.tags, questions]);
 
+  // Safe deterministic duplicate groups (prompt + sorted options + correct answers + media; NEVER collides distinct questions!)
+  const duplicateGroups = React.useMemo(() => {
+    const groups = new Map<string, Question[]>();
+    for (const q of questions) {
+      const fp = computeQuestionDuplicateFingerprint({
+        prompt: q.prompt,
+        promptImageUrl: q.prompt_image_url,
+        backText: q.back_text,
+        options: (q.options ?? []).map((o) => ({
+          content: o.content,
+          isCorrect: o.is_correct,
+          imageUrl: o.image_url,
+        })),
+        acceptedAnswers: (q.accepted_answers ?? []).map((a) => ({
+          answerText: a.answer_text,
+        })),
+      });
+      if (!fp) continue;
+      const list = groups.get(fp) ?? [];
+      list.push(q);
+      groups.set(fp, list);
+    }
+    return Array.from(groups.values()).filter((g) => g.length > 1);
+  }, [questions]);
+
   // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: questions.length,
@@ -609,11 +807,6 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     );
   }
 
-  const isChoiceDraft =
-    draft.question_type === "single_choice" ||
-    draft.question_type === "multiple_choice" ||
-    draft.question_type === "true_false";
-
   const hasActiveFilters =
     Boolean(debouncedSearch) ||
     chapterFilter !== "all" ||
@@ -623,37 +816,35 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
   const handleSaveDraft = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!draft.prompt.trim()) {
-      toast.error(vi ? "Vui lòng nhập nội dung câu hỏi." : "Question prompt is required.");
-      return;
-    }
-    if (isChoiceDraft) {
-      const filled = draft.options.filter((o) => o.content.trim().length > 0);
-      if (filled.length < 2) {
-        toast.error(vi ? "Cần ít nhất 2 phương án trả lời." : "At least 2 options are required.");
-        return;
-      }
-      if (!filled.some((o) => o.is_correct)) {
-        toast.error(
-          vi ? "Vui lòng chọn ít nhất 1 đáp án đúng." : "Select at least 1 correct option.",
-        );
-        return;
-      }
-    } else if (draft.question_type === "flashcard" && !draft.back_text.trim()) {
-      toast.error(
-        vi ? "Thẻ Flashcard cần nội dung mặt sau." : "Flashcards require back text.",
-      );
-      return;
-    } else if (
-      draft.question_type === "short_answer" &&
-      !draft.accepted_answers.some((a) => a.answer_text.trim().length > 0) &&
-      !draft.back_text.trim()
-    ) {
-      toast.error(
-        vi
-          ? "Câu trả lời ngắn cần ít nhất 1 đáp án chấp nhận."
-          : "Short-answer questions require at least one accepted answer.",
-      );
+    const validation = validateQuestionByType({
+      question_type: draft.question_type,
+      prompt: draft.prompt.trim(),
+      prompt_rich: draft.prompt_rich ?? null,
+      prompt_image_url: draft.prompt_image_url.trim() || null,
+      back_text: draft.back_text.trim() || null,
+      audio_url: draft.audio_url.trim() || null,
+      diagram_id: draft.diagram_id || null,
+      passage_id: draft.passage_id || null,
+      type_payload: draft.type_payload,
+      options: draft.options
+        .filter((o) => o.content.trim().length > 0 || Boolean(o.image_url?.trim()))
+        .map((o, idx) => ({
+          id: o.id ?? o.localKey,
+          label: String.fromCharCode(65 + idx),
+          content: o.content.trim(),
+          image_url: o.image_url?.trim() || null,
+          is_correct: o.is_correct,
+        })),
+      accepted_answers: draft.accepted_answers
+        .filter((a) => a.answer_text.trim().length > 0)
+        .map((a) => ({
+          answer_text: a.answer_text.trim(),
+          match_mode: a.match_mode,
+        })),
+    });
+
+    if (!validation.valid) {
+      toast.error(validation.errors[0] ?? (vi ? "Vui lòng kiểm tra lại dữ liệu câu hỏi." : "Please check question fields."));
       return;
     }
     saveQuestionMutation.mutate(draft);
@@ -670,6 +861,12 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         ]}
         actions={
           <>
+            <PdfExportDialog
+              studySetId={setId}
+              defaultTitle={setQuery.data.title}
+              defaultSubject={setQuery.data.subject ?? ""}
+              locale={locale}
+            />
             <Button size="sm" variant="outline" asChild>
               <Link href={`/sets/${setId}/import`}>
                 <Upload className="size-4" aria-hidden="true" />
@@ -686,6 +883,8 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                       : "single_choice",
                   ),
                 );
+                setShowLivePreview(false);
+                setUseRichPrompt(false);
                 setEditorOpen(true);
               }}
             >
@@ -700,6 +899,10 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         <TabsList>
           <TabsTrigger value="questions">
             {vi ? "Danh sách câu hỏi" : "Questions"} ({totalCount.toLocaleString()})
+          </TabsTrigger>
+          <TabsTrigger value="reports">
+            <Flag className="size-3.5" aria-hidden="true" />
+            <span>{vi ? "Báo cáo lỗi" : "Reports"}</span>
           </TabsTrigger>
           <TabsTrigger value="settings">
             <Settings className="size-3.5" aria-hidden="true" />
@@ -796,21 +999,11 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   <SelectItem value="all">
                     {vi ? "Mọi dạng câu" : "All types"}
                   </SelectItem>
-                  <SelectItem value="single_choice">
-                    {t("questionType.single_choice")}
-                  </SelectItem>
-                  <SelectItem value="multiple_choice">
-                    {t("questionType.multiple_choice")}
-                  </SelectItem>
-                  <SelectItem value="true_false">
-                    {t("questionType.true_false")}
-                  </SelectItem>
-                  <SelectItem value="flashcard">
-                    {t("questionType.flashcard")}
-                  </SelectItem>
-                  <SelectItem value="short_answer">
-                    {t("questionType.short_answer")}
-                  </SelectItem>
+                  {V3_QUESTION_TYPES.map((qType) => (
+                    <SelectItem key={qType} value={qType}>
+                      {getQuestionTypeLabel(qType, locale)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
 
@@ -860,10 +1053,52 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   {t("common.reset")}
                 </Button>
               )}
+              {questions.length > 0 && (
+                <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const allSelected =
+                        questions.length > 0 &&
+                        questions.every((q) => selectedIds.has(q.id));
+                      setSelectedIds(
+                        allSelected
+                          ? new Set()
+                          : new Set(questions.map((q) => q.id)),
+                      );
+                    }}
+                  >
+                    <CheckSquare className="mr-1.5 size-3.5" aria-hidden="true" />
+                    {questions.every((q) => selectedIds.has(q.id))
+                      ? vi
+                        ? "Bỏ chọn trang"
+                        : "Clear page"
+                      : vi
+                        ? "Chọn cả trang"
+                        : "Select page"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setDuplicateFinderOpen(true)}
+                  >
+                    <Copy className="mr-1.5 size-3.5" aria-hidden="true" />
+                    {vi ? "Tìm trùng lặp" : "Duplicates"}
+                    {duplicateGroups.length > 0 && (
+                      <Badge variant="secondary" className="ml-1.5 px-1.5 py-0 text-[10px]">
+                        {duplicateGroups.length}
+                      </Badge>
+                    )}
+                  </Button>
+                </div>
+              )}
             </div>
 
             {selectedIds.size > 0 && (
-              <div className="border-primary/30 bg-accent flex flex-wrap items-center gap-2 rounded-lg border px-3 py-1.5">
+              <div className="border-primary/30 bg-accent flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
                 <span className="text-accent-foreground font-mono text-xs font-semibold tabular-nums">
                   {selectedIds.size} {vi ? "đã chọn" : "selected"}
                 </span>
@@ -871,8 +1106,43 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   value={bulkChapter}
                   onChange={(e) => setBulkChapter(e.target.value)}
                   placeholder={vi ? "Gán chương..." : "Assign chapter..."}
-                  className="bg-card h-8 w-40 text-xs"
+                  className="bg-card h-8 w-36 text-xs"
                 />
+                <Select
+                  value={bulkDifficulty}
+                  onValueChange={(v) => setBulkDifficulty(v as "keep" | DifficultyLevel)}
+                >
+                  <SelectTrigger className="bg-card h-8 w-32 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="keep">{vi ? "Giữ độ khó" : "Keep difficulty"}</SelectItem>
+                    <SelectItem value="easy">{t("difficulty.easy")}</SelectItem>
+                    <SelectItem value="medium">{t("difficulty.medium")}</SelectItem>
+                    <SelectItem value="hard">{t("difficulty.hard")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  value={bulkAddTags}
+                  onChange={(e) => setBulkAddTags(e.target.value)}
+                  placeholder={vi ? "+ Thêm thẻ (a, b)" : "+ Add tags (a, b)"}
+                  className="bg-card h-8 w-36 text-xs"
+                />
+                {availableTags.length > 0 && (
+                  <Select value={bulkRemoveTagId} onValueChange={setBulkRemoveTagId}>
+                    <SelectTrigger className="bg-card h-8 w-36 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{vi ? "Gỡ thẻ…" : "Remove tag…"}</SelectItem>
+                      {availableTags.map((tag) => (
+                        <SelectItem key={tag.id} value={tag.id}>
+                          − {tag.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
                 <Button
                   size="sm"
                   variant="secondary"
@@ -881,6 +1151,30 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                 >
                   {vi ? "Áp dụng" : "Apply"}
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setTransferMode("copy");
+                    setTransferDialogOpen(true);
+                  }}
+                >
+                  <FolderInput className="mr-1 size-3.5" aria-hidden="true" />
+                  {vi ? "Chép / Chuyển" : "Copy / Move"}
+                </Button>
+                <PdfExportDialog
+                  studySetId={setId}
+                  questionIds={Array.from(selectedIds)}
+                  defaultTitle={`${setQuery.data.title} (${selectedIds.size})`}
+                  defaultSubject={setQuery.data.subject ?? ""}
+                  locale={locale}
+                  trigger={
+                    <Button size="sm" variant="outline">
+                      <Printer className="mr-1 size-3.5" aria-hidden="true" />
+                      {vi ? "Xuất PDF chọn" : "Export Selected PDF"}
+                    </Button>
+                  }
+                />
                 <Button
                   size="sm"
                   variant="destructive"
@@ -1006,7 +1300,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                               </p>
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                 <Badge variant="secondary">
-                                  {t(`questionType.${q.question_type}`)}
+                                  {getQuestionTypeLabel(q.question_type, locale)}
                                 </Badge>
                                 <Badge variant="outline">
                                   {t(`difficulty.${q.difficulty}`)}
@@ -1075,6 +1369,29 @@ export function QuestionEditorView({ setId }: { setId: string }) {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* Reports Inbox Tab */}
+        <TabsContent value="reports" className="mt-4">
+          <ReportsInboxPanel
+            studySetId={setId}
+            locale={locale}
+            onEditQuestion={(questionId) => {
+              const target = questions.find((item) => item.id === questionId);
+              if (target) {
+                setDraft(questionToDraft(target));
+                setShowLivePreview(false);
+                setUseRichPrompt(Boolean(target.prompt_rich));
+                setEditorOpen(true);
+              } else {
+                toast.info(
+                  vi
+                    ? "Câu hỏi nằm ở trang khác — hãy dùng ô tìm kiếm trong tab Danh sách câu hỏi."
+                    : "Question is on another page — search for it in the Questions tab.",
+                );
+              }
+            }}
+          />
         </TabsContent>
 
         {/* Set Metadata Settings Tab */}
@@ -1256,470 +1573,566 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         </TabsContent>
       </Tabs>
 
-      {/* Add / Edit Single Question Dialog */}
+      {/* Add / Edit Single Question Dialog (All 13 V3 Types + Rich Text/KaTeX + Live Preview) */}
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
-        <DialogContent className="max-h-[90dvh] overflow-y-auto overscroll-contain sm:max-w-2xl">
+        <DialogContent className="max-h-[90dvh] overflow-y-auto overscroll-contain sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>
-              {draft.id
-                ? vi
-                  ? "Chỉnh sửa câu hỏi"
-                  : "Edit question"
-                : vi
-                  ? "Thêm câu hỏi mới"
-                  : "Add new question"}
-            </DialogTitle>
-            <DialogDescription>
-              {vi
-                ? "Các phương án cũ giữ nguyên mã định danh để không làm sai lệch thống kê và bài thi trước đó."
-                : "Existing answer choices retain stable identifiers so past exam stats remain accurate."}
-            </DialogDescription>
-          </DialogHeader>
-
-          <form onSubmit={handleSaveDraft} className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="q-type">{vi ? "Dạng câu hỏi" : "Question type"}</Label>
-                <Select
-                  value={draft.question_type}
-                  onValueChange={(val) => {
-                    const nextType = val as QuestionType;
-                    setDraft((prev) => {
-                      if (nextType === "true_false") {
-                        return {
-                          ...prev,
-                          question_type: nextType,
-                          options: [
-                            {
-                              id: prev.options[0]?.id,
-                              localKey: prev.options[0]?.localKey ?? "tf-0",
-                              content: prev.options[0]?.content || (vi ? "Đúng" : "True"),
-                              is_correct: true,
-                            },
-                            {
-                              id: prev.options[1]?.id,
-                              localKey: prev.options[1]?.localKey ?? "tf-1",
-                              content: prev.options[1]?.content || (vi ? "Sai" : "False"),
-                              is_correct: false,
-                            },
-                          ],
-                        };
-                      }
-                      // Collapse multiple correct flags when switching to single_choice (fixes QB-03)
-                      if (nextType === "single_choice") {
-                        const firstCorrectIdx = prev.options.findIndex((o) => o.is_correct);
-                        const keepIdx = firstCorrectIdx >= 0 ? firstCorrectIdx : 0;
-                        return {
-                          ...prev,
-                          question_type: nextType,
-                          options: prev.options.map((o, idx) => ({
-                            ...o,
-                            is_correct: idx === keepIdx,
-                          })),
-                        };
-                      }
-                      return { ...prev, question_type: nextType };
-                    });
-                  }}
-                >
-                  <SelectTrigger id="q-type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="single_choice">
-                      {t("questionType.single_choice")}
-                    </SelectItem>
-                    <SelectItem value="multiple_choice">
-                      {t("questionType.multiple_choice")}
-                    </SelectItem>
-                    <SelectItem value="true_false">
-                      {t("questionType.true_false")}
-                    </SelectItem>
-                    <SelectItem value="flashcard">
-                      {t("questionType.flashcard")}
-                    </SelectItem>
-                    <SelectItem value="short_answer">
-                      {t("questionType.short_answer")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+            <div className="flex flex-wrap items-center justify-between gap-2 pr-6">
+              <div>
+                <DialogTitle>
+                  {draft.id
+                    ? vi
+                      ? "Chỉnh sửa câu hỏi"
+                      : "Edit question"
+                    : vi
+                      ? "Thêm câu hỏi mới"
+                      : "Add new question"}
+                </DialogTitle>
+                <DialogDescription>
+                  {vi
+                    ? "Hỗ trợ đầy đủ 13 dạng câu hỏi V3, định dạng phong phú + LaTeX (KaTeX) và bảo toàn mã định danh đáp án cũ."
+                    : "Supports all 13 V3 question types, rich formatting + LaTeX (KaTeX), and preserves stable option IDs."}
+                </DialogDescription>
               </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="q-chapter">{vi ? "Chương / Phần" : "Chapter"}</Label>
-                <Input
-                  id="q-chapter"
-                  placeholder={vi ? "VD: Chương 1" : "e.g., Chapter 1"}
-                  value={draft.chapter}
-                  onChange={(e) =>
-                    setDraft((prev) => ({ ...prev, chapter: e.target.value }))
-                  }
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="q-difficulty">{vi ? "Độ khó" : "Difficulty"}</Label>
-                <Select
-                  value={draft.difficulty}
-                  onValueChange={(v) =>
-                    setDraft((prev) => ({ ...prev, difficulty: v as DifficultyLevel }))
-                  }
-                >
-                  <SelectTrigger id="q-difficulty">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="easy">{t("difficulty.easy")}</SelectItem>
-                    <SelectItem value="medium">{t("difficulty.medium")}</SelectItem>
-                    <SelectItem value="hard">{t("difficulty.hard")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="q-prompt">
-                {draft.question_type === "flashcard"
-                  ? vi
-                    ? "Mặt trước / Thuật ngữ"
-                    : "Front / Term"
-                  : vi
-                    ? "Nội dung câu hỏi"
-                    : "Question stem"}{" "}
-                <span className="text-destructive">*</span>
-              </Label>
-              <Textarea
-                id="q-prompt"
-                required
-                rows={3}
-                value={draft.prompt}
-                onChange={(e) =>
-                  setDraft((prev) => ({ ...prev, prompt: e.target.value }))
-                }
-              />
-            </div>
-
-            {/* Optional Image Upload via POST /api/uploads/image */}
-            <div className="space-y-1.5">
-              <Label htmlFor="q-image-url">
-                {vi
-                  ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)"
-                  : "Optional image (PNG/JPG/WebP ≤ 5MB)"}
-              </Label>
-              <div className="flex gap-2">
-                <Input
-                  id="q-image-url"
-                  type="url"
-                  placeholder="https://..."
-                  value={draft.prompt_image_url}
-                  onChange={(e) =>
-                    setDraft((prev) => ({ ...prev, prompt_image_url: e.target.value }))
-                  }
-                />
+              <div className="flex items-center gap-1.5">
                 <Button
                   type="button"
-                  variant="outline"
                   size="sm"
-                  asChild
-                  disabled={uploadingImage}
+                  variant={showLivePreview ? "default" : "outline"}
+                  onClick={() => setShowLivePreview((v) => !v)}
+                  className="h-8 gap-1 text-xs"
                 >
-                  <label className="cursor-pointer">
-                    {uploadingImage ? (
-                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <ImagePlus className="size-4" aria-hidden="true" />
-                    )}
-                    <span>{vi ? "Tải ảnh" : "Upload"}</span>
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,image/gif"
-                      className="sr-only"
-                      onChange={(e) => void handleImageUpload(e)}
-                    />
-                  </label>
+                  <Eye className="size-3.5" aria-hidden="true" />
+                  {showLivePreview
+                    ? vi
+                      ? "Quay lại sửa"
+                      : "Back to Edit"
+                    : vi
+                      ? "Xem trước"
+                      : "Preview"}
                 </Button>
+                {draft.id && (
+                  <QuestionReportDialog
+                    questionId={draft.id}
+                    studySetId={setId}
+                    locale={locale}
+                  />
+                )}
               </div>
             </div>
+          </DialogHeader>
 
-            {/* Choice Options (2-6) */}
-            {isChoiceDraft ? (
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <Label>
-                    {vi
-                      ? "Các phương án (bấm nút chữ cái để chọn đáp án đúng)"
-                      : "Options (toggle correct answer)"}
-                  </Label>
-                  {draft.options.length < 6 && draft.question_type !== "true_false" && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        setDraft((prev) => ({
-                          ...prev,
-                          options: [
-                            ...prev.options,
-                            {
-                              localKey: `opt-${Date.now()}-${prev.options.length}`,
-                              content: "",
-                              is_correct: false,
-                            },
-                          ],
-                        }))
-                      }
-                    >
-                      <Plus className="size-3.5" aria-hidden="true" />
-                      <span>{vi ? "Thêm phương án" : "Add option"}</span>
-                    </Button>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  {draft.options.map((opt, idx) => {
-                    const letter = String.fromCharCode(65 + idx);
-                    return (
-                      <div key={opt.localKey} className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDraft((prev) => ({
-                              ...prev,
-                              options: prev.options.map((item, i) => {
-                                if (prev.question_type === "multiple_choice") {
-                                  return i === idx
-                                    ? { ...item, is_correct: !item.is_correct }
-                                    : item;
-                                }
-                                return { ...item, is_correct: i === idx };
-                              }),
-                            }));
-                          }}
-                          aria-pressed={opt.is_correct}
-                          aria-label={`${vi ? "Đánh dấu đáp án đúng" : "Mark correct"} ${letter}`}
-                          className={cn(
-                            "flex size-10 shrink-0 items-center justify-center rounded-lg border font-mono text-xs font-bold transition-colors",
-                            opt.is_correct
-                              ? "border-success bg-success text-success-foreground"
-                              : "border-border bg-secondary text-muted-foreground hover:text-foreground",
-                          )}
-                        >
-                          {opt.is_correct ? (
-                            <Check className="size-4" aria-hidden="true" />
-                          ) : (
-                            letter
-                          )}
-                        </button>
-                        <Input
-                          value={opt.content}
-                          placeholder={`${vi ? "Phương án" : "Option"} ${letter}`}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setDraft((prev) => ({
-                              ...prev,
-                              options: prev.options.map((item, i) =>
-                                i === idx ? { ...item, content: val } : item,
-                              ),
-                            }));
-                          }}
-                        />
-                        {draft.options.length > 2 && draft.question_type !== "true_false" && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label={`${t("common.delete")} ${letter}`}
-                            onClick={() =>
-                              setDraft((prev) => ({
-                                ...prev,
-                                options: prev.options.filter((_, i) => i !== idx),
-                              }))
-                            }
-                          >
-                            <Trash2 className="size-4" aria-hidden="true" />
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+          {showLivePreview ? (
+            <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">
+                  {getQuestionTypeLabel(draft.question_type, locale)}
+                </Badge>
+                <Badge variant="outline">{t(`difficulty.${draft.difficulty}`)}</Badge>
+                {draft.chapter && <Badge variant="outline">{draft.chapter}</Badge>}
               </div>
-            ) : (
-              /* Flashcard Back & Accepted Answers */
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="q-back-text">
-                    {vi ? "Mặt sau / Định nghĩa" : "Back / Definition"}
-                  </Label>
-                  <Textarea
-                    id="q-back-text"
-                    rows={3}
-                    value={draft.back_text}
-                    onChange={(e) =>
-                      setDraft((prev) => ({ ...prev, back_text: e.target.value }))
-                    }
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label>
-                      {vi
-                        ? "Đáp án chấp nhận cho chế độ Gõ (Write)"
-                        : "Accepted answers for Write mode"}
-                    </Label>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        setDraft((prev) => ({
-                          ...prev,
-                          accepted_answers: [
-                            ...prev.accepted_answers,
-                            {
-                              localKey: `ans-${Date.now()}`,
-                              answer_text: "",
-                              match_mode: "case_insensitive",
-                            },
-                          ],
-                        }))
-                      }
-                    >
-                      <Plus className="size-3.5" aria-hidden="true" />
-                      <span>{t("common.add")}</span>
-                    </Button>
-                  </div>
-
-                  {draft.accepted_answers.map((ans, idx) => (
+              <RichContentRenderer
+                richDoc={draft.prompt_rich}
+                plainText={draft.prompt}
+                className="text-base font-medium"
+              />
+              {draft.prompt_image_url && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={draft.prompt_image_url}
+                  alt={vi ? "Ảnh câu hỏi" : "Question image"}
+                  className="max-h-64 rounded-lg border border-border object-contain"
+                />
+              )}
+              {isChoiceCapableDraft(draft) && (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {draft.options.map((o, idx) => (
                     <div
-                      key={ans.localKey}
-                      className="flex flex-col gap-2 sm:flex-row sm:items-center"
+                      key={o.localKey}
+                      className={`rounded-lg border p-2.5 text-sm ${
+                        o.is_correct
+                          ? "border-success/60 bg-success-subtle"
+                          : "border-border bg-card"
+                      }`}
                     >
-                      <Input
-                        value={ans.answer_text}
-                        placeholder={vi ? "Đáp án chấp nhận..." : "Accepted answer..."}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setDraft((prev) => ({
-                            ...prev,
-                            accepted_answers: prev.accepted_answers.map((item, i) =>
-                              i === idx ? { ...item, answer_text: val } : item,
-                            ),
-                          }));
-                        }}
-                      />
-                      <Select
-                        value={ans.match_mode}
-                        onValueChange={(v) =>
-                          setDraft((prev) => ({
-                            ...prev,
-                            accepted_answers: prev.accepted_answers.map((item, i) =>
-                              i === idx
-                                ? { ...item, match_mode: v as AnswerMatchMode }
-                                : item,
-                            ),
-                          }))
-                        }
-                      >
-                        <SelectTrigger className="w-full sm:w-44">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="case_insensitive">
-                            {vi ? "Không phân biệt hoa thường" : "Case insensitive"}
-                          </SelectItem>
-                          <SelectItem value="ignore_diacritics">
-                            {vi ? "Bỏ qua dấu tiếng Việt" : "Ignore diacritics"}
-                          </SelectItem>
-                          <SelectItem value="exact">
-                            {vi ? "Chính xác tuyệt đối" : "Exact match"}
-                          </SelectItem>
-                          <SelectItem value="numeric">
-                            {vi ? "So sánh số học" : "Numeric"}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                      {draft.accepted_answers.length > 1 && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`${t("common.delete")} ${idx + 1}`}
-                          onClick={() =>
-                            setDraft((prev) => ({
-                              ...prev,
-                              accepted_answers: prev.accepted_answers.filter(
-                                (_, i) => i !== idx,
-                              ),
-                            }))
-                          }
-                        >
-                          <Trash2 className="size-4" aria-hidden="true" />
-                        </Button>
+                      <div className="font-medium">
+                        {String.fromCharCode(65 + idx)}.{" "}
+                        <RichContentRenderer
+                          richDoc={o.content_rich}
+                          plainText={o.content}
+                          inline
+                          className="inline"
+                        />
+                      </div>
+                      {o.image_url && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={o.image_url}
+                          alt={`Option ${String.fromCharCode(65 + idx)}`}
+                          className="mt-1.5 max-h-28 rounded border border-border object-contain"
+                        />
                       )}
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <Label htmlFor="q-explanation">
-                {t("study.explanation")} ({vi ? "tùy chọn" : "optional"})
-              </Label>
-              <Textarea
-                id="q-explanation"
-                rows={2}
-                value={draft.explanation}
-                onChange={(e) =>
-                  setDraft((prev) => ({ ...prev, explanation: e.target.value }))
-                }
-              />
+              )}
+              {draft.explanation && (
+                <div className="rounded-lg border border-border bg-card p-3 text-sm">
+                  <div className="mb-1 text-xs font-semibold text-muted-foreground">
+                    {t("study.explanation")}
+                  </div>
+                  <RichContentRenderer
+                    richDoc={draft.explanation_rich}
+                    plainText={draft.explanation}
+                  />
+                </div>
+              )}
             </div>
+          ) : (
+            <form onSubmit={handleSaveDraft} className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-type">{vi ? "Dạng câu hỏi" : "Question type"}</Label>
+                  <Select
+                    value={draft.question_type}
+                    onValueChange={(val) => {
+                      const nextType = val as QuestionType;
+                      setDraft((prev) => {
+                        const nextPayload =
+                          prev.type_payload?.type === nextType
+                            ? prev.type_payload
+                            : createDefaultPayloadForType(nextType);
 
-            <div className="grid gap-3 sm:grid-cols-2">
+                        if (nextType === "true_false") {
+                          return {
+                            ...prev,
+                            question_type: nextType,
+                            type_payload: null,
+                            options: [
+                              {
+                                id: prev.options[0]?.id,
+                                localKey: prev.options[0]?.localKey ?? "tf-0",
+                                content: prev.options[0]?.content || (vi ? "Đúng" : "True"),
+                                is_correct: true,
+                              },
+                              {
+                                id: prev.options[1]?.id,
+                                localKey: prev.options[1]?.localKey ?? "tf-1",
+                                content: prev.options[1]?.content || (vi ? "Sai" : "False"),
+                                is_correct: false,
+                              },
+                            ],
+                          };
+                        }
+                        if (nextType === "single_choice") {
+                          const firstCorrectIdx = prev.options.findIndex((o) => o.is_correct);
+                          const keepIdx = firstCorrectIdx >= 0 ? firstCorrectIdx : 0;
+                          return {
+                            ...prev,
+                            question_type: nextType,
+                            type_payload: null,
+                            options: prev.options.map((o, idx) => ({
+                              ...o,
+                              is_correct: idx === keepIdx,
+                            })),
+                          };
+                        }
+                        return {
+                          ...prev,
+                          question_type: nextType,
+                          type_payload: nextPayload,
+                        };
+                      });
+                    }}
+                  >
+                    <SelectTrigger id="q-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {V3_QUESTION_TYPES.map((qType) => (
+                        <SelectItem key={qType} value={qType}>
+                          {getQuestionTypeLabel(qType, locale)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-chapter">{vi ? "Chương / Phần" : "Chapter"}</Label>
+                  <Input
+                    id="q-chapter"
+                    placeholder={vi ? "VD: Chương 1" : "e.g., Chapter 1"}
+                    value={draft.chapter}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, chapter: e.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-difficulty">{vi ? "Độ khó" : "Difficulty"}</Label>
+                  <Select
+                    value={draft.difficulty}
+                    onValueChange={(v) =>
+                      setDraft((prev) => ({ ...prev, difficulty: v as DifficultyLevel }))
+                    }
+                  >
+                    <SelectTrigger id="q-difficulty">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="easy">{t("difficulty.easy")}</SelectItem>
+                      <SelectItem value="medium">{t("difficulty.medium")}</SelectItem>
+                      <SelectItem value="hard">{t("difficulty.hard")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
               <div className="space-y-1.5">
-                <Label htmlFor="q-tags">
-                  {vi ? "Thẻ (phân tách bằng dấu phẩy)" : "Tags (comma separated)"}
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="q-prompt">
+                    {draft.question_type === "flashcard"
+                      ? vi
+                        ? "Mặt trước / Thuật ngữ"
+                        : "Front / Term"
+                      : vi
+                        ? "Nội dung câu hỏi"
+                        : "Question stem"}{" "}
+                    <span className="text-destructive">*</span>
+                  </Label>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setUseRichPrompt((v) => !v)}
+                  >
+                    {useRichPrompt
+                      ? vi
+                        ? "Chuyển về văn bản thường"
+                        : "Switch to plain text"
+                      : vi
+                        ? "Mở trình soạn thảo Rich Text & LaTeX"
+                        : "Open Rich Text & LaTeX Editor"}
+                  </Button>
+                </div>
+
+                {useRichPrompt ? (
+                  <RichTextEditor
+                    locale={locale}
+                    value={draft.prompt_rich}
+                    fallbackPlainText={draft.prompt}
+                    onChange={(doc, plain) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        prompt_rich: doc,
+                        prompt: plain,
+                      }))
+                    }
+                  />
+                ) : (
+                  <Textarea
+                    id="q-prompt"
+                    rows={3}
+                    value={draft.prompt}
+                    placeholder={
+                      vi
+                        ? "Nhập nội dung câu hỏi (hỗ trợ công thức $...$ hoặc $$...$$)"
+                        : "Enter question stem (supports $...$ or $$...$$ LaTeX)"
+                    }
+                    onChange={(e) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        prompt: e.target.value,
+                        prompt_rich: null,
+                      }))
+                    }
+                  />
+                )}
+              </div>
+
+              {/* Optional Image Upload via POST /api/uploads/image */}
+              <div className="space-y-1.5">
+                <Label htmlFor="q-image-url">
+                  {vi
+                    ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)"
+                    : "Optional image (PNG/JPG/WebP ≤ 5MB)"}
                 </Label>
-                <Input
-                  id="q-tags"
-                  placeholder={vi ? "ôn thi, giữa kỳ" : "midterm, key-concept"}
-                  value={draft.tagsText}
-                  onChange={(e) =>
-                    setDraft((prev) => ({ ...prev, tagsText: e.target.value }))
-                  }
-                />
+                <div className="flex gap-2">
+                  <Input
+                    id="q-image-url"
+                    type="url"
+                    placeholder="https://... hoặc /api/uploads/signed-url?path=..."
+                    value={draft.prompt_image_url}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, prompt_image_url: e.target.value }))
+                    }
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    asChild
+                    disabled={uploadingImage}
+                  >
+                    <label className="cursor-pointer">
+                      {uploadingImage ? (
+                        <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <ImagePlus className="size-4" aria-hidden="true" />
+                      )}
+                      <span>{vi ? "Tải ảnh" : "Upload"}</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        className="sr-only"
+                        onChange={(e) => void handleImageUpload(e)}
+                      />
+                    </label>
+                  </Button>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-hint">{vi ? "Gợi ý (tùy chọn)" : "Hint (optional)"}</Label>
-                <Input
-                  id="q-hint"
-                  value={draft.hint}
-                  onChange={(e) =>
-                    setDraft((prev) => ({ ...prev, hint: e.target.value }))
-                  }
-                />
-              </div>
-            </div>
 
-            <DialogFooter>
+              {/* Structured V3 Type-Specific Fields (All 13 Types) */}
+              <V3QuestionTypeFields
+                setId={setId}
+                locale={locale}
+                draft={draft}
+                setDraft={setDraft}
+                passages={passagesQuery.data ?? []}
+                diagrams={diagramsQuery.data ?? []}
+              />
+
+              <div className="space-y-1.5">
+                <Label htmlFor="q-explanation">
+                  {t("study.explanation")} ({vi ? "tùy chọn, hỗ trợ $LaTeX$" : "optional, supports $LaTeX$"})
+                </Label>
+                <Textarea
+                  id="q-explanation"
+                  rows={2}
+                  value={draft.explanation}
+                  onChange={(e) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      explanation: e.target.value,
+                      explanation_rich: null,
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-tags">
+                    {vi ? "Thẻ (phân tách bằng dấu phẩy)" : "Tags (comma separated)"}
+                  </Label>
+                  <Input
+                    id="q-tags"
+                    placeholder={vi ? "ôn thi, giữa kỳ" : "midterm, key-concept"}
+                    value={draft.tagsText}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, tagsText: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-hint">{vi ? "Gợi ý (tùy chọn)" : "Hint (optional)"}</Label>
+                  <Input
+                    id="q-hint"
+                    value={draft.hint}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, hint: e.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              {draft.id && (
+                <QuestionNotePanel
+                  questionId={draft.id}
+                  studySetId={setId}
+                  locale={locale}
+                  compact
+                />
+              )}
+
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setEditorOpen(false)}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button type="submit" disabled={saveQuestionMutation.isPending}>
+                  {saveQuestionMutation.isPending && (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  )}
+                  <span>{t("common.save")}</span>
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Copy / Move Selected Questions to Another Study Set */}
+      <Dialog open={transferDialogOpen} onOpenChange={setTransferDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {vi
+                ? `Sao chép / Di chuyển ${selectedIds.size} câu hỏi`
+                : `Copy / Move ${selectedIds.size} selected questions`}
+            </DialogTitle>
+            <DialogDescription>
+              {vi
+                ? "Chọn học phần đích bạn có quyền chỉnh sửa. Lịch sử bài thi trước đây luôn được bảo toàn."
+                : "Choose an authorized destination study set. Past exam attempt snapshots are always preserved."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex gap-2">
               <Button
                 type="button"
-                variant="outline"
-                onClick={() => setEditorOpen(false)}
+                size="sm"
+                variant={transferMode === "copy" ? "default" : "outline"}
+                onClick={() => setTransferMode("copy")}
               >
-                {t("common.cancel")}
+                {vi ? "Sao chép (Giữ bản gốc)" : "Copy (Keep originals)"}
               </Button>
-              <Button type="submit" disabled={saveQuestionMutation.isPending}>
-                {saveQuestionMutation.isPending && (
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                )}
-                <span>{t("common.save")}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant={transferMode === "move" ? "default" : "outline"}
+                onClick={() => setTransferMode("move")}
+              >
+                {vi ? "Di chuyển (Xóa ở bộ này)" : "Move (Remove from this set)"}
               </Button>
-            </DialogFooter>
-          </form>
+            </div>
+            <div className="space-y-1.5">
+              <Label>{vi ? "Học phần đích" : "Destination Study Set"}</Label>
+              <Select
+                value={transferTargetSetId}
+                onValueChange={setTransferTargetSetId}
+              >
+                <SelectTrigger>
+                  <SelectValue
+                    placeholder={vi ? "Chọn học phần..." : "Select study set..."}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {(targetSetsQuery.data ?? []).map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setTransferDialogOpen(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={!transferTargetSetId || bulkTransferMutation.isPending}
+              onClick={() => bulkTransferMutation.mutate()}
+            >
+              {bulkTransferMutation.isPending && (
+                <Loader2 className="mr-1.5 size-4 animate-spin" />
+              )}
+              {transferMode === "move"
+                ? vi
+                  ? "Xác nhận di chuyển"
+                  : "Confirm Move"
+                : vi
+                  ? "Xác nhận sao chép"
+                  : "Confirm Copy"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Safe Duplicate Finder Dialog (Exact Fingerprint Only — Never Auto-Merges Distinct Options/Media) */}
+      <Dialog open={duplicateFinderOpen} onOpenChange={setDuplicateFinderOpen}>
+        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Copy className="size-4 text-primary" aria-hidden="true" />
+              {vi ? "Tìm câu hỏi trùng lặp an toàn" : "Safe Duplicate Finder"}
+            </DialogTitle>
+            <DialogDescription>
+              {vi
+                ? "Chỉ đánh dấu trùng khi nội dung câu hỏi, danh sách phương án, đáp án đúng và hình ảnh khớp 100%. Không bao giờ gộp nhầm câu cùng tiêu đề nhưng khác đáp án."
+                : "Flags duplicates ONLY when prompt, sorted options, correct answers, and media match 100%. Never merges similar prompts with different answers or images."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {duplicateGroups.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              {vi
+                ? "Không phát hiện câu hỏi trùng lặp chính xác nào trong trang hiện tại."
+                : "No exact duplicate questions detected on the current page."}
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {duplicateGroups.map((group, gIdx) => (
+                <div
+                  key={group[0].id}
+                  className="space-y-2 rounded-lg border border-border bg-muted/20 p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-foreground">
+                      {vi
+                        ? `Nhóm trùng #${gIdx + 1} (${group.length} bản giống nhau)`
+                        : `Duplicate group #${gIdx + 1} (${group.length} identical copies)`}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          // Select all extra copies after keeping the first one
+                          group.slice(1).forEach((dup) => next.add(dup.id));
+                          return next;
+                        });
+                        setDuplicateFinderOpen(false);
+                        toast.info(
+                          vi
+                            ? `Đã chọn ${group.length - 1} bản trùng để bạn kiểm tra và xóa trong thanh thao tác hàng loạt.`
+                            : `Selected ${group.length - 1} extra copy(s) for review in the bulk action bar.`,
+                        );
+                      }}
+                    >
+                      {vi ? `Chọn ${group.length - 1} bản thừa` : `Select ${group.length - 1} extra`}
+                    </Button>
+                  </div>
+                  <p className="line-clamp-2 text-sm text-foreground">{group[0].prompt}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDuplicateFinderOpen(false)}
+            >
+              {vi ? "Đóng" : "Close"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

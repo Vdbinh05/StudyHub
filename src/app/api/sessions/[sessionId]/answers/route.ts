@@ -10,6 +10,8 @@ import { normalizeAnswerText } from "@/lib/security/sanitize";
 import { upsertQuestionProgress } from "@/lib/supabase/progress-helper";
 import { uuidSchema } from "@/lib/validation/common";
 import { recordSessionAnswerSchema } from "@/lib/validation/learning";
+import type { Json } from "@/types/database";
+import type { StudyMode } from "@/types/domain";
 
 interface RouteContext {
   params: Promise<{ sessionId: string }>;
@@ -67,11 +69,19 @@ export async function POST(
     const isChoiceQuestion =
       question.question_type === "single_choice" ||
       question.question_type === "multiple_choice" ||
-      question.question_type === "true_false";
+      question.question_type === "true_false" ||
+      question.question_type === "image_choice";
+
+    const effectiveSelectedIds =
+      input.selected_option_ids.length > 0
+        ? input.selected_option_ids
+        : input.structured_response?.kind === "options"
+          ? input.structured_response.selected_option_ids
+          : [];
 
     let isCorrect: boolean;
 
-    if (isChoiceQuestion && input.selected_option_ids.length > 0) {
+    if (isChoiceQuestion && effectiveSelectedIds.length > 0) {
       const { data: options, error: optErr } = await supabase
         .from("question_options")
         .select("id, is_correct")
@@ -83,7 +93,7 @@ export async function POST(
         .filter((o) => o.is_correct)
         .map((o) => o.id)
         .sort();
-      const selectedIds = Array.from(new Set(input.selected_option_ids)).sort();
+      const selectedIds = Array.from(new Set(effectiveSelectedIds)).sort();
 
       isCorrect =
         correctIds.length > 0 &&
@@ -134,8 +144,11 @@ export async function POST(
         user_id: user.id,
         study_set_id: question.study_set_id,
         question_id: question.id,
-        selected_option_ids: input.selected_option_ids,
+        selected_option_ids: effectiveSelectedIds,
         typed_answer: input.typed_answer ?? null,
+        structured_response: (input.structured_response ?? null) as Json | null,
+        confidence: input.confidence ?? null,
+        hint_used: input.hint_used ?? false,
         is_correct: isCorrect,
         self_rating: input.self_rating ?? null,
         response_time_ms: input.response_time_ms ?? null,
@@ -181,6 +194,10 @@ export async function POST(
         questionId: question.id,
         isCorrect,
         selfRating: input.self_rating ?? null,
+        confidence: input.confidence ?? null,
+        hintUsed: input.hint_used ?? false,
+        mode: session.mode as StudyMode,
+        responseTimeMs: input.response_time_ms ?? null,
       });
     }
 

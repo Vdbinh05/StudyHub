@@ -4,6 +4,7 @@ import type {
   AnswerRuleMode,
   ImportValidationIssue,
   OptionFormattingMeta,
+  ParsedMediaAttachment,
   ParsedOption,
   ParsedQuestion,
 } from "@/types/import";
@@ -41,6 +42,8 @@ import {
 
 type XmlNode = Record<string, unknown>;
 
+const MAX_PREVIEW_DATA_URL_TOTAL_BYTES = 10 * 1024 * 1024; // 10 MB total raster preview cap
+
 export interface ExtractedDocxMedia {
   rId: string;
   fileName: string;
@@ -49,6 +52,7 @@ export interface ExtractedDocxMedia {
   byteLength: number;
   bytes: Uint8Array;
   previewPath: string;
+  dataUrl?: string;
 }
 
 export interface DocxParserConfig {
@@ -56,11 +60,16 @@ export interface DocxParserConfig {
   defaultChapter?: string;
   defaultTags?: string[];
   /**
-   * When true (default in parseImportInput / /api/import/parse where raw media bytes
-   * are not uploaded to Storage), strips temporary `/docx-media/*` URLs to `null` and
-   * emits a non-fatal `EMBEDDED_IMAGE_SKIPPED` warning instead of saving broken 404 URLs.
+   * When true (legacy mode without media preview), strips temporary `/docx-media/*` URLs
+   * to `null` and emits a non-fatal `EMBEDDED_IMAGE_SKIPPED` warning instead of saving broken 404 URLs.
    */
   stripUnuploadedMedia?: boolean;
+  /**
+   * V3 Multimedia mode: preserves safe raster preview `dataUrl` on `promptMedia` / `option.media`
+   * so Import Preview can display, remove, and reassign images before uploading them to Storage
+   * during `/api/import/commit`. Keeps raw `/docx-media/*` out of `promptImageUrl`/`imageUrl`.
+   */
+  preservePreviewDataUrls?: boolean;
 }
 
 export interface DocxParseOutput {
@@ -83,10 +92,16 @@ interface DocxRun {
   format: RunFormat;
 }
 
+interface DocxImageRef {
+  rId: string;
+  anchorType: "inline" | "floating";
+  alt?: string;
+}
+
 interface DocxParagraph {
   text: string;
   runs: DocxRun[];
-  mediaRefs: string[];
+  mediaRefs: ParsedMediaAttachment[];
   paragraphShading: string | null;
   numId: string | null;
   ilvl: number;
@@ -425,25 +440,82 @@ function parseRelationshipsXml(xml: string | null): Map<string, string> {
   return rels;
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  }
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 /**
  * Recursively find embedded image relationship IDs (`<a:blip r:embed="rIdX"/>`
- * or `<v:imagedata r:id="rIdX"/>`) inside a run or drawing subtree.
+ * or `<v:imagedata r:id="rIdX"/>`) while distinguishing inline (`wp:inline`)
+ * vs floating (`wp:anchor` / absolute-positioned VML) placements and capturing alt text.
  */
-function extractImageRIds(nodes: XmlNode[], acc: string[]): void {
+function extractImageRefs(
+  nodes: XmlNode[],
+  acc: DocxImageRef[],
+  anchorType: "inline" | "floating" = "inline",
+  altHolder: { alt?: string } = {},
+): void {
   for (const node of nodes) {
     const tag = getTagName(node);
     if (!tag) continue;
     const attrs = getAttrs(node);
-    if (tag === "a:blip") {
+
+    let nextAnchor = anchorType;
+    let nextAltHolder = altHolder;
+
+    if (tag === "wp:anchor") {
+      nextAnchor = "floating";
+      nextAltHolder = {};
+    } else if (tag === "wp:inline") {
+      nextAnchor = "inline";
+      nextAltHolder = {};
+    } else if (tag === "v:shape") {
+      const style = (attrs["@_style"] ?? "").toLowerCase();
+      if (style.includes("position:absolute")) {
+        nextAnchor = "floating";
+      }
+      if (attrs["@_alt"]) {
+        nextAltHolder = { alt: attrs["@_alt"].trim().slice(0, 300) };
+      }
+    } else if (tag === "wp:docPr") {
+      const descr = (attrs["@_descr"] ?? "").trim();
+      const title = (attrs["@_title"] ?? "").trim();
+      const name = (attrs["@_name"] ?? "").trim();
+      const candidate = descr || title || name;
+      if (candidate) {
+        altHolder.alt = candidate.slice(0, 300);
+      }
+    } else if (tag === "a:blip") {
       const embed = attrs["@_r:embed"] ?? attrs["@_r:link"];
-      if (embed) acc.push(embed);
+      if (embed) {
+        acc.push({
+          rId: embed,
+          anchorType: nextAnchor,
+          alt: nextAltHolder.alt,
+        });
+      }
     } else if (tag === "v:imagedata") {
       const rid = attrs["@_r:id"];
-      if (rid) acc.push(rid);
+      if (rid) {
+        acc.push({
+          rId: rid,
+          anchorType: nextAnchor,
+          alt: nextAltHolder.alt ?? (attrs["@_o:title"]?.trim() || undefined),
+        });
+      }
     }
+
     const children = getChildren(node, tag);
     if (children.length > 0) {
-      extractImageRIds(children, acc);
+      extractImageRefs(children, acc, nextAnchor, nextAltHolder);
     }
   }
 }
@@ -463,7 +535,7 @@ function extractParagraphRuns(
   paragraphBaseFmt: RunFormat,
   styles: Map<string, StyleDef>,
   runs: DocxRun[],
-  rIds: string[],
+  imageRefs: DocxImageRef[],
 ): void {
   for (const node of nodes) {
     const tag = getTagName(node);
@@ -498,7 +570,7 @@ function extractParagraphRuns(
         } else if (rcTag === "w:br" || rcTag === "w:cr") {
           runText += "\n";
         } else if (rcTag === "w:drawing" || rcTag === "w:pict") {
-          extractImageRIds(getChildren(rc, rcTag), rIds);
+          extractImageRefs(getChildren(rc, rcTag), imageRefs);
         }
       }
 
@@ -520,7 +592,7 @@ function extractParagraphRuns(
         paragraphBaseFmt,
         styles,
         runs,
-        rIds,
+        imageRefs,
       );
     }
   }
@@ -532,7 +604,7 @@ function parseParagraphNode(
   styles: Map<string, StyleDef>,
   numbering: NumberingCatalog,
   numCounters: Map<string, number>,
-  rIdToPreviewPath: Map<string, string>,
+  rIdToMedia: Map<string, ExtractedDocxMedia>,
 ): DocxParagraph {
   const pChildren = getChildren(pNode, "w:p");
   const pPrNode = findFirstChild(pChildren, "w:pPr");
@@ -567,8 +639,8 @@ function parseParagraphNode(
   const finalPShading = pShading ?? resolvedStyle.pShading;
 
   const runs: DocxRun[] = [];
-  const rIds: string[] = [];
-  extractParagraphRuns(pChildren, paragraphBaseFmt, styles, runs, rIds);
+  const imageRefs: DocxImageRef[] = [];
+  extractParagraphRuns(pChildren, paragraphBaseFmt, styles, runs, imageRefs);
 
   // Resolve auto-numbering prefix if present and literal text doesn't already have it
   let rawText = runs.map((r) => r.text).join("");
@@ -606,9 +678,24 @@ function parseParagraphNode(
     }
   }
 
-  const mediaRefs = rIds
-    .map((id) => rIdToPreviewPath.get(id))
-    .filter((p): p is string => Boolean(p));
+  const mediaRefs: ParsedMediaAttachment[] = [];
+  for (const ref of imageRefs) {
+    const extracted = rIdToMedia.get(ref.rId);
+    if (!extracted) continue;
+    mediaRefs.push({
+      id: generateStableId(),
+      rId: extracted.rId,
+      fileName: extracted.fileName,
+      mimeType: extracted.mimeType,
+      ext: extracted.ext,
+      byteLength: extracted.byteLength,
+      previewPath: extracted.previewPath,
+      dataUrl: extracted.dataUrl,
+      anchorType: ref.anchorType,
+      ambiguous: ref.anchorType === "floating" ? true : undefined,
+      alt: ref.alt,
+    });
+  }
 
   return {
     text: normalizeText(rawText),
@@ -727,6 +814,7 @@ interface DraftDocxOption {
   runs: DocxRun[];
   paragraphShading: string | null;
   imageUrl: string | null;
+  media: ParsedMediaAttachment[];
 }
 
 interface DraftDocxQuestion {
@@ -735,6 +823,7 @@ interface DraftDocxQuestion {
   localQuestionNumber: number | null;
   promptLines: string[];
   promptImageUrl: string | null;
+  promptMedia: ParsedMediaAttachment[];
   options: DraftDocxOption[];
   inlineAnswerLetters: string[];
   explanationLines: string[];
@@ -928,15 +1017,23 @@ function finalizeDocxQuestion(
   }
 
   const skippedMediaFiles: string[] = [];
+  const preservePreviewDataUrls = Boolean(config.preservePreviewDataUrls);
+  const stripLegacy = Boolean(config.stripUnuploadedMedia) && !preservePreviewDataUrls;
+
   const resolveOutputMediaUrl = (url: string | null): string | null => {
     if (!url) return null;
-    if (config.stripUnuploadedMedia && url.startsWith("/docx-media/")) {
+    if (stripLegacy && url.startsWith("/docx-media/")) {
       skippedMediaFiles.push(url.replace(/^\/docx-media\//, ""));
+      return null;
+    }
+    if (preservePreviewDataUrls && url.startsWith("/docx-media/")) {
+      // Keep raw `/docx-media/*` out of legacy DB URL column; preview & upload use `promptMedia`/`opt.media`
       return null;
     }
     return url;
   };
 
+  const promptMedia: ParsedMediaAttachment[] = stripLegacy ? [] : draft.promptMedia;
   const promptImageUrl = resolveOutputMediaUrl(draft.promptImageUrl);
 
   const options: ParsedOption[] = draft.options.map((opt, idx) => {
@@ -950,12 +1047,14 @@ function finalizeDocxQuestion(
         }
       }
     }
+    const optMedia: ParsedMediaAttachment[] = stripLegacy ? [] : opt.media;
     return {
       id: generateStableId(),
       label,
       content: opt.contentLines.join("\n").trim(),
       isCorrect,
       imageUrl: resolveOutputMediaUrl(opt.imageUrl),
+      media: optMedia.length > 0 ? optMedia : undefined,
       detectedBy: optSources,
       formatting: analyses[idx]?.meta,
     };
@@ -972,8 +1071,42 @@ function finalizeDocxQuestion(
     });
   }
 
+  // Flag floating (`wp:anchor`) images transparently so the user verifies placement before commit
+  const floatingAttachments = [
+    ...promptMedia.filter((m) => m.anchorType === "floating"),
+    ...options.flatMap((o) => (o.media ?? []).filter((m) => m.anchorType === "floating")),
+  ];
+  const ambiguousMedia = floatingAttachments.length > 0;
+  if (ambiguousMedia) {
+    const names = Array.from(new Set(floatingAttachments.map((m) => m.fileName)));
+    issues.push({
+      id: generateStableId(),
+      code: "AMBIGUOUS_MEDIA_MAPPING",
+      severity: "warning",
+      questionIndex: globalIndex,
+      message: `Floating Word image (${names.join(", ")}) may not be strictly anchored to this question. Review and reassign if needed before importing.`,
+    });
+  }
+
   const correctCount = options.filter((o) => o.isCorrect).length;
-  const questionType = correctCount > 1 ? "multiple_choice" : "single_choice";
+  const optionsWithMediaCount = options.filter(
+    (o) => Boolean(o.imageUrl) || (o.media !== undefined && o.media.length > 0),
+  ).length;
+  const imageOnlyOptionsCount = options.filter(
+    (o) =>
+      o.content.trim().length === 0 &&
+      (Boolean(o.imageUrl) || (o.media !== undefined && o.media.length > 0)),
+  ).length;
+
+  let questionType: ParsedQuestion["questionType"] =
+    correctCount > 1 ? "multiple_choice" : "single_choice";
+  if (
+    options.length >= 2 &&
+    optionsWithMediaCount >= 2 &&
+    (imageOnlyOptionsCount >= 2 || optionsWithMediaCount === options.length)
+  ) {
+    questionType = "image_choice";
+  }
 
   return {
     tempId: generateStableId(),
@@ -984,6 +1117,8 @@ function finalizeDocxQuestion(
     questionType,
     prompt,
     promptImageUrl,
+    promptMedia: promptMedia.length > 0 ? promptMedia : undefined,
+    ambiguousMedia: ambiguousMedia ? true : undefined,
     explanation:
       draft.explanationLines.length > 0
         ? draft.explanationLines.join("\n").trim()
@@ -1088,8 +1223,10 @@ export async function parseDocxBuffer(
 
   // Extract and validate safe raster embedded images from word/media/*
   const extractedMedia: ExtractedDocxMedia[] = [];
-  const rIdToPreviewPath = new Map<string, string>();
+  const rIdToMedia = new Map<string, ExtractedDocxMedia>();
   const globalIssues: ImportValidationIssue[] = [];
+  let previewDataUrlBytesUsed = 0;
+  let previewBudgetWarned = false;
 
   for (const [rId, target] of rels.entries()) {
     const normalizedTarget = target.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -1130,7 +1267,24 @@ export async function parseDocxBuffer(
 
     const safeFileName = sanitizeFileName(zipPath.split("/").pop() ?? `${rId}.${check.ext}`);
     const previewPath = `/docx-media/${safeFileName}`;
-    extractedMedia.push({
+    let dataUrl: string | undefined;
+    if (config.preservePreviewDataUrls) {
+      if (previewDataUrlBytesUsed + mediaBytes.byteLength <= MAX_PREVIEW_DATA_URL_TOTAL_BYTES) {
+        dataUrl = `data:${check.mime};base64,${bytesToBase64(mediaBytes)}`;
+        previewDataUrlBytesUsed += mediaBytes.byteLength;
+      } else if (!previewBudgetWarned) {
+        previewBudgetWarned = true;
+        globalIssues.push({
+          id: generateStableId(),
+          code: "MEDIA_PREVIEW_BUDGET_EXCEEDED",
+          severity: "warning",
+          message:
+            "Embedded images exceeded the 10 MB inline preview cap; remaining images can be uploaded manually in the Question Editor after import.",
+        });
+      }
+    }
+
+    const extractedItem: ExtractedDocxMedia = {
       rId,
       fileName: safeFileName,
       mimeType: check.mime,
@@ -1138,8 +1292,10 @@ export async function parseDocxBuffer(
       byteLength: mediaBytes.byteLength,
       bytes: mediaBytes,
       previewPath,
-    });
-    rIdToPreviewPath.set(rId, previewPath);
+      dataUrl,
+    };
+    extractedMedia.push(extractedItem);
+    rIdToMedia.set(rId, extractedItem);
   }
 
   // Parse word/document.xml preserving exact body order (paragraphs + tables)
@@ -1180,7 +1336,8 @@ export async function parseDocxBuffer(
 
   const flushCurrent = (): void => {
     if (!current) return;
-    const hasPrompt = current.promptLines.join("").trim().length > 0;
+    const hasPrompt =
+      current.promptLines.join("").trim().length > 0 || current.promptMedia.length > 0;
     const hasOptions = current.options.length > 0;
     if (hasPrompt || hasOptions) {
       questions.push(
@@ -1235,14 +1392,18 @@ export async function parseDocxBuffer(
       return;
     }
 
-    // Image-only paragraph attaches to active question prompt or last option
+    // Image-only paragraph attaches ALL embedded images to active question prompt or last option
     if (!trimmed && para.mediaRefs.length > 0) {
       if (current) {
         if (state === "options" && current.options.length > 0) {
           const lastOpt = current.options[current.options.length - 1];
-          if (!lastOpt.imageUrl) lastOpt.imageUrl = para.mediaRefs[0];
-        } else if (!current.promptImageUrl) {
-          current.promptImageUrl = para.mediaRefs[0];
+          lastOpt.media.push(...para.mediaRefs);
+          if (!lastOpt.imageUrl) lastOpt.imageUrl = para.mediaRefs[0].previewPath;
+        } else {
+          current.promptMedia.push(...para.mediaRefs);
+          if (!current.promptImageUrl) {
+            current.promptImageUrl = para.mediaRefs[0].previewPath;
+          }
         }
       }
       return;
@@ -1312,7 +1473,7 @@ export async function parseDocxBuffer(
       }
     }
 
-    // Option line
+    // Option line (supports both text options and image-only options like `A.` + <w:drawing>)
     const optMatch = matchOptionLine(trimmed);
     if (optMatch && current) {
       current.options.push({
@@ -1321,7 +1482,8 @@ export async function parseDocxBuffer(
         hasAsterisk: optMatch.hasAsterisk,
         runs: para.runs,
         paragraphShading: para.paragraphShading,
-        imageUrl: para.mediaRefs[0] ?? null,
+        imageUrl: para.mediaRefs[0]?.previewPath ?? null,
+        media: [...para.mediaRefs],
       });
       current.rawLines.push(para.text);
       state = "options";
@@ -1345,7 +1507,8 @@ export async function parseDocxBuffer(
           chapterIndex,
           localQuestionNumber: qHeader.localQuestionNumber,
           promptLines: qHeader.promptStart ? [qHeader.promptStart] : [],
-          promptImageUrl: para.mediaRefs[0] ?? null,
+          promptImageUrl: para.mediaRefs[0]?.previewPath ?? null,
+          promptMedia: [...para.mediaRefs],
           options: [],
           inlineAnswerLetters: [],
           explanationLines: [],
@@ -1365,7 +1528,8 @@ export async function parseDocxBuffer(
         chapterIndex,
         localQuestionNumber: null,
         promptLines: [trimmed],
-        promptImageUrl: para.mediaRefs[0] ?? null,
+        promptImageUrl: para.mediaRefs[0]?.previewPath ?? null,
+        promptMedia: [...para.mediaRefs],
         options: [],
         inlineAnswerLetters: [],
         explanationLines: [],
@@ -1379,8 +1543,11 @@ export async function parseDocxBuffer(
 
     if (state === "prompt") {
       current.promptLines.push(trimmed);
-      if (!current.promptImageUrl && para.mediaRefs[0]) {
-        current.promptImageUrl = para.mediaRefs[0];
+      if (para.mediaRefs.length > 0) {
+        current.promptMedia.push(...para.mediaRefs);
+        if (!current.promptImageUrl) {
+          current.promptImageUrl = para.mediaRefs[0].previewPath;
+        }
       }
       current.rawLines.push(para.text);
       sawBlankParagraph = false;
@@ -1395,7 +1562,8 @@ export async function parseDocxBuffer(
           chapterIndex,
           localQuestionNumber: null,
           promptLines: [trimmed],
-          promptImageUrl: para.mediaRefs[0] ?? null,
+          promptImageUrl: para.mediaRefs[0]?.previewPath ?? null,
+          promptMedia: [...para.mediaRefs],
           options: [],
           inlineAnswerLetters: [],
           explanationLines: [],
@@ -1419,7 +1587,8 @@ export async function parseDocxBuffer(
           chapterIndex,
           localQuestionNumber: null,
           promptLines: [trimmed],
-          promptImageUrl: para.mediaRefs[0] ?? null,
+          promptImageUrl: para.mediaRefs[0]?.previewPath ?? null,
+          promptMedia: [...para.mediaRefs],
           options: [],
           inlineAnswerLetters: [],
           explanationLines: [],
@@ -1443,7 +1612,8 @@ export async function parseDocxBuffer(
           chapterIndex,
           localQuestionNumber: null,
           promptLines: [trimmed],
-          promptImageUrl: para.mediaRefs[0] ?? null,
+          promptImageUrl: para.mediaRefs[0]?.previewPath ?? null,
+          promptMedia: [...para.mediaRefs],
           options: [],
           inlineAnswerLetters: [],
           explanationLines: [],
@@ -1455,8 +1625,11 @@ export async function parseDocxBuffer(
         const lastOpt = current.options[current.options.length - 1];
         lastOpt.contentLines.push(trimmed);
         lastOpt.runs = [...lastOpt.runs, ...para.runs];
-        if (!lastOpt.imageUrl && para.mediaRefs[0]) {
-          lastOpt.imageUrl = para.mediaRefs[0];
+        if (para.mediaRefs.length > 0) {
+          lastOpt.media.push(...para.mediaRefs);
+          if (!lastOpt.imageUrl) {
+            lastOpt.imageUrl = para.mediaRefs[0].previewPath;
+          }
         }
         current.rawLines.push(para.text);
       }
@@ -1483,7 +1656,7 @@ export async function parseDocxBuffer(
         styles,
         numbering,
         numCounters,
-        rIdToPreviewPath,
+        rIdToMedia,
       );
       processParagraph(para);
     } else if (tag === "w:tbl") {
@@ -1502,7 +1675,7 @@ export async function parseDocxBuffer(
                 styles,
                 numbering,
                 numCounters,
-                rIdToPreviewPath,
+                rIdToMedia,
               ),
           );
           rowParas.push(cellParas);
@@ -1513,7 +1686,10 @@ export async function parseDocxBuffer(
               .join("\n"),
           );
         }
-        if (rowTexts.some((t) => t.length > 0)) {
+        const rowHasMedia = rowParas.some((cell) =>
+          cell.some((p) => p.mediaRefs.length > 0),
+        );
+        if (rowTexts.some((t) => t.length > 0) || rowHasMedia) {
           tableRowsParas.push(rowParas);
           tableTextRows.push(rowTexts);
         }
@@ -1546,17 +1722,73 @@ export async function parseDocxBuffer(
       // Case 2: Structured Q&A table (e.g. header row: Question | Option A | Option B | ... | Answer)
       if (isStructuredQaTable(tableTextRows)) {
         flushCurrent();
+        const tableHeaders = tableTextRows[0];
+        const mapping = suggestColumnMapping(tableHeaders);
         const mapped = mapTabularRowsToQuestions({
-          headers: tableTextRows[0],
+          headers: tableHeaders,
           rows: tableTextRows.slice(1),
+          mapping,
           defaultChapter: currentChapter ?? config.defaultChapter,
           defaultTags: config.defaultTags,
         });
-        for (const q of mapped.questions) {
+
+        const colIdxOf = (headerName: string | null | undefined): number =>
+          headerName ? tableHeaders.indexOf(headerName) : -1;
+        const promptColIdx = colIdxOf(mapping.prompt);
+        const optColIndices = [
+          { label: "A", idx: colIdxOf(mapping.optionA) },
+          { label: "B", idx: colIdxOf(mapping.optionB) },
+          { label: "C", idx: colIdxOf(mapping.optionC) },
+          { label: "D", idx: colIdxOf(mapping.optionD) },
+          { label: "E", idx: colIdxOf(mapping.optionE) },
+          { label: "F", idx: colIdxOf(mapping.optionF) },
+        ];
+        const stripLegacyTbl =
+          Boolean(config.stripUnuploadedMedia) && !Boolean(config.preservePreviewDataUrls);
+
+        mapped.questions.forEach((q, rowOffset) => {
+          const rowCells = tableRowsParas[rowOffset + 1];
+          if (rowCells && !stripLegacyTbl) {
+            if (promptColIdx >= 0 && rowCells[promptColIdx]) {
+              const cellMedia = rowCells[promptColIdx].flatMap((p) => p.mediaRefs);
+              if (cellMedia.length > 0) {
+                q.promptMedia = [...(q.promptMedia ?? []), ...cellMedia];
+                if (!config.preservePreviewDataUrls && !q.promptImageUrl) {
+                  q.promptImageUrl = cellMedia[0].previewPath;
+                }
+                if (cellMedia.some((m) => m.anchorType === "floating")) {
+                  q.ambiguousMedia = true;
+                }
+              }
+            }
+            for (const { label, idx: cIdx } of optColIndices) {
+              if (cIdx < 0 || !rowCells[cIdx]) continue;
+              const cellMedia = rowCells[cIdx].flatMap((p) => p.mediaRefs);
+              if (cellMedia.length === 0) continue;
+              let opt = q.options.find((o) => o.label === label);
+              if (!opt) {
+                opt = {
+                  id: generateStableId(),
+                  label,
+                  content: "",
+                  isCorrect: false,
+                  detectedBy: [],
+                };
+                q.options.push(opt);
+              }
+              opt.media = [...(opt.media ?? []), ...cellMedia];
+              if (!config.preservePreviewDataUrls && !opt.imageUrl) {
+                opt.imageUrl = cellMedia[0].previewPath;
+              }
+              if (cellMedia.some((m) => m.anchorType === "floating")) {
+                q.ambiguousMedia = true;
+              }
+            }
+          }
           q.index = questions.length;
           q.chapterIndex = chapterIndex;
           questions.push(q);
-        }
+        });
         globalIssues.push(...mapped.issues);
         continue;
       }

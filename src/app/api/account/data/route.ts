@@ -248,8 +248,13 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
     const body = await parseJsonBody(request);
     const input = deleteAccountDataSchema.parse(body);
 
-    // Order child/independent deletes cleanly and assert ZERO errors
+    // Order child/independent deletes cleanly and assert ZERO errors (including all V3 tables!)
     const deleteOps = [
+      supabase.from("learning_sync_events").delete().eq("user_id", user.id),
+      supabase.from("learning_confidence_events").delete().eq("user_id", user.id),
+      supabase.from("learning_session_checkpoints").delete().eq("user_id", user.id),
+      supabase.from("user_question_notes").delete().eq("user_id", user.id),
+      supabase.from("question_reports").delete().eq("reporter_id", user.id),
       supabase.from("coverage_cycles").delete().eq("user_id", user.id),
       supabase.from("exam_presets").delete().eq("user_id", user.id),
       supabase.from("exam_attempts").delete().eq("user_id", user.id),
@@ -283,6 +288,10 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
     for (const res of secondWave) {
       if (res.error) throw res.error;
     }
+
+    // After sets/questions/exams are deleted (polymorphic triggers clean content_media_relations),
+    // clean up user's unreferenced media_assets rows
+    await supabase.from("media_assets").delete().eq("owner_id", user.id);
 
     let accountDeleted = false;
     let storagePurged = false;

@@ -8,3 +8,7 @@ export * from "./flashcard-projection";
 export * from "./exam-allocator";
 export * from "./exam-selector";
 export * from "./coverage-engine";
+export * from "./confidence";
+export * from "./adaptive-learn";
+export * from "./spell";
+export * from "./checkpoints";

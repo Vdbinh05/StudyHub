@@ -15,6 +15,14 @@ export function getQuestionTypeLabel(
     true_false: "Đúng / Sai",
     flashcard: "Thẻ ghi nhớ",
     short_answer: "Tự luận ngắn",
+    fill_in_blank: "Điền khuyết",
+    numerical: "Đáp án số",
+    image_choice: "Chọn theo hình ảnh",
+    ordering: "Sắp xếp thứ tự",
+    matching: "Ghép cặp",
+    image_hotspot: "Điểm nóng trên hình",
+    reading_passage: "Đọc hiểu theo đoạn",
+    listening: "Nghe hiểu",
   };
   const en: Record<QuestionType, string> = {
     single_choice: "Single Choice",
@@ -22,6 +30,14 @@ export function getQuestionTypeLabel(
     true_false: "True / False",
     flashcard: "Flashcard",
     short_answer: "Short Answer",
+    fill_in_blank: "Fill in the Blank",
+    numerical: "Numerical",
+    image_choice: "Image Choice",
+    ordering: "Ordering",
+    matching: "Matching",
+    image_hotspot: "Image Hotspot",
+    reading_passage: "Reading Passage",
+    listening: "Listening",
   };
   return locale === "en" ? en[questionType] : vi[questionType];
 }
@@ -56,23 +72,27 @@ export function getFormatLabel(format: ImportFormat, locale: Locale): string {
     eduquiz_txt: "EduQuiz TXT (*B. đánh dấu đáp án)",
     word_answer_key: "Word / TXT có Đáp án (Inline hoặc Bảng cuối tài liệu)",
     docx_ooxml: "Microsoft Word (.docx OOXML định dạng)",
+    docx_multimedia: "Microsoft Word có hình ảnh (.docx Đa phương tiện)",
     xlsx_wayground: "Excel Wayground / Quizizz (.xlsx)",
     xlsx_generic: "Excel tùy chỉnh cột (.xlsx)",
     quizlet_tsv: "Quizlet Flashcards (TSV / ký tự phân cách)",
     csv: "Bảng tính CSV (.csv)",
     json: "StudyHub JSON (.json)",
     txt_generic: "Văn bản trắc nghiệm tổng quát (.txt)",
+    pdf_text: "Tài liệu PDF có lớp văn bản (.pdf)",
   };
   const en: Record<ImportFormat, string> = {
     eduquiz_txt: "EduQuiz TXT (*B. asterisk marker)",
     word_answer_key: "Word / TXT Answer Key (Inline or End-of-Doc)",
     docx_ooxml: "Microsoft Word (.docx OOXML Formatting)",
+    docx_multimedia: "Microsoft Word with Images (.docx Multimedia)",
     xlsx_wayground: "Wayground / Quizizz Excel (.xlsx)",
     xlsx_generic: "Generic Excel with Column Mapping (.xlsx)",
     quizlet_tsv: "Quizlet Flashcards (TSV / Custom Delimiter)",
     csv: "CSV Spreadsheet (.csv)",
     json: "StudyHub Canonical JSON (.json)",
     txt_generic: "Generic Numbered Questions (.txt)",
+    pdf_text: "Selectable-Text PDF (.pdf)",
   };
   return locale === "en" ? en[format] : vi[format];
 }

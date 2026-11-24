@@ -15,8 +15,11 @@ import {
   Settings2,
   Star,
   XCircle,
+  ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
+import { AudioPlayer } from "@/components/audio/AudioPlayer";
+import { ImageLightbox } from "@/components/media/ImageLightbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -59,15 +62,18 @@ import {
   withOptionDisplayLabels,
   type DisplayedOption,
 } from "@/lib/learning/shuffle";
-import { calculateNextReview } from "@/lib/learning/sm2";
+import { applyConfidenceToSm2 } from "@/lib/learning/confidence";
 import {
   getExpectedWriteAnswers,
   gradeWriteAnswer,
 } from "@/lib/learning/write-grader";
-import type { Question, QuestionOption } from "@/types/domain";
+import type { ConfidenceLevel, Question, QuestionOption } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
+import { ConfidenceSelector } from "./ConfidenceSelector";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
+import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -87,6 +93,7 @@ interface PracticeAnswerState {
   typedAnswer: string;
   isSubmitted: boolean;
   isCorrect: boolean;
+  confidence: ConfidenceLevel | null;
 }
 
 interface PracticeClientProps {
@@ -139,6 +146,11 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const [showExplanation, setShowExplanation] = React.useState<boolean>(
     () => preferences.show_instant_feedback,
   );
+  const [confidenceOverride, setConfidenceOverride] = React.useState<
+    boolean | null
+  >(null);
+  const confidenceEnabled =
+    confidenceOverride ?? Boolean(preferences.confidence_enabled);
 
   const syncedPrefsRef = React.useRef(false);
   React.useEffect(() => {
@@ -164,6 +176,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const [completedDurationSeconds, setCompletedDurationSeconds] =
     React.useState(1);
   const [navSheetOpen, setNavSheetOpen] = React.useState(false);
+  const [optionLightbox, setOptionLightbox] = React.useState<{
+    src: string;
+    alt: string;
+  } | null>(null);
 
   const sessionIdRef = React.useRef<string | null>(null);
   const startedAtRef = React.useRef<number>(0);
@@ -325,6 +341,12 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   ]);
 
   const currentItem = items[currentIndex] ?? null;
+  const isCurrentMultiChoice =
+    currentItem?.question.question_type === "multiple_choice" ||
+    (currentItem?.question.type_payload?.type === "image_choice" &&
+      currentItem.question.type_payload.selection_mode === "multiple");
+  const isCurrentImageChoice =
+    currentItem?.question.question_type === "image_choice";
   const currentAnswer = React.useMemo<PracticeAnswerState>(() => {
     if (!currentItem) {
       return {
@@ -332,6 +354,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         typedAnswer: "",
         isSubmitted: false,
         isCorrect: false,
+        confidence: null,
       };
     }
     return (
@@ -340,6 +363,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         typedAnswer: "",
         isSubmitted: false,
         isCorrect: false,
+        confidence: null,
       }
     );
   }, [answers, currentItem]);
@@ -376,17 +400,24 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       selectedOptionIds: string[],
       typedAnswer: string | null,
       isCorrect: boolean,
+      confidence: ConfidenceLevel | null,
     ) => {
       if (!bundle) return;
       const responseTimeMs = Math.max(0, Date.now() - questionStartRef.current);
       const prevProgress = bundle.progressMap.get(question.id);
-      const nextSm2 = calculateNextReview(prevProgress, isCorrect);
+      const sm2Outcome = applyConfidenceToSm2({
+        previous: prevProgress ?? undefined,
+        isCorrect,
+        confidence,
+      });
+      const nextSm2 = sm2Outcome.next;
 
       if (sessionIdRef.current) {
         recordStudySessionAnswer(sessionIdRef.current, {
           question_id: question.id,
           selected_option_ids: selectedOptionIds,
           typed_answer: typedAnswer,
+          confidence,
           is_correct: isCorrect,
           response_time_ms: responseTimeMs,
           update_progress: true,
@@ -399,6 +430,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
               study_set_id: setId,
               question_id: question.id,
               is_correct: isCorrect,
+              confidence,
               mastery_level: nextSm2.mastery_level,
               ease_factor: nextSm2.ease_factor,
               interval_days: nextSm2.interval_days,
@@ -413,6 +445,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
           study_set_id: setId,
           question_id: question.id,
           is_correct: isCorrect,
+          confidence,
           mastery_level: nextSm2.mastery_level,
           ease_factor: nextSm2.ease_factor,
           interval_days: nextSm2.interval_days,
@@ -437,12 +470,16 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
       // Strictly grade by stable option UUID!
       const isCorrect = gradeChoiceSelection(selectedIds, correctIds);
+      const submittedConfidence = confidenceEnabled
+        ? (currentAnswer.confidence ?? null)
+        : null;
 
       const nextState: PracticeAnswerState = {
         selectedOptionIds: selectedIds,
         typedAnswer: "",
         isSubmitted: true,
         isCorrect,
+        confidence: submittedConfidence,
       };
       const nextAnswers = {
         ...answers,
@@ -450,7 +487,13 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       };
       setAnswers(nextAnswers);
       playFeedbackSound(isCorrect ? "correct" : "wrong");
-      persistAnswer(currentItem.question, selectedIds, null, isCorrect);
+      persistAnswer(
+        currentItem.question,
+        selectedIds,
+        null,
+        isCorrect,
+        submittedConfidence,
+      );
 
       if (autoNext && isCorrect) {
         if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
@@ -467,6 +510,8 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     [
       answers,
       autoNext,
+      confidenceEnabled,
+      currentAnswer.confidence,
       currentAnswer.isSubmitted,
       currentIndex,
       currentItem,
@@ -480,7 +525,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const handleOptionClick = React.useCallback(
     (optionId: string) => {
       if (!currentItem || currentAnswer.isSubmitted) return;
-      const isMulti = currentItem.question.question_type === "multiple_choice";
+      const isMulti =
+        currentItem.question.question_type === "multiple_choice" ||
+        (currentItem.question.type_payload?.type === "image_choice" &&
+          currentItem.question.type_payload.selection_mode === "multiple");
 
       if (isMulti) {
         const exists = currentAnswer.selectedOptionIds.includes(optionId);
@@ -510,12 +558,16 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
       const expected = getExpectedWriteAnswers(currentItem.question);
       const graded = gradeWriteAnswer(typed, expected, { strict: false });
+      const submittedConfidence = confidenceEnabled
+        ? (currentAnswer.confidence ?? null)
+        : null;
 
       const nextState: PracticeAnswerState = {
         selectedOptionIds: [],
         typedAnswer: typed,
         isSubmitted: true,
         isCorrect: graded.isCorrect,
+        confidence: submittedConfidence,
       };
       const nextAnswers = {
         ...answers,
@@ -523,9 +575,22 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       };
       setAnswers(nextAnswers);
       playFeedbackSound(graded.isCorrect ? "correct" : "wrong");
-      persistAnswer(currentItem.question, [], typed, graded.isCorrect);
+      persistAnswer(
+        currentItem.question,
+        [],
+        typed,
+        graded.isCorrect,
+        submittedConfidence,
+      );
     },
-    [answers, currentAnswer, currentItem, persistAnswer, playFeedbackSound],
+    [
+      answers,
+      confidenceEnabled,
+      currentAnswer,
+      currentItem,
+      persistAnswer,
+      playFeedbackSound,
+    ],
   );
 
   const handleGoNext = React.useCallback(() => {
@@ -548,11 +613,14 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
   // Keyboard shortcuts during active practice
   React.useEffect(() => {
-    if (phase !== "active" || !currentItem) return;
+    if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
+      return;
+    }
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableEventTarget(event.target)) return;
+      if (document.querySelector('[role="dialog"]')) return;
 
       if (event.key === "ArrowLeft") {
         event.preventDefault();
@@ -608,6 +676,8 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     handleGoNext,
     handleGoPrev,
     handleOptionClick,
+    navSheetOpen,
+    optionLightbox,
     phase,
     submitCurrentChoice,
     t,
@@ -902,6 +972,20 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                     onCheckedChange={setShowExplanation}
                   />
                 </div>
+                <div className="flex items-center justify-between gap-2 sm:col-span-2">
+                  <Label htmlFor="pr-confidence" className="cursor-pointer">
+                    {lText(
+                      locale,
+                      "Ghi nhận mức độ tự tin trước khi trả lời",
+                      "Track confidence before answering",
+                    )}
+                  </Label>
+                  <Switch
+                    id="pr-confidence"
+                    checked={confidenceEnabled}
+                    onCheckedChange={(checked) => setConfidenceOverride(checked)}
+                  />
+                </div>
               </div>
 
               {filteredQuestions.length === 0 ? (
@@ -1036,16 +1120,32 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                       key={item.question.id}
                       className="rounded-lg border border-border p-4 space-y-2"
                     >
-                      <p className="text-sm font-medium whitespace-pre-wrap">
-                        {idx + 1}. {item.question.prompt}
-                      </p>
+                      <div className="flex items-start gap-1.5 text-sm font-medium">
+                        <span className="shrink-0 tabular-nums">{idx + 1}.</span>
+                        <div className="min-w-0 flex-1">
+                          <SafeRichText
+                            rich={item.question.prompt_rich}
+                            fallbackText={item.question.prompt}
+                          />
+                        </div>
+                      </div>
                       <div className="flex flex-col gap-1 text-xs">
                         <p className="flex items-start gap-1.5 text-destructive-subtle-foreground">
                           <XCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
                           <span>
                             <strong>{t("study.yourAnswer")}:</strong>{" "}
                             {selectedOpts.length > 0
-                              ? selectedOpts.map((o) => o.content).join(", ")
+                              ? selectedOpts
+                                  .map(
+                                    (o) =>
+                                      o.content.trim() ||
+                                      lText(
+                                        locale,
+                                        `Phương án ${o.displayLabel}`,
+                                        `Option ${o.displayLabel}`,
+                                      ),
+                                  )
+                                  .join(", ")
                               : ans?.typedAnswer || "—"}
                           </span>
                         </p>
@@ -1054,20 +1154,35 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                           <span>
                             <strong>{t("study.correctAnswer")}:</strong>{" "}
                             {correctOpts.length > 0
-                              ? correctOpts.map((o) => o.content).join(", ")
+                              ? correctOpts
+                                  .map(
+                                    (o) =>
+                                      o.content.trim() ||
+                                      lText(
+                                        locale,
+                                        `Phương án ${o.displayLabel}`,
+                                        `Option ${o.displayLabel}`,
+                                      ),
+                                  )
+                                  .join(", ")
                               : getExpectedWriteAnswers(item.question)
                                   .map((a) => a.answer_text)
                                   .join(" / ")}
                           </span>
                         </p>
                       </div>
-                      {item.question.explanation ? (
-                        <p className="rounded-md bg-secondary/60 p-2.5 text-xs text-muted-foreground whitespace-pre-wrap">
+                      {item.question.explanation ||
+                      item.question.explanation_rich ? (
+                        <div className="rounded-md bg-secondary/60 p-2.5 text-xs text-muted-foreground">
                           <strong className="text-foreground">
                             {t("study.explanation")}:{" "}
                           </strong>
-                          {item.question.explanation}
-                        </p>
+                          <SafeRichText
+                            rich={item.question.explanation_rich}
+                            fallbackText={item.question.explanation}
+                            inline
+                          />
+                        </div>
                       ) : null}
                     </div>
                   );
@@ -1103,9 +1218,17 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             {currentItem.question.chapter}
                           </Badge>
                         ) : null}
-                        {currentItem.question.question_type === "multiple_choice" ? (
+                        {currentItem.question.question_type === "multiple_choice" ||
+                        (currentItem.question.type_payload?.type === "image_choice" &&
+                          currentItem.question.type_payload.selection_mode ===
+                            "multiple") ? (
                           <Badge variant="accent">
                             {lText(locale, "Chọn nhiều đáp án", "Multiple answers")}
+                          </Badge>
+                        ) : null}
+                        {currentItem.question.question_type === "image_choice" ? (
+                          <Badge variant="outline">
+                            {lText(locale, "Chọn đáp án hình ảnh", "Image Choice")}
                           </Badge>
                         ) : null}
                       </div>
@@ -1139,103 +1262,236 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                     </div>
 
                     <div className="space-y-3">
-                      <h2 className="whitespace-pre-wrap text-lg font-medium leading-relaxed text-foreground">
-                        {currentItem.question.prompt}
+                      <h2 className="text-lg font-medium leading-relaxed text-foreground">
+                        <SafeRichText
+                          rich={currentItem.question.prompt_rich}
+                          fallbackText={currentItem.question.prompt}
+                        />
                       </h2>
-                      {isSafeDisplayImageUrl(currentItem.question.prompt_image_url) ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
+                      {currentItem.question.prompt_image_url ? (
+                        <ZoomableImage
                           src={currentItem.question.prompt_image_url}
-                          alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
-                          className="max-h-64 rounded-lg border border-border object-contain"
+                          alt={lText(
+                            locale,
+                            "Hình ảnh câu hỏi",
+                            "Question illustration",
+                          )}
+                        />
+                      ) : null}
+                      {currentItem.question.audio_url ? (
+                        <AudioPlayer
+                          src={currentItem.question.audio_url}
+                          transcript={currentItem.question.audio_transcript}
+                          compact
+                          preload="metadata"
                         />
                       ) : null}
                     </div>
 
+                    {/* Pre-answer Confidence Selector (synced with /settings confidence_enabled) */}
+                    <ConfidenceSelector
+                      enabled={confidenceEnabled}
+                      disabled={currentAnswer.isSubmitted}
+                      value={currentAnswer.confidence ?? null}
+                      onChange={(nextConfidence) =>
+                        setAnswers((prev) => ({
+                          ...prev,
+                          [currentItem.question.id]: {
+                            ...(prev[currentItem.question.id] ?? {
+                              selectedOptionIds: [],
+                              typedAnswer: "",
+                              isSubmitted: false,
+                              isCorrect: false,
+                              confidence: null,
+                            }),
+                            confidence: nextConfidence,
+                          },
+                        }))
+                      }
+                      keyboardMode={
+                        currentItem.displayedOptions.length > 0
+                          ? "none"
+                          : "letters"
+                      }
+                    />
+
                     {/* Choice options vs typed fallback */}
                     {currentItem.displayedOptions.length > 0 ? (
-                      <div
-                        role={
-                          currentItem.question.question_type === "multiple_choice"
-                            ? "group"
-                            : "radiogroup"
-                        }
-                        aria-label={lText(locale, "Các lựa chọn đáp án", "Answer options")}
-                        className="space-y-2.5"
-                      >
-                        {currentItem.displayedOptions.map((option) => {
-                          const isSelected = currentAnswer.selectedOptionIds.includes(
-                            option.id,
-                          );
-                          const isCorrectOpt = option.is_correct;
-                          const submitted = currentAnswer.isSubmitted;
-
-                          let stateStyle =
-                            "border-border bg-card hover:bg-secondary/60 text-foreground";
-                          if (submitted) {
-                            if (isCorrectOpt) {
-                              stateStyle =
-                                "border-success bg-success-subtle text-success-subtle-foreground";
-                            } else if (isSelected && !isCorrectOpt) {
-                              stateStyle =
-                                "border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
-                            } else {
-                              stateStyle = "border-border bg-card/60 opacity-75";
-                            }
-                          } else if (isSelected) {
-                            stateStyle =
-                              "border-primary bg-accent text-accent-foreground";
+                      <div className="space-y-3">
+                        <div
+                          role={isCurrentMultiChoice ? "group" : "radiogroup"}
+                          aria-label={lText(
+                            locale,
+                            "Các lựa chọn đáp án",
+                            "Answer options",
+                          )}
+                          className={
+                            isCurrentImageChoice
+                              ? "grid gap-3 sm:grid-cols-2"
+                              : "space-y-2.5"
                           }
+                        >
+                          {currentItem.displayedOptions.map((option) => {
+                            const isSelected =
+                              currentAnswer.selectedOptionIds.includes(
+                                option.id,
+                              );
+                            const isCorrectOpt = option.is_correct;
+                            const submitted = currentAnswer.isSubmitted;
+                            const hasOptImage = isSafeDisplayImageUrl(
+                              option.image_url,
+                            );
+                            const hasOptText =
+                              option.content.trim().length > 0 ||
+                              Boolean(option.content_rich);
 
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              role={
-                                currentItem.question.question_type ===
-                                "multiple_choice"
-                                  ? "checkbox"
-                                  : "radio"
+                            let stateStyle =
+                              "border-border bg-card hover:bg-secondary/60 text-foreground";
+                            if (submitted) {
+                              if (isCorrectOpt) {
+                                stateStyle =
+                                  "border-success bg-success-subtle text-success-subtle-foreground";
+                              } else if (isSelected && !isCorrectOpt) {
+                                stateStyle =
+                                  "border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
+                              } else {
+                                stateStyle =
+                                  "border-border bg-card/60 opacity-75";
                               }
-                              aria-checked={isSelected}
-                              disabled={submitted}
-                              onClick={() => handleOptionClick(option.id)}
-                              className={cn(
-                                "flex min-h-12 w-full items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                                stateStyle,
-                              )}
-                            >
-                              <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-current/25 text-xs font-semibold">
-                                {option.displayLabel}
-                              </span>
-                              <span className="flex-1 whitespace-pre-wrap text-sm sm:text-base leading-relaxed">
-                                {option.content}
-                              </span>
-                              {submitted && isCorrectOpt ? (
-                                <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
-                                  <CheckCircle2 className="size-4" aria-hidden="true" />
-                                  <span className="sr-only">
-                                    {t("study.correctAnswer")}
-                                  </span>
-                                </span>
-                              ) : null}
-                              {submitted && isSelected && !isCorrectOpt ? (
-                                <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
-                                  <XCircle className="size-4" aria-hidden="true" />
-                                  <span className="sr-only">{t("study.incorrect")}</span>
-                                </span>
-                              ) : null}
-                            </button>
-                          );
-                        })}
+                            } else if (isSelected) {
+                              stateStyle =
+                                "border-primary bg-accent text-accent-foreground";
+                            }
 
-                        {currentItem.question.question_type === "multiple_choice" &&
-                        !currentAnswer.isSubmitted ? (
+                            return (
+                              <div key={option.id} className="relative">
+                                <button
+                                  type="button"
+                                  role={isCurrentMultiChoice ? "checkbox" : "radio"}
+                                  aria-checked={isSelected}
+                                  disabled={submitted}
+                                  onClick={() => handleOptionClick(option.id)}
+                                  className={cn(
+                                    "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                    stateStyle,
+                                  )}
+                                >
+                                  <div className="flex w-full items-start gap-3">
+                                    <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-current/25 text-xs font-semibold">
+                                      {option.displayLabel}
+                                    </span>
+                                    <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
+                                      {hasOptText ? (
+                                        <SafeRichText
+                                          rich={option.content_rich}
+                                          fallbackText={option.content}
+                                          inline
+                                        />
+                                      ) : hasOptImage ? (
+                                        <span className="text-xs text-muted-foreground">
+                                          {lText(
+                                            locale,
+                                            `Hình phương án ${option.displayLabel}`,
+                                            `Option ${option.displayLabel} image`,
+                                          )}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    {submitted && isCorrectOpt ? (
+                                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
+                                        <CheckCircle2
+                                          className="size-4"
+                                          aria-hidden="true"
+                                        />
+                                        <span className="sr-only">
+                                          {t("study.correctAnswer")}
+                                        </span>
+                                      </span>
+                                    ) : null}
+                                    {submitted &&
+                                    isSelected &&
+                                    !isCorrectOpt ? (
+                                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
+                                        <XCircle
+                                          className="size-4"
+                                          aria-hidden="true"
+                                        />
+                                        <span className="sr-only">
+                                          {t("study.incorrect")}
+                                        </span>
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  {hasOptImage ? (
+                                    <div className="w-full pt-1">
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img
+                                        src={option.image_url ?? ""}
+                                        alt={
+                                          option.image_alt ||
+                                          option.content ||
+                                          lText(
+                                            locale,
+                                            `Hình phương án ${option.displayLabel}`,
+                                            `Option ${option.displayLabel} image`,
+                                          )
+                                        }
+                                        loading="lazy"
+                                        decoding="async"
+                                        className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
+                                      />
+                                    </div>
+                                  ) : null}
+                                </button>
+
+                                {hasOptImage ? (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="secondary"
+                                    className="absolute right-2 bottom-2 size-8 opacity-90 shadow-xs"
+                                    aria-label={lText(
+                                      locale,
+                                      `Phóng to hình phương án ${option.displayLabel}`,
+                                      `Zoom option ${option.displayLabel} image`,
+                                    )}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOptionLightbox({
+                                        src: option.image_url!,
+                                        alt:
+                                          option.image_alt ||
+                                          option.content ||
+                                          lText(
+                                            locale,
+                                            `Hình phương án ${option.displayLabel}`,
+                                            `Option ${option.displayLabel} image`,
+                                          ),
+                                      });
+                                    }}
+                                  >
+                                    <ZoomIn
+                                      className="size-3.5"
+                                      aria-hidden="true"
+                                    />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {isCurrentMultiChoice && !currentAnswer.isSubmitted ? (
                           <Button
                             className="mt-2 min-h-11"
-                            disabled={currentAnswer.selectedOptionIds.length === 0}
+                            disabled={
+                              currentAnswer.selectedOptionIds.length === 0
+                            }
                             onClick={() =>
-                              submitCurrentChoice(currentAnswer.selectedOptionIds)
+                              submitCurrentChoice(
+                                currentAnswer.selectedOptionIds,
+                              )
                             }
                           >
                             {t("study.checkAnswer")}
@@ -1305,14 +1561,31 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             </>
                           )}
                         </div>
-                        {showExplanation && currentItem.question.explanation ? (
-                          <p className="text-sm text-foreground/90 whitespace-pre-wrap">
+                        {showExplanation &&
+                        (currentItem.question.explanation ||
+                          currentItem.question.explanation_rich) ? (
+                          <div className="text-sm text-foreground/90">
                             <strong>{t("study.explanation")}: </strong>
-                            {currentItem.question.explanation}
-                          </p>
+                            <SafeRichText
+                              rich={currentItem.question.explanation_rich}
+                              fallbackText={currentItem.question.explanation}
+                              inline
+                            />
+                          </div>
                         ) : null}
                       </div>
                     ) : null}
+
+                    {/* Personal Notes & Question Error Report Bar */}
+                    <div className="border-t border-border/60 pt-3">
+                      <QuestionNotesAndReportBar
+                        key={currentItem.question.id}
+                        studySetId={setId}
+                        questionId={currentItem.question.id}
+                        showReportButton
+                        compact
+                      />
+                    </div>
                   </CardContent>
                 </Card>
               </motion.div>
@@ -1347,6 +1620,15 @@ export function PracticeClient({ setId }: PracticeClientProps) {
           </aside>
         </div>
       )}
+
+      <ImageLightbox
+        open={Boolean(optionLightbox)}
+        onOpenChange={(open) => {
+          if (!open) setOptionLightbox(null);
+        }}
+        src={optionLightbox?.src}
+        alt={optionLightbox?.alt}
+      />
     </FocusModeShell>
   );
 }

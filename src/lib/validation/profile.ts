@@ -9,6 +9,7 @@ import {
   themeSchema,
   visibilitySchema,
 } from "./common";
+import { modePreferencesSchema } from "./v3";
 
 export const usernameSchema = z
   .string()
@@ -45,6 +46,8 @@ export const updatePreferencesSchema = z.object({
   show_instant_feedback: z.boolean().optional(),
   sound_effects: z.boolean().optional(),
   reduced_motion: z.boolean().optional(),
+  confidence_enabled: z.boolean().optional(),
+  mode_preferences: modePreferencesSchema.optional(),
 });
 
 export const deleteAccountDataSchema = z.object({

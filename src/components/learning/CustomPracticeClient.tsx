@@ -27,8 +27,11 @@ import {
   X,
   XCircle,
   Zap,
+  ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
+import { AudioPlayer } from "@/components/audio/AudioPlayer";
+import { ImageLightbox } from "@/components/media/ImageLightbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -79,12 +82,13 @@ import {
   withOptionDisplayLabels,
   type DisplayedOption,
 } from "@/lib/learning/shuffle";
-import { calculateNextReview } from "@/lib/learning/sm2";
+import { applyConfidenceToSm2 } from "@/lib/learning/confidence";
 import {
   getExpectedWriteAnswers,
   gradeWriteAnswer,
 } from "@/lib/learning/write-grader";
 import type {
+  ConfidenceLevel,
   DifficultyLevel,
   ExamFilterConfig,
   ExamQuestionType,
@@ -94,7 +98,10 @@ import type {
   SelectionPolicy,
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
+import { ConfidenceSelector } from "./ConfidenceSelector";
 import { lText } from "./learning-copy";
+import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 
 const SUBSET_PRESETS = [20, 50, 100, 250] as const;
 const MAX_PRACTICE_QUESTIONS = 2000;
@@ -168,6 +175,7 @@ interface PracticeAnswerState {
   typedAnswer: string;
   isSubmitted: boolean;
   isCorrect: boolean;
+  confidence?: ConfidenceLevel | null;
 }
 
 function resolveInitialPolicy(modeParam: string | null): SelectionPolicy {
@@ -206,6 +214,10 @@ export function CustomPracticeClient() {
   const [phase, setPhase] = React.useState<"setup" | "active" | "complete">(
     "setup",
   );
+  const [optionLightbox, setOptionLightbox] = React.useState<{
+    src: string;
+    alt: string;
+  } | null>(null);
 
   // Source selection state
   const [selectedSetIds, setSelectedSetIds] = React.useState<string[]>(() => {
@@ -684,6 +696,7 @@ export function CustomPracticeClient() {
       selectedOptionIds: string[],
       typedAnswer: string,
       isCorrect: boolean,
+      confidence: ConfidenceLevel | null,
     ) => {
       try {
         if (sessionId) {
@@ -691,16 +704,22 @@ export function CustomPracticeClient() {
             question_id: question.id,
             selected_option_ids: selectedOptionIds,
             typed_answer: typedAnswer || null,
+            confidence,
             is_correct: isCorrect,
             update_progress: true,
           });
         } else {
           const prev = question.progress ?? null;
-          const sm2 = calculateNextReview(prev, isCorrect ? "good" : "again");
+          const sm2 = applyConfidenceToSm2({
+            previous: prev ?? undefined,
+            isCorrect,
+            confidence,
+          }).next;
           await upsertQuestionProgress({
             study_set_id: question.study_set_id,
             question_id: question.id,
             is_correct: isCorrect,
+            confidence,
             self_rating: isCorrect ? "good" : "again",
             ease_factor: sm2.ease_factor,
             interval_days: sm2.interval_days,
@@ -726,6 +745,9 @@ export function CustomPracticeClient() {
       const selectedIds =
         overrideSelectedIds ?? existing?.selectedOptionIds ?? [];
       const typed = existing?.typedAnswer ?? "";
+      const submittedConfidence = preferences.confidence_enabled
+        ? (existing?.confidence ?? null)
+        : null;
 
       let isCorrect = false;
       if (q.question_type === "short_answer") {
@@ -745,12 +767,13 @@ export function CustomPracticeClient() {
         typedAnswer: typed,
         isSubmitted: true,
         isCorrect,
+        confidence: submittedConfidence,
       };
       const nextAnswers = { ...answers, [q.id]: nextState };
       setAnswers(nextAnswers);
       playFeedbackSound(isCorrect ? "correct" : "wrong");
 
-      void persistAnswer(q, selectedIds, typed, isCorrect);
+      void persistAnswer(q, selectedIds, typed, isCorrect, submittedConfidence);
 
       if (autoNext && isCorrect) {
         clearAutoNextTimer();
@@ -770,6 +793,7 @@ export function CustomPracticeClient() {
       items.length,
       persistAnswer,
       playFeedbackSound,
+      preferences.confidence_enabled,
     ],
   );
 
@@ -780,7 +804,11 @@ export function CustomPracticeClient() {
       const existing = answers[q.id];
       if (existing?.isSubmitted) return;
 
-      if (q.question_type === "multiple_choice") {
+      const isMulti =
+        q.question_type === "multiple_choice" ||
+        (q.type_payload?.type === "image_choice" &&
+          q.type_payload.selection_mode === "multiple");
+      if (isMulti) {
         const prev = existing?.selectedOptionIds ?? [];
         const nextIds = prev.includes(optionId)
           ? prev.filter((id) => id !== optionId)
@@ -868,11 +896,14 @@ export function CustomPracticeClient() {
 
   // Keyboard shortcuts during active practice (strictly guarded against inputs/modals/sheets)
   React.useEffect(() => {
-    if (phase !== "active" || !currentItem || navSheetOpen) return;
+    if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
+      return;
+    }
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isEditableEventTarget(e.target)) return;
+      if (document.querySelector('[role="dialog"]')) return;
 
       const key = e.key.toLowerCase();
       if (e.key === "ArrowLeft") {
@@ -950,6 +981,7 @@ export function CustomPracticeClient() {
     handleToggleStar,
     items.length,
     navSheetOpen,
+    optionLightbox,
     phase,
     submitCurrentAnswer,
   ]);
@@ -1872,6 +1904,12 @@ export function CustomPracticeClient() {
     );
   }
 
+  const isMultiCurrent =
+    q.question_type === "multiple_choice" ||
+    (q.type_payload?.type === "image_choice" &&
+      q.type_payload.selection_mode === "multiple");
+  const isImageChoiceLayout = q.question_type === "image_choice";
+
   const submittedValues = Object.values(answers).filter((a) => a.isSubmitted);
   const liveCorrect = submittedValues.filter((a) => a.isCorrect).length;
   const liveWrong = submittedValues.length - liveCorrect;
@@ -2010,29 +2048,67 @@ export function CustomPracticeClient() {
                     <Badge variant="outline" className="text-[11px]">
                       {q.question_type === "multiple_choice"
                         ? lText(locale, "Chọn nhiều đáp án", "Multiple Choice")
-                        : q.question_type === "true_false"
-                          ? lText(locale, "Đúng / Sai", "True / False")
-                          : q.question_type === "short_answer"
-                            ? lText(locale, "Tự luận ngắn", "Short Answer")
-                            : lText(locale, "Trắc nghiệm", "Single Choice")}
+                        : q.question_type === "image_choice"
+                          ? lText(locale, "Chọn đáp án hình ảnh", "Image Choice")
+                          : q.question_type === "true_false"
+                            ? lText(locale, "Đúng / Sai", "True / False")
+                            : q.question_type === "short_answer"
+                              ? lText(locale, "Tự luận ngắn", "Short Answer")
+                              : lText(locale, "Trắc nghiệm", "Single Choice")}
                     </Badge>
                   </div>
 
-                  {/* Question Prompt */}
+                  {/* Question Prompt (RichText + KaTeX + Zoomable Lightbox + Audio) */}
                   <div className="space-y-3">
-                    <p className="whitespace-pre-wrap text-base font-medium leading-relaxed sm:text-lg">
-                      {q.prompt}
-                    </p>
-                    {q.prompt_image_url &&
-                    isSafeDisplayImageUrl(q.prompt_image_url) ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
+                    <div className="text-base font-medium leading-relaxed sm:text-lg">
+                      <SafeRichText
+                        rich={q.prompt_rich}
+                        fallbackText={q.prompt}
+                      />
+                    </div>
+                    {q.prompt_image_url ? (
+                      <ZoomableImage
                         src={q.prompt_image_url}
-                        alt=""
-                        className="max-h-72 rounded-lg border border-border object-contain"
+                        alt={lText(
+                          locale,
+                          "Hình ảnh câu hỏi",
+                          "Question illustration",
+                        )}
+                      />
+                    ) : null}
+                    {q.audio_url ? (
+                      <AudioPlayer
+                        src={q.audio_url}
+                        transcript={q.audio_transcript}
+                        compact
+                        preload="metadata"
                       />
                     ) : null}
                   </div>
+
+                  {/* Pre-answer Confidence Selector (synced with /settings) */}
+                  <ConfidenceSelector
+                    enabled={Boolean(preferences.confidence_enabled)}
+                    disabled={currentAnswer.isSubmitted}
+                    value={currentAnswer.confidence ?? null}
+                    onChange={(nextConfidence) =>
+                      setAnswers((prev) => ({
+                        ...prev,
+                        [q.id]: {
+                          ...(prev[q.id] ?? {
+                            selectedOptionIds: [],
+                            typedAnswer: "",
+                            isSubmitted: false,
+                            isCorrect: false,
+                          }),
+                          confidence: nextConfidence,
+                        },
+                      }))
+                    }
+                    keyboardMode={
+                      q.question_type === "short_answer" ? "letters" : "none"
+                    }
+                  />
 
                   {/* Answer Area */}
                   {q.question_type === "short_answer" ? (
@@ -2079,76 +2155,172 @@ export function CustomPracticeClient() {
                       ) : null}
                     </div>
                   ) : (
-                    <div className="space-y-2.5">
-                      {currentItem.displayedOptions.map((opt) => {
-                        const isSelected =
-                          currentAnswer.selectedOptionIds.includes(opt.id);
-                        const isCorrectOpt = opt.is_correct;
-                        const revealed = currentAnswer.isSubmitted;
-
-                        let toneClass =
-                          "border-border bg-card hover:bg-muted/60";
-                        if (revealed) {
-                          if (isCorrectOpt) {
-                            toneClass =
-                              "border-success bg-success-subtle/70 text-foreground";
-                          } else if (isSelected && !isCorrectOpt) {
-                            toneClass =
-                              "border-destructive bg-destructive-subtle/70 text-foreground";
-                          } else {
-                            toneClass = "border-border bg-card opacity-70";
-                          }
-                        } else if (isSelected) {
-                          toneClass =
-                            "border-primary bg-primary/10 ring-1 ring-primary/30";
+                    <div className="space-y-3">
+                      <div
+                        role={isMultiCurrent ? "group" : "radiogroup"}
+                        aria-label={lText(
+                          locale,
+                          "Các lựa chọn đáp án",
+                          "Answer options",
+                        )}
+                        className={
+                          isImageChoiceLayout
+                            ? "grid gap-3 sm:grid-cols-2"
+                            : "space-y-2.5"
                         }
+                      >
+                        {currentItem.displayedOptions.map((opt) => {
+                          const isSelected =
+                            currentAnswer.selectedOptionIds.includes(opt.id);
+                          const isCorrectOpt = opt.is_correct;
+                          const revealed = currentAnswer.isSubmitted;
+                          const hasOptImage = isSafeDisplayImageUrl(
+                            opt.image_url,
+                          );
+                          const hasOptText =
+                            opt.content.trim().length > 0 ||
+                            Boolean(opt.content_rich);
 
-                        return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            disabled={revealed}
-                            aria-pressed={isSelected}
-                            onClick={() => handleToggleOption(opt.id)}
-                            className={cn(
-                              "flex min-h-12 w-full items-start gap-3 rounded-xl border p-3.5 text-left transition-colors",
-                              toneClass,
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-bold",
-                                revealed && isCorrectOpt
-                                  ? "border-success bg-success text-success-foreground"
-                                  : revealed && isSelected && !isCorrectOpt
-                                    ? "border-destructive bg-destructive text-destructive-foreground"
-                                    : isSelected
-                                      ? "border-primary bg-primary text-primary-foreground"
-                                      : "border-border bg-muted text-muted-foreground",
-                              )}
-                            >
-                              {opt.displayLabel}
-                            </span>
-                            <span className="flex-1 whitespace-pre-wrap text-sm leading-relaxed sm:text-base">
-                              {opt.content}
-                            </span>
-                            {revealed && isCorrectOpt ? (
-                              <CheckCircle2
-                                className="mt-0.5 size-5 shrink-0 text-success"
-                                aria-hidden="true"
-                              />
-                            ) : revealed && isSelected && !isCorrectOpt ? (
-                              <XCircle
-                                className="mt-0.5 size-5 shrink-0 text-destructive"
-                                aria-hidden="true"
-                              />
-                            ) : null}
-                          </button>
-                        );
-                      })}
+                          let toneClass =
+                            "border-border bg-card hover:bg-muted/60";
+                          if (revealed) {
+                            if (isCorrectOpt) {
+                              toneClass =
+                                "border-success bg-success-subtle/70 text-foreground";
+                            } else if (isSelected && !isCorrectOpt) {
+                              toneClass =
+                                "border-destructive bg-destructive-subtle/70 text-foreground";
+                            } else {
+                              toneClass =
+                                "border-border bg-card opacity-70";
+                            }
+                          } else if (isSelected) {
+                            toneClass =
+                              "border-primary bg-primary/10 ring-1 ring-primary/30";
+                          }
 
-                      {q.question_type === "multiple_choice" &&
-                      !currentAnswer.isSubmitted ? (
+                          return (
+                            <div key={opt.id} className="relative">
+                              <button
+                                type="button"
+                                role={isMultiCurrent ? "checkbox" : "radio"}
+                                aria-checked={isSelected}
+                                disabled={revealed}
+                                onClick={() => handleToggleOption(opt.id)}
+                                className={cn(
+                                  "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                  toneClass,
+                                )}
+                              >
+                                <div className="flex w-full items-start gap-3">
+                                  <span
+                                    className={cn(
+                                      "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-bold",
+                                      revealed && isCorrectOpt
+                                        ? "border-success bg-success text-success-foreground"
+                                        : revealed &&
+                                            isSelected &&
+                                            !isCorrectOpt
+                                          ? "border-destructive bg-destructive text-destructive-foreground"
+                                          : isSelected
+                                            ? "border-primary bg-primary text-primary-foreground"
+                                            : "border-border bg-muted text-muted-foreground",
+                                    )}
+                                  >
+                                    {opt.displayLabel}
+                                  </span>
+                                  <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
+                                    {hasOptText ? (
+                                      <SafeRichText
+                                        rich={opt.content_rich}
+                                        fallbackText={opt.content}
+                                        inline
+                                      />
+                                    ) : hasOptImage ? (
+                                      <span className="text-xs text-muted-foreground">
+                                        {lText(
+                                          locale,
+                                          `Hình phương án ${opt.displayLabel}`,
+                                          `Option ${opt.displayLabel} image`,
+                                        )}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  {revealed && isCorrectOpt ? (
+                                    <CheckCircle2
+                                      className="mt-0.5 size-5 shrink-0 text-success"
+                                      aria-hidden="true"
+                                    />
+                                  ) : revealed &&
+                                    isSelected &&
+                                    !isCorrectOpt ? (
+                                    <XCircle
+                                      className="mt-0.5 size-5 shrink-0 text-destructive"
+                                      aria-hidden="true"
+                                    />
+                                  ) : null}
+                                </div>
+
+                                {hasOptImage ? (
+                                  <div className="w-full pt-1">
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={opt.image_url ?? ""}
+                                      alt={
+                                        opt.image_alt ||
+                                        opt.content ||
+                                        lText(
+                                          locale,
+                                          `Hình phương án ${opt.displayLabel}`,
+                                          `Option ${opt.displayLabel} image`,
+                                        )
+                                      }
+                                      loading="lazy"
+                                      decoding="async"
+                                      className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
+                                    />
+                                  </div>
+                                ) : null}
+                              </button>
+
+                              {hasOptImage ? (
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="secondary"
+                                  className="absolute right-2 bottom-2 size-8 opacity-90 shadow-xs"
+                                  aria-label={lText(
+                                    locale,
+                                    `Phóng to hình phương án ${opt.displayLabel}`,
+                                    `Zoom option ${opt.displayLabel} image`,
+                                  )}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setOptionLightbox({
+                                      src: opt.image_url!,
+                                      alt:
+                                        opt.image_alt ||
+                                        opt.content ||
+                                        lText(
+                                          locale,
+                                          `Hình phương án ${opt.displayLabel}`,
+                                          `Option ${opt.displayLabel} image`,
+                                        ),
+                                    });
+                                  }}
+                                >
+                                  <ZoomIn
+                                    className="size-3.5"
+                                    aria-hidden="true"
+                                  />
+                                </Button>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {isMultiCurrent && !currentAnswer.isSubmitted ? (
                         <Button
                           type="button"
                           className="mt-2 min-h-10"
@@ -2209,16 +2381,32 @@ export function CustomPracticeClient() {
                         </p>
                       ) : null}
 
-                      {showExplanation && q.explanation ? (
-                        <div className="border-t border-border/50 pt-2 text-xs leading-relaxed text-foreground/90 whitespace-pre-wrap">
+                      {showExplanation &&
+                      (q.explanation || q.explanation_rich) ? (
+                        <div className="border-t border-border/50 pt-2 text-xs leading-relaxed text-foreground/90">
                           <span className="font-semibold">
                             {lText(locale, "Giải thích: ", "Explanation: ")}
                           </span>
-                          {q.explanation}
+                          <SafeRichText
+                            rich={q.explanation_rich}
+                            fallbackText={q.explanation}
+                            inline
+                          />
                         </div>
                       ) : null}
                     </div>
                   ) : null}
+
+                  {/* Personal Notes & Question Error Report Bar */}
+                  <div className="border-t border-border/60 pt-3">
+                    <QuestionNotesAndReportBar
+                      key={q.id}
+                      studySetId={q.study_set_id}
+                      questionId={q.id}
+                      showReportButton
+                      compact
+                    />
+                  </div>
                 </CardContent>
               </Card>
             </motion.div>
@@ -2286,6 +2474,15 @@ export function CustomPracticeClient() {
           </Card>
         </aside>
       </div>
+
+      <ImageLightbox
+        open={Boolean(optionLightbox)}
+        onOpenChange={(open) => {
+          if (!open) setOptionLightbox(null);
+        }}
+        src={optionLightbox?.src}
+        alt={optionLightbox?.alt}
+      />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Keyboard,
   Maximize2,
+  Mic,
   Minimize2,
   RotateCcw,
   Shuffle,
@@ -40,13 +41,24 @@ import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
+  deleteCheckpoint,
   isEditableEventTarget,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
+  listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
+  upsertCheckpoint,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  clearLocalCheckpoint,
+  loadLocalCheckpoint,
+  makeCheckpointSessionKey,
+  pickNewestCheckpoint,
+  reconcileCheckpointQuestions,
+  saveLocalCheckpoint,
+} from "@/lib/learning/checkpoints";
 import {
   projectQuestionToFlashcard,
   type ProjectedFlashcard,
@@ -57,6 +69,10 @@ import type { SelfRating } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
+import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { ResetProgressDialog } from "./ResetProgressDialog";
+import { ResumeSessionBanner } from "./ResumeSessionBanner";
+import { SafeRichText, ZoomableImage } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -112,6 +128,22 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const [isFallbackFullscreen, setIsFallbackFullscreen] = React.useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = React.useState(false);
   const [isSpeaking, setIsSpeaking] = React.useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  const [pendingResume, setPendingResume] = React.useState<{
+    source: "remote" | "local";
+    currentIndex: number;
+    totalItems: number;
+    progressPercent: number;
+    updatedAt: string | null;
+    removedCount: number;
+    knownIds: string[];
+    unknownIds: string[];
+  } | null>(null);
+  const checkpointCheckedRef = React.useRef<string | null>(null);
+  const sessionKey = React.useMemo(
+    () => makeCheckpointSessionKey("flashcards", setId, selectedChapter),
+    [selectedChapter, setId],
+  );
   const ttsSupported = React.useSyncExternalStore(
     () => () => {},
     () =>
@@ -278,10 +310,107 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     setKnownIds(new Set());
     setUnknownIds(new Set());
     setIsCompleted(false);
+    setPendingResume(null);
     sessionStartRef.current = Date.now();
     cardShownAtRef.current = Date.now();
     sessionIdRef.current = null;
-  }, [stopSpeech]);
+    if (bundle) {
+      clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+    }
+    void deleteCheckpoint({ sessionKey }).catch(() => {});
+  }, [bundle, sessionKey, stopSpeech]);
+
+  const persistFlashcardCheckpoint = React.useCallback(
+    (
+      nextIndex: number,
+      nextKnown: Set<string>,
+      nextUnknown: Set<string>,
+      completed: boolean,
+    ) => {
+      if (!bundle || cards.length === 0) return;
+      if (completed) {
+        clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+        void deleteCheckpoint({ sessionKey }).catch(() => {});
+        return;
+      }
+      const pct = Math.min(
+        99,
+        Math.round(((nextKnown.size + nextUnknown.size) / cards.length) * 100),
+      );
+      const stateJson = {
+        cardIds: cards.map((c) => c.questionId),
+        knownIds: Array.from(nextKnown),
+        unknownIds: Array.from(nextUnknown),
+      };
+      saveLocalCheckpoint({
+        version: 1,
+        userId: bundle.studySet.owner_id,
+        studySetId: setId,
+        mode: "flashcards",
+        sessionKey,
+        currentIndex: nextIndex,
+        totalItems: cards.length,
+        progressPercent: pct,
+        stateJson,
+        committedEventKeys: [],
+        updatedAt: new Date().toISOString(),
+      });
+      void upsertCheckpoint({
+        study_set_id: setId,
+        mode: "flashcards",
+        session_key: sessionKey,
+        state_json: stateJson,
+        progress_percent: pct,
+        current_index: nextIndex,
+        total_items: cards.length,
+      }).catch(() => {});
+    },
+    [bundle, cards, sessionKey, setId],
+  );
+
+  // Check for resumable Flashcards checkpoint once per (setId, chapter)
+  React.useEffect(() => {
+    if (!bundle || cards.length === 0) return;
+    const key = `${setId}:${selectedChapter}:${cards.length}`;
+    if (checkpointCheckedRef.current === key) return;
+    checkpointCheckedRef.current = key;
+
+    const liveIds = new Set(cards.map((c) => c.questionId));
+    const localCp = loadLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+    void listCheckpoints({ studySetId: setId, mode: "flashcards", sessionKey })
+      .then((remotes) => {
+        const picked = pickNewestCheckpoint(remotes[0] ?? null, localCp);
+        if (
+          picked.source === "none" ||
+          picked.currentIndex <= 0 ||
+          picked.progressPercent >= 100
+        ) {
+          return;
+        }
+        const st = picked.stateJson as {
+          cardIds?: string[];
+          knownIds?: string[];
+          unknownIds?: string[];
+        };
+        const rec = reconcileCheckpointQuestions(
+          Array.isArray(st.cardIds) ? st.cardIds : cards.map((c) => c.questionId),
+          liveIds,
+          picked.currentIndex,
+        );
+        if (rec.validIds.length === 0) return;
+        setPendingResume({
+          source: picked.source,
+          currentIndex: rec.safeIndex,
+          totalItems: cards.length,
+          progressPercent: picked.progressPercent,
+          updatedAt: picked.updatedAt,
+          removedCount: rec.removedIds.length,
+          knownIds: (st.knownIds ?? []).filter((id) => liveIds.has(id)),
+          unknownIds: (st.unknownIds ?? []).filter((id) => liveIds.has(id)),
+        });
+      })
+      .catch(() => {});
+  }, [bundle, cards, selectedChapter, sessionKey, setId]);
 
   const goToIndex = React.useCallback(
     (nextIdx: number) => {
@@ -379,6 +508,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       }
 
       // Advance to next card or complete
+      stopSpeech();
       if (safeIndex + 1 >= cards.length) {
         playFeedbackSound("complete");
         const durationSeconds = Math.max(
@@ -387,6 +517,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         );
         setCompletedDurationSeconds(durationSeconds);
         setIsCompleted(true);
+        persistFlashcardCheckpoint(safeIndex, nextKnown, nextUnknown, true);
         if (sessionIdRef.current) {
           updateStudySession(sessionIdRef.current, {
             status: "completed",
@@ -399,6 +530,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         setCurrentIndex(safeIndex + 1);
         setIsFlipped(false);
         cardShownAtRef.current = Date.now();
+        persistFlashcardCheckpoint(safeIndex + 1, nextKnown, nextUnknown, false);
       }
     },
     [
@@ -406,18 +538,22 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       bundle,
       cards.length,
       knownIds,
+      persistFlashcardCheckpoint,
       playFeedbackSound,
       safeIndex,
       setId,
+      stopSpeech,
       unknownIds,
       updateLocalProgress,
     ],
   );
 
   const handleFlipToggle = React.useCallback(() => {
+    // Stop stale speech cleanly whenever flipping sides!
+    stopSpeech();
     playFeedbackSound("flip");
     setIsFlipped((prev) => !prev);
-  }, [playFeedbackSound]);
+  }, [playFeedbackSound, stopSpeech]);
 
   const handleStarToggle = React.useCallback(async () => {
     if (!activeCard) return;
@@ -521,6 +657,36 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       ? activeCard.frontImageUrl
       : activeCard.backImageUrl
     : null;
+  const frontRich = activeCard
+    ? swapSides
+      ? activeCard.backRich ?? null
+      : activeCard.frontRich ?? null
+    : null;
+  const backRich = activeCard
+    ? swapSides
+      ? activeCard.frontRich ?? null
+      : activeCard.backRich ?? null
+    : null;
+  const frontAudio = activeCard
+    ? swapSides
+      ? activeCard.backAudioUrl ?? null
+      : activeCard.frontAudioUrl ?? null
+    : null;
+  const backAudio = activeCard
+    ? swapSides
+      ? activeCard.frontAudioUrl ?? null
+      : activeCard.backAudioUrl ?? null
+    : null;
+  const frontMedia = activeCard
+    ? swapSides
+      ? activeCard.backMedia ?? []
+      : activeCard.frontMedia ?? []
+    : [];
+  const backMedia = activeCard
+    ? swapSides
+      ? activeCard.frontMedia ?? []
+      : activeCard.backMedia ?? []
+    : [];
 
   const isFullscreenActive = isNativeFullscreen || isFallbackFullscreen;
 
@@ -693,6 +859,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
               className="min-h-9"
               aria-pressed={swapSides}
               onClick={() => {
+                stopSpeech();
                 setSwapSides((prev) => !prev);
                 setIsFlipped(false);
               }}
@@ -700,8 +867,46 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
               <ArrowLeftRight className="size-3.5" aria-hidden="true" />
               {lText(locale, "Đảo mặt", "Swap sides")}
             </Button>
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="min-h-9 text-muted-foreground"
+              onClick={() => setResetDialogOpen(true)}
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              {lText(locale, "Đặt lại", "Reset")}
+            </Button>
           </div>
         </div>
+
+        {/* Resumable Checkpoint Banner */}
+        {pendingResume ? (
+          <div className="mx-auto mb-4 w-full max-w-3xl">
+            <ResumeSessionBanner
+              modeLabel={lText(locale, "Thẻ ghi nhớ (Flashcards)", "Flashcards")}
+              currentIndex={pendingResume.currentIndex}
+              totalItems={pendingResume.totalItems}
+              progressPercent={pendingResume.progressPercent}
+              updatedAt={pendingResume.updatedAt}
+              source={pendingResume.source}
+              removedQuestionsCount={pendingResume.removedCount}
+              onContinue={() => {
+                setCurrentIndex(pendingResume.currentIndex);
+                setKnownIds(new Set(pendingResume.knownIds));
+                setUnknownIds(new Set(pendingResume.unknownIds));
+                setIsFlipped(false);
+                setPendingResume(null);
+              }}
+              onRestart={() => resetDeckState(null)}
+              onDiscard={() => {
+                setPendingResume(null);
+                clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+                void deleteCheckpoint({ sessionKey }).catch(() => {});
+              }}
+            />
+          </div>
+        ) : null}
 
         {/* Status pills */}
         {cards.length > 0 && !isCompleted ? (
@@ -870,6 +1075,29 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                           variant="ghost"
                           size="icon"
                           className="min-h-10 min-w-10"
+                          asChild
+                          aria-label={lText(
+                            locale,
+                            "Gắn âm thanh / sửa thẻ",
+                            "Attach audio / edit card",
+                          )}
+                        >
+                          <Link
+                            href={`/sets/${setId}/edit?questionId=${activeCard.questionId}`}
+                            title={lText(
+                              locale,
+                              "Ghi âm / Sửa thẻ",
+                              "Record audio / Edit card",
+                            )}
+                          >
+                            <Mic className="size-4 text-muted-foreground" aria-hidden="true" />
+                          </Link>
+                        </Button>
+
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="min-h-10 min-w-10"
                           onClick={() => void handleStarToggle()}
                           aria-pressed={isStarred}
                           aria-label={
@@ -908,32 +1136,63 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                       {prefersReducedMotion ? (
                         <div className="flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs transition-opacity duration-150">
                           <div className="my-auto w-full max-w-2xl space-y-4">
-                            <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed sm:text-xl">
-                              {(isFlipped ? backText : frontText) ||
-                                lText(locale, "(Chưa có nội dung)", "(No content)")}
-                            </p>
-                            {isSafeDisplayImageUrl(
-                              isFlipped ? backImage : frontImage,
-                            ) ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={(isFlipped ? backImage : frontImage) ?? ""}
+                            <SafeRichText
+                              rich={isFlipped ? backRich : frontRich}
+                              fallbackText={
+                                (isFlipped ? backText : frontText) ||
+                                lText(locale, "(Chưa có nội dung)", "(No content)")
+                              }
+                              className="text-lg font-medium leading-relaxed sm:text-xl"
+                            />
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="flex flex-wrap items-center justify-center gap-3"
+                            >
+                              <ZoomableImage
+                                src={isFlipped ? backImage : frontImage}
                                 alt={lText(
                                   locale,
                                   "Hình ảnh minh họa thẻ",
                                   "Flashcard illustration",
                                 )}
-                                className="mx-auto max-h-56 rounded-lg border border-border object-contain"
+                                className="mx-auto max-h-56"
                               />
+                              {(isFlipped ? backMedia : frontMedia)
+                                .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
+                                .map((m) => (
+                                  <ZoomableImage
+                                    key={m.id}
+                                    src={m.media?.proxy_url}
+                                    alt={m.alt_text ?? m.media?.alt_text ?? ""}
+                                    caption={m.caption ?? m.media?.caption}
+                                    className="max-h-44"
+                                  />
+                                ))}
+                            </div>
+                            {isSafeDisplayImageUrl(
+                              isFlipped ? backAudio : frontAudio,
+                            ) ? (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="mx-auto max-w-md pt-1"
+                              >
+                                <audio
+                                  controls
+                                  preload="metadata"
+                                  src={(isFlipped ? backAudio : frontAudio) ?? ""}
+                                  className="w-full"
+                                />
+                              </div>
                             ) : null}
-                            {isFlipped && activeCard.explanation ? (
+                            {isFlipped && (activeCard.explanation || activeCard.explanationRich) ? (
                               <div className="mt-4 rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
                                 <span className="font-semibold text-foreground">
                                   {t("study.explanation")}:{" "}
                                 </span>
-                                <span className="whitespace-pre-wrap">
-                                  {activeCard.explanation}
-                                </span>
+                                <SafeRichText
+                                  rich={activeCard.explanationRich}
+                                  fallbackText={activeCard.explanation}
+                                />
                               </div>
                             ) : null}
                           </div>
@@ -977,26 +1236,63 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                             className="col-start-1 row-start-1 flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs"
                           >
                             <div className="my-auto w-full max-w-2xl space-y-4">
-                              <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed sm:text-xl">
-                                {frontText ||
-                                  lText(locale, "(Chưa có nội dung)", "(No content)")}
-                              </p>
-                              {isSafeDisplayImageUrl(frontImage) ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
+                              <SafeRichText
+                                rich={frontRich}
+                                fallbackText={
+                                  frontText ||
+                                  lText(locale, "(Chưa có nội dung)", "(No content)")
+                                }
+                                className="text-lg font-medium leading-relaxed sm:text-xl"
+                              />
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex flex-wrap items-center justify-center gap-3"
+                              >
+                                <ZoomableImage
                                   src={frontImage}
                                   alt={lText(
                                     locale,
                                     "Hình ảnh mặt trước",
                                     "Front side illustration",
                                   )}
-                                  className="mx-auto max-h-56 rounded-lg border border-border object-contain"
+                                  className="mx-auto max-h-56"
                                 />
+                                {frontMedia
+                                  .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
+                                  .map((m) => (
+                                    <ZoomableImage
+                                      key={m.id}
+                                      src={m.media?.proxy_url}
+                                      alt={m.alt_text ?? m.media?.alt_text ?? ""}
+                                      caption={m.caption ?? m.media?.caption}
+                                      className="max-h-44"
+                                    />
+                                  ))}
+                              </div>
+                              {isSafeDisplayImageUrl(frontAudio) ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="mx-auto max-w-md pt-1"
+                                >
+                                  <audio
+                                    controls
+                                    preload="metadata"
+                                    src={frontAudio}
+                                    className="w-full"
+                                  />
+                                </div>
                               ) : null}
-                              {activeCard.hint ? (
-                                <p className="text-xs text-muted-foreground">
-                                  {lText(locale, "Gợi ý", "Hint")}: {activeCard.hint}
-                                </p>
+                              {activeCard.hint || activeCard.hintRich ? (
+                                <div className="text-xs text-muted-foreground">
+                                  <span className="font-semibold">
+                                    {lText(locale, "Gợi ý", "Hint")}:{" "}
+                                  </span>
+                                  <SafeRichText
+                                    rich={activeCard.hintRich}
+                                    fallbackText={activeCard.hint}
+                                    inline
+                                  />
+                                </div>
                               ) : null}
                             </div>
                             <div className="mt-6">
@@ -1030,30 +1326,61 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                             className="col-start-1 row-start-1 flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-primary/40 bg-card p-6 sm:p-10 text-center shadow-xs"
                           >
                             <div className="my-auto w-full max-w-2xl space-y-4">
-                              <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed text-foreground sm:text-xl">
-                                {backText ||
-                                  lText(locale, "(Chưa có đáp án)", "(No answer)")}
-                              </p>
-                              {isSafeDisplayImageUrl(backImage) ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
+                              <SafeRichText
+                                rich={backRich}
+                                fallbackText={
+                                  backText ||
+                                  lText(locale, "(Chưa có đáp án)", "(No answer)")
+                                }
+                                className="text-lg font-medium leading-relaxed text-foreground sm:text-xl"
+                              />
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex flex-wrap items-center justify-center gap-3"
+                              >
+                                <ZoomableImage
                                   src={backImage}
                                   alt={lText(
                                     locale,
                                     "Hình ảnh mặt sau",
                                     "Back side illustration",
                                   )}
-                                  className="mx-auto max-h-56 rounded-lg border border-border object-contain"
+                                  className="mx-auto max-h-56"
                                 />
+                                {backMedia
+                                  .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
+                                  .map((m) => (
+                                    <ZoomableImage
+                                      key={m.id}
+                                      src={m.media?.proxy_url}
+                                      alt={m.alt_text ?? m.media?.alt_text ?? ""}
+                                      caption={m.caption ?? m.media?.caption}
+                                      className="max-h-44"
+                                    />
+                                  ))}
+                              </div>
+                              {isSafeDisplayImageUrl(backAudio) ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="mx-auto max-w-md pt-1"
+                                >
+                                  <audio
+                                    controls
+                                    preload="metadata"
+                                    src={backAudio}
+                                    className="w-full"
+                                  />
+                                </div>
                               ) : null}
-                              {activeCard.explanation ? (
+                              {activeCard.explanation || activeCard.explanationRich ? (
                                 <div className="rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
                                   <span className="font-semibold text-foreground">
                                     {t("study.explanation")}:{" "}
                                   </span>
-                                  <span className="whitespace-pre-wrap">
-                                    {activeCard.explanation}
-                                  </span>
+                                  <SafeRichText
+                                    rich={activeCard.explanationRich}
+                                    fallbackText={activeCard.explanation}
+                                  />
                                 </div>
                               ) : null}
                             </div>
@@ -1161,10 +1488,38 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                   <ChevronRight className="size-4" aria-hidden="true" />
                 </Button>
               </div>
+
+              {isFlipped ? (
+                <div className="pt-1">
+                  <QuestionNotesAndReportBar
+                    studySetId={setId}
+                    questionId={activeCard.questionId}
+                    compact
+                  />
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}
+
+        <ResetProgressDialog
+          open={resetDialogOpen}
+          onOpenChange={setResetDialogOpen}
+          defaultScope="study_set"
+          studySetId={setId}
+          studySetTitle={bundle.studySet.title}
+          subject={bundle.studySet.subject ?? undefined}
+          chapters={bundle.chapters}
+          mode="flashcards"
+          userId={bundle.studySet.owner_id}
+          onResetComplete={() => {
+            void refetch();
+            resetDeckState(null);
+          }}
+        />
       </FocusModeShell>
     </div>
   );
 }
+
+export const FlashcardDeck = FlashcardsClient;

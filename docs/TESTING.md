@@ -116,12 +116,38 @@ Playwright (`tests/e2e/responsive-viewports.spec.ts`) verifies **zero horizontal
 
 ## 5. Accessibility & Security Audit Gate (Pre-Release Checklist)
 
-- [ ] `npm run typecheck` exits `0`.
-- [ ] `npm run lint` exits `0`.
-- [ ] `npm run test` (all Vitest suites including 600 & 10,000 stress + security tests) exits `0`.
-- [ ] `npm run build` exits `0`.
-- [ ] Zero AI packages (`openai`, `@google/genai`, `anthropic`, `ai`, `langchain`) and zero payment packages (`stripe`, `paddle`) in `package.json`.
-- [ ] Zero occurrences of `SUPABASE_SERVICE_ROLE_KEY` outside server-only files (`src/lib/supabase/admin.ts`).
-- [ ] Zero occurrences of `dangerouslySetInnerHTML` on user/imported content.
-- [ ] All 20 Supabase tables have `ENABLE ROW LEVEL SECURITY` and verified policies.
-- [ ] Skip-to-content link, keyboard shortcuts, `prefers-reduced-motion`, Light/Dark contrast >= 4.5:1 verified.
+- [x] `npm run typecheck` exits `0`.
+- [x] `npm run lint` exits `0`.
+- [x] `npm run test` (all 50 Vitest files / **363 tests**, including 600 & 10,000 stress, PDF export, diagram geometry, offline sync, security, and live PG 17.12 DB + 2/3-account RLS/HTTP suites) exits `0`.
+- [x] `npm run build` exits `0` (**64/64 static pages**, **114 App Router routes** + `ƒ Proxy`, `0` secret/server-parser leaks in `.next/static/`).
+- [x] Zero AI packages (`openai`, `@google/genai`, `anthropic`, `ai`, `langchain`, paid TTS/STT/OCR) and zero payment packages (`stripe`, `paddle`) in `package.json`.
+- [x] Zero occurrences of `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` outside server-only files (`src/lib/supabase/admin.ts`, `env.ts`).
+- [x] `dangerouslySetInnerHTML` restricted solely to `renderSafeKatexHtml()` (`trust: false`) in `RichContentRenderer.tsx` / `RichTextEditor.tsx`; zero raw user HTML rendering.
+- [x] All **36 Supabase tables** (Migrations `0001`–`0016`) have `ENABLE ROW LEVEL SECURITY`, `0` Security Advisor errors, and `0` `unindexed_foreign_keys`.
+- [x] Skip-to-content link, IME-safe keyboard shortcuts (`?`), `Ctrl+K` Hard Exam Guard, `prefers-reduced-motion`, Light/Dark WCAG 2.2 AA contrast, and 6-viewport (`360`–`1920px`) + mobile `390px` diagram/offline zero overflow verified live.
+
+---
+
+## 6. StudyHub V3.0 (Complete Learning Edition) — Expanded Live Verification Suite
+
+StudyHub V3.0 expands the test pyramid to **50 Vitest test files (363 tests)** and **3 Playwright E2E specs (22 live tests)**:
+
+### 6.1 V3.0 Unit & Integration Suites (`npm run test`)
+- **Media, Audio & Rich Text (`tests/unit/media/*`, `tests/unit/audio/*`, `tests/unit/richtext/*`):** Image/audio magic-byte & size guards, `AudioRecorderControl`, `SpeechSynthesis` TTS wrapper, `ImageLightbox` & `AudioPlayer` components, TipTap JSON AST v1 sanitization + safe KaTeX (`trust: false`).
+- **Multimedia DOCX, Text-Based PDF Import & Vietnamese PDF Export (`tests/unit/import/docx-multimedia.test.ts`, `pdf-import.test.ts`, `tests/unit/export/pdf-export.test.ts`):** Embedded OOXML image extraction, multi-page Vietnamese selectable-text PDF & scanned-PDF detection, all 5 Vietnamese PDF export modes (`NotoSans` embedding, post-shuffle key accuracy, 250-question paper).
+- **12-Type Grading, Confidence, Spell, Adaptive Learn & Checkpoints (`tests/unit/learning/*`, `tests/unit/questions/registry.test.ts`):** All 12 exam question types + flashcard exclusion, `matching` pre-submit payload normalization, P0 Confidence Exam Score Neutrality, Spell Mode diff & IME guards, Learn Mode TSV MCQ payload, Resume checkpoints.
+- **Visual Diagram Mode (`tests/unit/diagram/*`):** Normalized `[0,1]` point/rect/polygon geometry engine (`25` tests), 6-mode study engine (`7` tests), `DiagramStudyPlayer` components (`4` tests), and SQL parity (`2` tests).
+- **PWA, Account-Partitioned IndexedDB & Offline Sync (`tests/unit/offline/*`):** Manifest/icon/SW hygiene (`7` tests), per-`userId` IndexedDB isolation (`7` tests), Download Manager (`5` tests), Offline Session (`4` tests), Sync/Conflict protocol (`5` tests), PWA UI & lazy `PwaProvider` (`6` tests).
+- **Keyboard Shortcuts & Global Search (`tests/unit/ui/shortcuts.test.ts`):** Context priority, Vietnamese IME suppression (`isComposing`, `keyCode === 229`, 50ms window), `Ctrl+K` Hard Exam Guard, and `GlobalSearchResponse` normalization (`10` tests).
+- **Live Supabase Cloud PostgreSQL 17.12 Suites (run automatically when `.env.local` + `LIVE_API_BASE_URL` are present, strictly preserving pre-existing real user data via tracked disposable `*@studyhub-test.local` cleanup):**
+  - `tests/integration/live-db-rpcs.test.ts` (**8/8 PASS LIVE** — V2.1 regression)
+  - `tests/integration/live-v3-db-rpcs.test.ts` (**8/8 PASS LIVE** — V3.0 schema, 12-type grading, confidence neutrality, clone, 6-scope reset, 8-entity search, offline sync protocol, `ON DELETE RESTRICT` + delete triggers)
+  - `tests/integration/live-rls-security.test.ts` (**11/11 PASS LIVE** — V2.1 2-account RLS/Storage/HTTP regression)
+  - `tests/integration/live-v3-rls-security.test.ts` (**11/11 PASS LIVE** — V3.0 3-account Notes/Reports/Checkpoints/Sync/Media/Audio/12-Type Anti-Leak/PDF Auth/CSP/SW security)
+
+### 6.2 V3.0 Live Playwright E2E Suite (`22 / 22` PASS)
+- `tests/e2e/studyhub.spec.ts` (**13/13 PASS** — public routes, prod CSP/HSTS, `/api/health`, localized 404, Light/Dark, VI/EN `<title>` reload persistence, protected redirects, reduced motion, 6 viewports `360`–`1920px`).
+- `tests/e2e/authenticated-journey.spec.ts` (**3/3 PASS** — full V1.0 + V2.0/V2.1 multi-subject & Full Coverage live regression).
+- `tests/e2e/v3-complete-learning.spec.ts` (**6/6 PASS** — `V3-T1` PWA/Shortcuts/Settings, `V3-T2` Media/KaTeX/Lightbox/DOCX+PDF Import, `V3-T3` All 12 Types/Confidence Neutrality/Hard Exam Guard/Notes/Reports/PDF Export, `V3-T4` Spell/Audio Flashcards/Learn/Resume/Scoped Reset preserving Exam History, `V3-T5` Visual Diagrams Desktop+Mobile `390px`+2-Account RLS, `V3-T6` True Offline PWA `setOffline(true)` + Offline `F5` Reload + Sync + Same-Browser Account-Switch A→B `0`-Leak Isolation).
+
+> **Data Safety Rule for Live Cloud Tests:** Never wipe or reset a shared Supabase Cloud project containing real user data. All live integration & E2E tests provision prefixed disposable accounts (`*@studyhub-test.local`), track exact created UUIDs, delete ONLY those tracked users/blobs in `afterAll`/`finally`, and assert `trackedRemaining === 0`. See [`docs/audit/v3/TEST_MATRIX.md`](audit/v3/TEST_MATRIX.md) (**93/93 PASS**, **55/55 §41 Acceptance Criteria VERIFIED**).

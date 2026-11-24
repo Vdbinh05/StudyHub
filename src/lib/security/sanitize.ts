@@ -1,4 +1,11 @@
 import type { AnswerMatchMode } from "@/types/domain";
+import type {
+  RichTextDoc,
+  RichTextMark,
+  RichTextMarkType,
+  RichTextNode,
+  RichTextNodeType,
+} from "@/types/v3";
 
 const STRICT_UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -180,4 +187,194 @@ export function slugifyTag(name: string): string {
     .slice(0, 60);
 
   return slug || "tag";
+}
+
+const ALLOWED_RICHTEXT_NODES = new Set<RichTextNodeType>([
+  "doc",
+  "paragraph",
+  "text",
+  "hardBreak",
+  "heading",
+  "bulletList",
+  "orderedList",
+  "listItem",
+  "blockquote",
+  "codeBlock",
+  "table",
+  "tableRow",
+  "tableHeader",
+  "tableCell",
+  "inlineMath",
+  "blockMath",
+  "image",
+]);
+
+const ALLOWED_RICHTEXT_MARKS = new Set<RichTextMarkType>([
+  "bold",
+  "italic",
+  "underline",
+  "strike",
+  "code",
+  "superscript",
+  "subscript",
+  "link",
+]);
+
+const MAX_RICHTEXT_DEPTH = 12;
+const MAX_RICHTEXT_NODES = 1500;
+
+function sanitizeRichTextMarks(
+  rawMarks: unknown,
+): RichTextMark[] | undefined {
+  if (!Array.isArray(rawMarks)) return undefined;
+  const out: RichTextMark[] = [];
+  for (const m of rawMarks) {
+    if (!m || typeof m !== "object") continue;
+    const rec = m as Record<string, unknown>;
+    const rawType = typeof rec.type === "string" ? rec.type : "";
+    if (!ALLOWED_RICHTEXT_MARKS.has(rawType as RichTextMarkType)) continue;
+    const type = rawType as RichTextMarkType;
+
+    if (type === "link") {
+      const attrs =
+        rec.attrs && typeof rec.attrs === "object"
+          ? (rec.attrs as Record<string, unknown>)
+          : {};
+      const href = typeof attrs.href === "string" ? attrs.href.trim() : "";
+      if (!href || !isSafeHttpOrStorageUrl(href)) continue;
+      out.push({
+        type: "link",
+        attrs: {
+          href,
+          target: "_blank",
+          rel: "noopener noreferrer nofollow",
+        },
+      });
+    } else {
+      out.push({ type });
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function sanitizeRichTextAttrs(
+  nodeType: RichTextNodeType,
+  rawAttrs: unknown,
+): Record<string, string | number | boolean | null> | undefined {
+  if (!rawAttrs || typeof rawAttrs !== "object") return undefined;
+  const src = rawAttrs as Record<string, unknown>;
+
+  switch (nodeType) {
+    case "heading": {
+      const lvl = Number(src.level);
+      return { level: Number.isInteger(lvl) && lvl >= 1 && lvl <= 4 ? lvl : 2 };
+    }
+    case "codeBlock": {
+      const lang =
+        typeof src.language === "string"
+          ? src.language.replace(/[^a-zA-Z0-9_+-]/g, "").slice(0, 30)
+          : null;
+      return lang ? { language: lang } : undefined;
+    }
+    case "inlineMath":
+    case "blockMath": {
+      const latex =
+        typeof src.latex === "string" ? sanitizeText(src.latex, 2000) : "";
+      return { latex };
+    }
+    case "image": {
+      const url = typeof src.src === "string" ? src.src.trim() : "";
+      if (!url || !isSafeHttpOrStorageUrl(url)) return undefined;
+      return {
+        src: url,
+        alt: typeof src.alt === "string" ? sanitizeText(src.alt, 500) : "",
+        media_id:
+          typeof src.media_id === "string" && isStrictUuid(src.media_id)
+            ? src.media_id
+            : null,
+      };
+    }
+    case "tableCell":
+    case "tableHeader": {
+      const colspan = Number(src.colspan);
+      const rowspan = Number(src.rowspan);
+      const attrs: Record<string, string | number | boolean | null> = {};
+      if (Number.isInteger(colspan) && colspan >= 1 && colspan <= 12) {
+        attrs.colspan = colspan;
+      }
+      if (Number.isInteger(rowspan) && rowspan >= 1 && rowspan <= 12) {
+        attrs.rowspan = rowspan;
+      }
+      return Object.keys(attrs).length > 0 ? attrs : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Deterministically sanitizes a TipTap/ProseMirror-compatible `RichTextDoc` JSON AST.
+ * Strips unknown node/mark types, unsafe URLs (`javascript:`, `data:`, `vbscript:`),
+ * arbitrary HTML attributes, and enforces depth/node caps to prevent DoS & stored XSS.
+ */
+export function sanitizeRichTextDoc(input: unknown): RichTextDoc | null {
+  if (!input || typeof input !== "object") return null;
+  const root = input as Record<string, unknown>;
+  if (root.type !== "doc" || !Array.isArray(root.content)) return null;
+
+  let visited = 0;
+
+  const walk = (rawNode: unknown, depth: number): RichTextNode | null => {
+    if (depth > MAX_RICHTEXT_DEPTH || visited >= MAX_RICHTEXT_NODES) {
+      return null;
+    }
+    if (!rawNode || typeof rawNode !== "object") return null;
+    const rec = rawNode as Record<string, unknown>;
+    const rawType = typeof rec.type === "string" ? rec.type : "";
+    if (!ALLOWED_RICHTEXT_NODES.has(rawType as RichTextNodeType) || rawType === "doc") {
+      return null;
+    }
+    const type = rawType as RichTextNodeType;
+
+    visited += 1;
+    const node: RichTextNode = { type };
+
+    if (type === "text") {
+      if (typeof rec.text !== "string") return null;
+      node.text = rec.text
+        .replace(/\r\n?/g, "\n")
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+        .slice(0, 10_000);
+      const marks = sanitizeRichTextMarks(rec.marks);
+      if (marks) node.marks = marks;
+      return node;
+    }
+
+    const attrs = sanitizeRichTextAttrs(type, rec.attrs);
+    if (type === "image" && !attrs) return null;
+    if (attrs) node.attrs = attrs;
+
+    if (Array.isArray(rec.content)) {
+      const children: RichTextNode[] = [];
+      for (const child of rec.content) {
+        const cleanChild = walk(child, depth + 1);
+        if (cleanChild) children.push(cleanChild);
+      }
+      if (children.length > 0) node.content = children;
+    }
+
+    return node;
+  };
+
+  const content: RichTextNode[] = [];
+  for (const child of root.content) {
+    const clean = walk(child, 1);
+    if (clean) content.push(clean);
+  }
+
+  return {
+    type: "doc",
+    version: 1,
+    content,
+  };
 }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   allocationStrategySchema,
+  confidenceLevelSchema,
   coverageCycleStatusSchema,
   difficultySchema,
   examQuestionTypeSchema,
@@ -11,6 +12,7 @@ import {
   studyModeSchema,
   uuidSchema,
 } from "./common";
+import { structuredAnswerResponseSchema } from "./v3";
 
 export const MAX_EXAM_QUESTIONS = 1000;
 
@@ -19,7 +21,7 @@ export const examFilterSchema = z
     chapters: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
     tag_ids: z.array(uuidSchema).max(100).optional(),
     difficulties: z.array(difficultySchema).max(3).optional(),
-    question_types: z.array(examQuestionTypeSchema).max(4).optional(),
+    question_types: z.array(examQuestionTypeSchema).max(12).optional(),
   })
   .strict();
 
@@ -95,7 +97,7 @@ export const createExamSchema = z
     chapters: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
     tag_ids: z.array(uuidSchema).max(100).optional(),
     difficulties: z.array(difficultySchema).max(3).optional(),
-    question_types: z.array(examQuestionTypeSchema).max(4).optional(),
+    question_types: z.array(examQuestionTypeSchema).max(12).optional(),
     only_starred: z.boolean().default(false),
     only_unmastered: z.boolean().default(false),
     only_mistakes: z.boolean().default(false),
@@ -115,6 +117,9 @@ export const saveExamAnswerItemSchema = z.object({
   attempt_question_id: uuidSchema,
   selected_option_ids: z.array(uuidSchema).max(20).default([]),
   typed_answer: z.string().max(5000).nullable().optional(),
+  structured_response: structuredAnswerResponseSchema.nullable().optional(),
+  confidence: confidenceLevelSchema.nullable().optional(),
+  hint_used: z.boolean().optional(),
   is_flagged: z.boolean().default(false),
   client_seq: z.number().int().min(0).default(0),
 });
@@ -219,7 +224,7 @@ export const practiceQuestionsRequestSchema = z.object({
       chapters: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
       tag_ids: z.array(uuidSchema).max(100).optional(),
       difficulties: z.array(difficultySchema).max(3).optional(),
-      question_types: z.array(questionTypeSchema).max(5).optional(),
+      question_types: z.array(questionTypeSchema).max(13).optional(),
     })
     .optional(),
   create_session: z.boolean().default(false),

@@ -44,6 +44,9 @@ interface ParseApiResponse {
     detectedColumns?: string[];
     sampleRows?: string[][];
     suggestedMapping?: ColumnMapping;
+    isScannedPdf?: boolean;
+    pdfPageCount?: number;
+    pdfExtractedPages?: number;
     questions: ParsedQuestion[];
     summary: ImportPreviewSummary;
     ruleUsed: AnswerRule;
@@ -101,6 +104,8 @@ function buildParseCacheKey(
     csv: opts.csvDelimiter ?? "",
     term: opts.termDelimiter ?? "\\t",
     card: opts.cardDelimiter ?? "\\n",
+    pdfRange: opts.pdfPageRange ?? "",
+    pdf2Col: opts.pdfTwoColumn ?? false,
   });
 }
 
@@ -133,6 +138,10 @@ export function ImportWizard({
   const [termDelimiter, setTermDelimiter] = React.useState<string>("\\t");
   const [cardDelimiter, setCardDelimiter] = React.useState<string>("\\n");
   const [csvDelimiter, setCsvDelimiter] = React.useState<string>("");
+  const [pdfPageRange, setPdfPageRange] = React.useState<string>("");
+  const [pdfTwoColumn, setPdfTwoColumn] = React.useState<boolean>(false);
+  const [isScannedPdf, setIsScannedPdf] = React.useState<boolean>(false);
+  const [pdfPageCount, setPdfPageCount] = React.useState<number | undefined>(undefined);
   const [answerRule, setAnswerRule] = React.useState<AnswerRule>({ mode: "auto" });
 
   // Parsed preview state
@@ -285,6 +294,14 @@ export function ImportWizard({
         overrideOpts && "cardDelimiter" in overrideOpts
           ? overrideOpts.cardDelimiter
           : cardDelimiter;
+      const effectivePdfPageRange =
+        overrideOpts && "pdfPageRange" in overrideOpts
+          ? overrideOpts.pdfPageRange
+          : pdfPageRange.trim() || undefined;
+      const effectivePdfTwoColumn =
+        overrideOpts && "pdfTwoColumn" in overrideOpts
+          ? overrideOpts.pdfTwoColumn
+          : pdfTwoColumn;
 
       const effectiveOptions: ImportOptions = {
         formatOverride: effectiveFormatOverride,
@@ -296,6 +313,9 @@ export function ImportWizard({
         csvDelimiter: effectiveCsvDelim,
         termDelimiter: effectiveTermDelim,
         cardDelimiter: effectiveCardDelim,
+        pdfPageRange: effectivePdfPageRange,
+        pdfTwoColumn: effectivePdfTwoColumn,
+        preserveMediaPreviews: true,
       };
 
       const requestKey = buildParseCacheKey(sourceVersion, effectiveOptions);
@@ -359,6 +379,8 @@ export function ImportWizard({
         setDetectedColumns(data.detectedColumns);
         setSampleRows(data.sampleRows);
         setColumnMapping(resolvedMapping);
+        setIsScannedPdf(Boolean(data.isScannedPdf));
+        setPdfPageCount(data.pdfPageCount);
         setQuestions(data.questions);
         setSummary(data.summary);
         setDetectedChapters(data.detectedChapters ?? []);
@@ -399,6 +421,8 @@ export function ImportWizard({
       hasHeaderRow,
       headerRowCount,
       locale,
+      pdfPageRange,
+      pdfTwoColumn,
       rawText,
       selectedFile,
       selectedSheet,
@@ -439,6 +463,71 @@ export function ImportWizard({
     [],
   );
 
+  const handleMoveMediaToQuestion = React.useCallback(
+    (
+      sourceTempId: string,
+      mediaId: string,
+      sourceSlot: "prompt" | string,
+      targetQuestionIndex: number,
+    ) => {
+      setQuestions((prev) => {
+        const srcIdx = prev.findIndex((q) => q.tempId === sourceTempId);
+        if (srcIdx === -1 || targetQuestionIndex < 0 || targetQuestionIndex >= prev.length) {
+          return prev;
+        }
+        const srcQ = prev[srcIdx];
+        const moved =
+          sourceSlot === "prompt"
+            ? (srcQ.promptMedia ?? []).find((m) => m.id === mediaId)
+            : srcQ.options
+                .find((o) => o.id === sourceSlot)
+                ?.media?.find((m) => m.id === mediaId);
+        if (!moved) return prev;
+
+        const cleanMoved = { ...moved, ambiguous: false };
+        const nextList = prev.slice();
+
+        const nextSrcPromptMedia = (srcQ.promptMedia ?? []).filter((m) => m.id !== mediaId);
+        const nextSrcOptions = srcQ.options.map((o) => {
+          const rem = (o.media ?? []).filter((m) => m.id !== mediaId);
+          return { ...o, media: rem.length > 0 ? rem : undefined };
+        });
+        const srcStillFloating =
+          nextSrcPromptMedia.some((m) => m.ambiguous) ||
+          nextSrcOptions.some((o) => (o.media ?? []).some((m) => m.ambiguous));
+
+        nextList[srcIdx] = validateParsedQuestion(
+          {
+            ...srcQ,
+            promptMedia: nextSrcPromptMedia.length > 0 ? nextSrcPromptMedia : undefined,
+            options: nextSrcOptions,
+            ambiguousMedia: srcStillFloating ? true : undefined,
+            issues: srcStillFloating
+              ? srcQ.issues
+              : srcQ.issues.filter((i) => i.code !== "AMBIGUOUS_MEDIA_MAPPING"),
+          },
+          srcIdx,
+          { isDuplicate: srcQ.isDuplicate },
+        );
+
+        const destQ = nextList[targetQuestionIndex];
+        nextList[targetQuestionIndex] = validateParsedQuestion(
+          {
+            ...destQ,
+            promptMedia: [...(destQ.promptMedia ?? []), cleanMoved],
+          },
+          targetQuestionIndex,
+          { isDuplicate: destQ.isDuplicate },
+        );
+
+        latestQuestionsRef.current = nextList;
+        setSummary(computeImportSummary(nextList));
+        return nextList;
+      });
+    },
+    [],
+  );
+
   const readyToImportQuestions = React.useMemo(() => {
     return questions.filter((q) => {
       if (q.excluded) return false;
@@ -453,7 +542,39 @@ export function ImportWizard({
     const activeRows = readyToImportQuestions;
     if (activeRows.length === 0) return;
 
-    const chunks = chunkArray(activeRows, 500);
+    const hasEmbeddedDataUrls = activeRows.some(
+      (q) =>
+        (q.promptMedia?.some((m) => Boolean(m.dataUrl)) ?? false) ||
+        q.options.some((o) => o.media?.some((m) => Boolean(m.dataUrl)) ?? false),
+    );
+    // Keep JSON commit payload well under 12MB cap when raster images are embedded
+    const chunks: ParsedQuestion[][] = hasEmbeddedDataUrls
+      ? (() => {
+          const out: ParsedQuestion[][] = [];
+          let cur: ParsedQuestion[] = [];
+          let curBytes = 0;
+          const MAX_CHUNK_BYTES = 7 * 1024 * 1024;
+          for (const q of activeRows) {
+            const mediaLen =
+              (q.promptMedia ?? []).reduce((s, m) => s + (m.dataUrl?.length ?? 0), 0) +
+              q.options.reduce(
+                (s, o) =>
+                  s + (o.media ?? []).reduce((ms, m) => ms + (m.dataUrl?.length ?? 0), 0),
+                0,
+              );
+            const approxBytes = 2048 + mediaLen;
+            if (cur.length > 0 && (cur.length >= 250 || curBytes + approxBytes > MAX_CHUNK_BYTES)) {
+              out.push(cur);
+              cur = [];
+              curBytes = 0;
+            }
+            cur.push(q);
+            curBytes += approxBytes;
+          }
+          if (cur.length > 0) out.push(cur);
+          return out;
+        })()
+      : chunkArray(activeRows, 500);
     const defaultTags = defaultTagsText
       .split(",")
       .map((t) => t.trim())
@@ -740,6 +861,12 @@ export function ImportWizard({
               onCardDelimiterChange={setCardDelimiter}
               csvDelimiter={csvDelimiter}
               onCsvDelimiterChange={setCsvDelimiter}
+              pdfPageRange={pdfPageRange}
+              onPdfPageRangeChange={setPdfPageRange}
+              pdfTwoColumn={pdfTwoColumn}
+              onPdfTwoColumnChange={setPdfTwoColumn}
+              isScannedPdf={isScannedPdf}
+              pdfPageCount={pdfPageCount}
               isParsing={isParsing}
               headingRef={handleStepHeadingMount}
               onBack={() => setStep(1)}
@@ -795,6 +922,7 @@ export function ImportWizard({
                 detectedChapters={detectedChapters}
                 allowInlineEdit={false}
                 onUpdateQuestion={handleUpdateQuestion}
+                onMoveMediaToQuestion={handleMoveMediaToQuestion}
               />
 
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -848,6 +976,7 @@ export function ImportWizard({
                 detectedChapters={detectedChapters}
                 allowInlineEdit={true}
                 onUpdateQuestion={handleUpdateQuestion}
+                onMoveMediaToQuestion={handleMoveMediaToQuestion}
               />
 
               <ImportOptionsPanel

@@ -19,7 +19,7 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import type { Locale } from "@/types/domain";
 
-const ACCEPTED_EXTENSIONS = [".docx", ".xlsx", ".csv", ".tsv", ".txt", ".json"];
+const ACCEPTED_EXTENSIONS = [".docx", ".xlsx", ".pdf", ".csv", ".tsv", ".txt", ".json"];
 const MAX_CLIENT_FILE_BYTES = 15 * 1024 * 1024;
 
 export interface StepSourceInputProps {
@@ -85,8 +85,8 @@ export function StepSourceInput({
     if (!hasValidExt) {
       setLocalError(
         locale === "en"
-          ? "Unsupported file format. Supported: .docx, .xlsx, .csv, .tsv, .txt, .json."
-          : "Định dạng tệp không được hỗ trợ. Chỉ chấp nhận: .docx, .xlsx, .csv, .tsv, .txt, .json.",
+          ? "Unsupported file format. Supported: .docx, .xlsx, .pdf, .csv, .tsv, .txt, .json."
+          : "Định dạng tệp không được hỗ trợ. Chỉ chấp nhận: .docx, .xlsx, .pdf, .csv, .tsv, .txt, .json.",
       );
       return;
     }
@@ -177,15 +177,15 @@ export function StepSourceInput({
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {locale === "en"
-                    ? "Supports .docx, .xlsx, .csv, .tsv, .txt, .json (max 15 MB)"
-                    : "Hỗ trợ .docx, .xlsx, .csv, .tsv, .txt, .json (tối đa 15 MB)"}
+                    ? "Supports .docx (with images), .pdf (selectable text), .xlsx, .csv, .tsv, .txt, .json (max 15 MB)"
+                    : "Hỗ trợ .docx (gồm hình ảnh), .pdf (có lớp văn bản), .xlsx, .csv, .tsv, .txt, .json (tối đa 15 MB)"}
                 </p>
 
                 <input
                   ref={fileInputRef}
                   id="import-file-input"
                   type="file"
-                  accept=".docx,.xlsx,.csv,.tsv,.txt,.json"
+                  accept=".docx,.xlsx,.pdf,.csv,.tsv,.txt,.json"
                   className="sr-only"
                   onChange={(e) => validateAndPickFile(e.target.files?.[0])}
                 />
