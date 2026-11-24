@@ -1,0 +1,347 @@
+"use client";
+
+import * as React from "react";
+import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ClipboardList,
+  Play,
+  RefreshCw,
+  Search,
+  Star,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useI18n } from "@/lib/i18n";
+import {
+  fetchAccessibleSets,
+  fetchStarredQuestions,
+  unstarQuestion,
+} from "@/lib/learning/api-client";
+import { getExpectedWriteAnswers } from "@/lib/learning/write-grader";
+import { lText } from "./learning-copy";
+
+export function StarredQuestionsClient() {
+  const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
+
+  const [selectedSetId, setSelectedSetId] = React.useState<string>("all");
+  const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
+  const [searchTerm, setSearchTerm] = React.useState<string>("");
+
+  const setsQuery = useQuery({
+    queryKey: ["accessible-sets"],
+    queryFn: fetchAccessibleSets,
+    staleTime: 60_000,
+  });
+
+  const starredQuery = useQuery({
+    queryKey: ["starred-questions", selectedSetId],
+    queryFn: () =>
+      fetchStarredQuestions(selectedSetId !== "all" ? selectedSetId : undefined),
+  });
+
+  const allStarred = React.useMemo(
+    () => starredQuery.data ?? [],
+    [starredQuery.data],
+  );
+
+  const availableChapters = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const item of allStarred) {
+      const ch = item.question?.chapter;
+      if (ch && ch.trim()) set.add(ch.trim());
+    }
+    return Array.from(set);
+  }, [allStarred]);
+
+  const filtered = React.useMemo(() => {
+    const qLower = searchTerm.trim().toLowerCase();
+    return allStarred.filter((item) => {
+      if (selectedChapter !== "all") {
+        if ((item.question?.chapter?.trim() || "") !== selectedChapter) {
+          return false;
+        }
+      }
+      if (qLower) {
+        const prompt = item.question?.prompt?.toLowerCase() ?? "";
+        const chapter = item.question?.chapter?.toLowerCase() ?? "";
+        return prompt.includes(qLower) || chapter.includes(qLower);
+      }
+      return true;
+    });
+  }, [allStarred, searchTerm, selectedChapter]);
+
+  const setTitleMap = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of setsQuery.data ?? []) {
+      map.set(s.id, s.title);
+    }
+    return map;
+  }, [setsQuery.data]);
+
+  const handleUnstar = React.useCallback(
+    async (questionId: string) => {
+      try {
+        await unstarQuestion(questionId);
+        toast.success(
+          lText(locale, "Đã bỏ đánh dấu sao.", "Removed from starred questions."),
+        );
+        await queryClient.invalidateQueries({ queryKey: ["starred-questions"] });
+      } catch {
+        toast.error(t("common.errorGeneric"));
+      }
+    },
+    [locale, queryClient, t],
+  );
+
+  const launchSetId =
+    selectedSetId !== "all"
+      ? selectedSetId
+      : filtered[0]?.study_set_id ?? null;
+
+  return (
+    <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {lText(locale, "Câu hỏi đánh dấu sao", "Starred Questions")}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {lText(
+              locale,
+              "Tổng hợp các câu hỏi quan trọng bạn đã đánh dấu trên toàn bộ học phần.",
+              "All bookmarked questions across your study sets in one focused view.",
+            )}
+          </p>
+        </div>
+
+        {launchSetId && filtered.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button asChild className="min-h-10">
+              <Link href={`/sets/${launchSetId}/practice?filter=starred`}>
+                <Play className="size-4" aria-hidden="true" />
+                {lText(locale, "Luyện câu đánh dấu", "Practice Starred")}
+              </Link>
+            </Button>
+            <Button variant="outline" asChild className="min-h-10">
+              <Link href={`/sets/${launchSetId}/test?onlyStarred=true`}>
+                <ClipboardList className="size-4" aria-hidden="true" />
+                {lText(locale, "Thi thử câu đánh dấu", "Test Starred")}
+              </Link>
+            </Button>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Filters */}
+      <Card>
+        <CardContent className="grid gap-3 py-4 sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="starred-search" className="text-xs">
+              {t("common.search")}
+            </Label>
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                id="starred-search"
+                className="h-9 pl-9"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder={lText(
+                  locale,
+                  "Tìm theo nội dung câu hỏi...",
+                  "Search question text...",
+                )}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="starred-set" className="text-xs">
+              {lText(locale, "Học phần", "Study Set")}
+            </Label>
+            <Select
+              value={selectedSetId}
+              onValueChange={(val) => {
+                setSelectedSetId(val);
+                setSelectedChapter("all");
+              }}
+            >
+              <SelectTrigger id="starred-set" className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {lText(locale, "Tất cả học phần", "All study sets")}
+                </SelectItem>
+                {(setsQuery.data ?? []).map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="starred-chapter" className="text-xs">
+              {lText(locale, "Chương", "Chapter")}
+            </Label>
+            <Select
+              value={selectedChapter}
+              onValueChange={setSelectedChapter}
+            >
+              <SelectTrigger id="starred-chapter" className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {lText(locale, "Tất cả chương", "All chapters")}
+                </SelectItem>
+                {availableChapters.map((ch) => (
+                  <SelectItem key={ch} value={ch}>
+                    {ch}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      {starredQuery.isLoading ? (
+        <div className="space-y-3">
+          <Skeleton className="h-28 w-full rounded-xl" />
+          <Skeleton className="h-28 w-full rounded-xl" />
+        </div>
+      ) : starredQuery.isError ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+            <AlertCircle className="size-8 text-destructive" aria-hidden="true" />
+            <p className="text-sm text-muted-foreground">
+              {lText(
+                locale,
+                "Không thể tải danh sách câu đánh dấu sao.",
+                "Could not load starred questions.",
+              )}
+            </p>
+            <Button variant="outline" onClick={() => void starredQuery.refetch()}>
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {t("common.retry")}
+            </Button>
+          </CardContent>
+        </Card>
+      ) : filtered.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+            <div className="flex size-12 items-center justify-center rounded-full bg-warning-subtle text-warning-subtle-foreground">
+              <Star className="size-6" aria-hidden="true" />
+            </div>
+            <h2 className="text-lg font-semibold">
+              {lText(locale, "Chưa có câu hỏi đánh dấu sao", "No starred questions yet")}
+            </h2>
+            <p className="max-w-md text-sm text-muted-foreground">
+              {lText(
+                locale,
+                "Nhấn biểu tượng ngôi sao (hoặc phím S) khi học để lưu nhanh những câu hỏi khó cần ôn kỹ.",
+                "Click the star icon (or press S) while studying to bookmark important questions.",
+              )}
+            </p>
+            <Button variant="outline" asChild>
+              <Link href="/library">{t("nav.library")}</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map((item) => {
+            const q = item.question;
+            const setTitle =
+              item.study_set_title ??
+              setTitleMap.get(item.study_set_id) ??
+              lText(locale, "Học phần", "Study Set");
+            const correctDisplay = q
+              ? (q.options ?? [])
+                  .filter((o) => o.is_correct)
+                  .map((o) => o.content)
+                  .join(", ") ||
+                getExpectedWriteAnswers(q)
+                  .map((a) => a.answer_text)
+                  .join(" / ")
+              : "";
+
+            return (
+              <Card key={`${item.study_set_id}-${item.question_id}`}>
+                <CardContent className="space-y-3 py-5">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        href={`/sets/${item.study_set_id}`}
+                        className="text-xs font-medium text-primary hover:underline"
+                      >
+                        {setTitle}
+                      </Link>
+                      {q?.chapter ? (
+                        <Badge variant="secondary">{q.chapter}</Badge>
+                      ) : null}
+                      {item.progress?.mastery_level ? (
+                        <Badge variant="outline">
+                          {item.progress.mastery_level}
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="min-h-9 text-warning-subtle-foreground"
+                      onClick={() => void handleUnstar(item.question_id)}
+                    >
+                      <Star className="size-4 fill-warning text-warning" aria-hidden="true" />
+                      {t("study.unstarQuestion")}
+                    </Button>
+                  </div>
+
+                  <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed sm:text-base">
+                    {q?.prompt ?? item.question_id}
+                  </p>
+
+                  {correctDisplay ? (
+                    <div className="rounded-lg border border-success/30 bg-success-subtle/50 p-3 text-xs sm:text-sm">
+                      <div className="flex items-center gap-1.5 font-semibold text-success-subtle-foreground">
+                        <CheckCircle2 className="size-3.5" aria-hidden="true" />
+                        <span>{t("study.correctAnswer")}</span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap text-foreground">
+                        {correctDisplay}
+                      </p>
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

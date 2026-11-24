@@ -1,0 +1,4 @@
+Encapsulation	Đóng gói dữ liệu và phương thức vào trong một lớp, ẩn chi tiết triển khai.
+Polymorphism	Đa hình: cùng một giao diện có thể biểu diễn nhiều hành vi khác nhau.
+Inheritance	Kế thừa: lớp con tái sử dụng thuộc tính và phương thức từ lớp cha.
+Abstraction	Trừu tượng hóa: chỉ hiển thị đặc trưng thiết yếu, ẩn chi tiết phức tạp.

@@ -1,0 +1,43 @@
+Chương 1: Mạng máy tính
+
+Câu 1: Giao thức TCP hoạt động ở tầng nào của mô hình OSI?
+A. Tầng Vật lý
+B. Tầng Liên kết dữ liệu
+C. Tầng Mạng
+D. Tầng Giao vận
+
+Câu 2: Cổng mặc định của DNS là bao nhiêu?
+A. 22
+B. 53
+C. 80
+D. 443
+
+Câu 3: Địa chỉ IPv4 có độ dài bao nhiêu bit?
+A. 32 bit
+B. 64 bit
+C. 128 bit
+D. 256 bit
+
+Chương 2: Cơ sở dữ liệu
+
+Câu 1: Chuẩn 3NF yêu cầu bảng phải ở chuẩn 2NF và không có phụ thuộc nào sau đây?
+A. Phụ thuộc hàm đầy đủ
+B. Phụ thuộc bắc cầu vào khóa chính
+C. Phụ thuộc khóa ngoại
+D. Phụ thuộc thuộc tính khóa
+
+Câu 2: Lệnh SQL nào dùng để lọc kết quả sau khi GROUP BY?
+A. WHERE
+B. ORDER BY
+C. HAVING
+D. DISTINCT
+
+Câu 3: Trong ACID, chữ I đại diện cho tính chất nào?
+A. Integrity
+B. Isolation
+C. Idempotency
+D. Indexing
+
+ĐÁP ÁN
+1. D  2. B  3. A
+1. B  2. C  3. B

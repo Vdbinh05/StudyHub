@@ -1,0 +1,32 @@
+﻿Chương 1: Kiến thức Lịch sử & Địa lý Việt Nam
+
+Câu 1: Thủ đô của nước Cộng hòa Xã hội Chủ nghĩa Việt Nam là thành phố nào?
+Dòng tiếp theo của câu hỏi nhiều dòng để kiểm tra khả năng ghép stem.
+A. Thành phố Hồ Chí Minh
+*B. Hà Nội
+(với hơn 1000 năm văn hiến)
+C. Đà Nẵng
+D. Huế
+Giải thích: Hà Nội chính thức trở thành thủ đô từ năm 1945 và có hơn 1000 năm lịch sử Thăng Long.
+Gợi ý: Nằm bên sông Hồng.
+
+Câu 2: Những thành phố nào sau đây là thành phố trực thuộc trung ương của Việt Nam?
+*A. Hà Nội
+B. Nha Trang
+*C. Đà Nẵng
+*D. Cần Thơ
+Giải thích: Hà Nội, Đà Nẵng và Cần Thơ đều là thành phố trực thuộc trung ương.
+
+Chương 2: Toán học & Ký hiệu Khoa học
+
+1. Giá trị của biểu thức ∫₀¹ 2x dx + √16 − π⁰ bằng bao nhiêu? (với x ∈ ℝ, ∀x ≥ 0)
+a) 3
+*b) 4
+c) 5
+d) 6
+
+2) Trong các bất đẳng thức sau, bất đẳng thức nào đúng?
+A) α² + β² < 0 với α, β ∈ ℝ
+*B) x² ≥ 0 ∀x ∈ ℝ
+C) 2³ = 6
+D) ∑ᵢ₌₁³ i = 9

@@ -1,0 +1,6 @@
+-- ============================================================================
+-- StudyHub V1.0 — Seed File (Intentionally Empty)
+-- Production-grade mandate: ZERO mock datasets, ZERO hardcoded fake user profiles.
+-- Users register directly through Supabase Auth; profiles & user_preferences are
+-- automatically provisioned via the `on_auth_user_created` database trigger.
+-- ============================================================================

@@ -1,0 +1,24 @@
+Chương 1: Hệ điều hành
+
+Câu 1: Thuật toán lập lịch CPU nào có thể gây ra hiện tượng đói tài nguyên (starvation)?
+A. Round Robin
+B. FCFS
+C. Priority Scheduling không có aging
+D. Multilevel Feedback Queue với aging
+ANSWER: C
+Giải thích: Priority Scheduling không có aging khiến tiến trình ưu tiên thấp có thể chờ vô hạn.
+
+Question 2: Which memory management technique eliminates external fragmentation?
+A. Contiguous allocation
+B. Paging
+C. Variable partitioning
+D. Best-fit segmentation
+Correct answer: B
+
+Câu 3: Những điều kiện nào thuộc 4 điều kiện Coffman gây ra deadlock?
+A. Mutual exclusion
+B. Hold and wait
+C. Preemption
+D. Circular wait
+Đáp án đúng: A, B, D
+Giải thích: 4 điều kiện Coffman là Mutual exclusion, Hold and wait, No preemption, và Circular wait.
