@@ -3,7 +3,10 @@
 import * as React from "react";
 import Link from "next/link";
 import { AlertCircle, ArrowLeft, CheckCircle2, Loader2 } from "lucide-react";
-import { getFriendlyErrorMessage } from "@/components/layout/api-client";
+import {
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -15,7 +18,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
-import { isSupabaseConfigured, tryCreateClient } from "@/lib/supabase/client";
 
 export function ForgotPasswordForm() {
   const { locale, t } = useI18n();
@@ -30,7 +32,7 @@ export function ForgotPasswordForm() {
 
   const emailRef = React.useRef<HTMLInputElement>(null);
 
-  const configured = isSupabaseConfigured();
+  const configured = isSupabaseConfiguredClient();
   const emailInvalid =
     (touched || submitted) &&
     (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()));
@@ -45,14 +47,14 @@ export function ForgotPasswordForm() {
       return;
     }
 
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      setFormError(t("common.serviceUnavailableDesc"));
-      return;
-    }
-
     setLoading(true);
     try {
+      const { tryCreateClient } = await import("@/lib/supabase/client");
+      const supabase = tryCreateClient();
+      if (!supabase) {
+        setFormError(t("common.serviceUnavailableDesc"));
+        return;
+      }
       const origin = window.location.origin;
       const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
         redirectTo: `${origin}/auth/callback?next=/reset-password`,

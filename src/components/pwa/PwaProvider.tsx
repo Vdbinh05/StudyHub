@@ -74,7 +74,7 @@ export function isActiveExamRoutePath(pathname: string | null | undefined): bool
   return false;
 }
 
-function readStoredActiveUserId(): string | null {
+export function readStoredActiveUserId(): string | null {
   if (typeof window === "undefined") return null;
   try {
     const val = window.localStorage.getItem(ACTIVE_USER_POINTER_KEY);
@@ -82,6 +82,60 @@ function readStoredActiveUserId(): string | null {
   } catch {
     return null;
   }
+}
+
+function scheduleAfterLoadIdle(
+  task: () => void,
+  idleTimeoutMs = 2000,
+): () => void {
+  if (typeof window === "undefined") return () => undefined;
+
+  let cancelled = false;
+  let idleHandle: number | null = null;
+  let timerHandle: number | null = null;
+  let waitingForLoad = false;
+
+  const runTask = () => {
+    if (cancelled) return;
+    task();
+  };
+
+  const scheduleIdle = () => {
+    if (cancelled) return;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.requestIdleCallback === "function") {
+      idleHandle = win.requestIdleCallback(runTask, { timeout: idleTimeoutMs });
+    } else {
+      const delay = document.readyState === "complete" ? 0 : 350;
+      timerHandle = window.setTimeout(runTask, delay);
+    }
+  };
+
+  if (document.readyState === "complete") {
+    scheduleIdle();
+  } else {
+    waitingForLoad = true;
+    window.addEventListener("load", scheduleIdle, { once: true });
+  }
+
+  return () => {
+    cancelled = true;
+    if (waitingForLoad) {
+      window.removeEventListener("load", scheduleIdle);
+    }
+    const win = window as Window & {
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (idleHandle !== null && typeof win.cancelIdleCallback === "function") {
+      win.cancelIdleCallback(idleHandle);
+    }
+    if (timerHandle !== null) {
+      window.clearTimeout(timerHandle);
+    }
+  };
 }
 
 function writeStoredActiveUserId(userId: string | null): void {
@@ -282,7 +336,8 @@ export function PwaProvider({
     };
   }, []);
 
-  // Register Service Worker (`/sw.js`) with safe update detection (never auto-skipWaiting)
+  // Register Service Worker (`/sw.js`) deferred until window load + idle so SW startup
+  // never competes with FCP/LCP on mobile (never auto-skipWaiting).
   React.useEffect(() => {
     if (
       typeof window === "undefined" ||
@@ -305,35 +360,39 @@ export function PwaProvider({
       handleControllerChange,
     );
 
-    navigator.serviceWorker
-      .register("/sw.js", { scope: "/", updateViaCache: "none" })
-      .then((registration) => {
-        if (cancelled) return;
-        setSwRegistered(true);
+    const cancelDeferred = scheduleAfterLoadIdle(() => {
+      if (cancelled) return;
+      navigator.serviceWorker
+        .register("/sw.js", { scope: "/", updateViaCache: "none" })
+        .then((registration) => {
+          if (cancelled) return;
+          setSwRegistered(true);
 
-        if (registration.waiting) {
-          setWaitingWorker(registration.waiting);
-        }
+          if (registration.waiting) {
+            setWaitingWorker(registration.waiting);
+          }
 
-        registration.addEventListener("updatefound", () => {
-          const installing = registration.installing;
-          if (!installing) return;
-          installing.addEventListener("statechange", () => {
-            if (
-              installing.state === "installed" &&
-              navigator.serviceWorker.controller
-            ) {
-              setWaitingWorker(installing);
-            }
+          registration.addEventListener("updatefound", () => {
+            const installing = registration.installing;
+            if (!installing) return;
+            installing.addEventListener("statechange", () => {
+              if (
+                installing.state === "installed" &&
+                navigator.serviceWorker.controller
+              ) {
+                setWaitingWorker(installing);
+              }
+            });
           });
+        })
+        .catch(() => {
+          // Non-fatal in unsupported dev contexts or private windows
         });
-      })
-      .catch(() => {
-        // Non-fatal in unsupported dev contexts or private windows
-      });
+    }, 2000);
 
     return () => {
       cancelled = true;
+      cancelDeferred();
       navigator.serviceWorker.removeEventListener(
         "controllerchange",
         handleControllerChange,
@@ -341,29 +400,38 @@ export function PwaProvider({
     };
   }, []);
 
-  // Track authenticated account safely via lazy-loaded Supabase & IndexedDB modules
-  // (avoids pulling @supabase & idb chunks into anonymous landing/auth routes).
+  // Track authenticated account safely via explicit userId (preferred: zero @supabase/supabase-js
+  // bundle on app routes) or lazy-loaded fallback when mounted standalone.
   React.useEffect(() => {
     let mounted = true;
     let unsubscribeAuth: (() => void) | null = null;
+    let cancelIdleDb: (() => void) | null = null;
 
     if (explicitUserId !== undefined) {
       const prev = prevUserIdRef.current;
       prevUserIdRef.current = explicitUserId;
       writeStoredActiveUserId(explicitUserId);
-      if (prev || explicitUserId) {
+      if (prev !== explicitUserId && (prev || explicitUserId)) {
+        // Immediate account switch isolation (P0 security guarantee)
         void import("@/lib/offline/db").then(
           async ({ setActiveOfflineUserId, switchOfflineUser }) => {
             if (!mounted) return;
-            if (prev !== explicitUserId) {
-              await switchOfflineUser(prev, explicitUserId);
-            }
+            await switchOfflineUser(prev, explicitUserId);
             setActiveOfflineUserId(explicitUserId);
           },
         );
+      } else if (explicitUserId) {
+        // Same account as stored pointer — defer IndexedDB module activation to idle
+        cancelIdleDb = scheduleAfterLoadIdle(() => {
+          void import("@/lib/offline/db").then(({ setActiveOfflineUserId }) => {
+            if (!mounted) return;
+            setActiveOfflineUserId(explicitUserId);
+          });
+        }, 2500);
       }
       return () => {
         mounted = false;
+        cancelIdleDb?.();
       };
     }
 
@@ -377,78 +445,81 @@ export function PwaProvider({
       };
     }
 
-    void (async () => {
-      const [{ tryCreateClient }, { setActiveOfflineUserId, switchOfflineUser }] =
-        await Promise.all([
-          import("@/lib/supabase/client"),
-          import("@/lib/offline/db"),
-        ]);
+    cancelIdleDb = scheduleAfterLoadIdle(() => {
+      void (async () => {
+        const [{ tryCreateClient }, { setActiveOfflineUserId, switchOfflineUser }] =
+          await Promise.all([
+            import("@/lib/supabase/client"),
+            import("@/lib/offline/db"),
+          ]);
 
-      if (!mounted) return;
+        if (!mounted) return;
 
-      if (storedPointer) {
-        setActiveOfflineUserId(storedPointer);
-        prevUserIdRef.current = storedPointer;
-      }
+        if (storedPointer) {
+          setActiveOfflineUserId(storedPointer);
+          prevUserIdRef.current = storedPointer;
+        }
 
-      const supabase = tryCreateClient();
-      if (!supabase) return;
+        const supabase = tryCreateClient();
+        if (!supabase) return;
 
-      if (getOnlineSnapshot()) {
-        void supabase.auth
-          .getUser()
-          .then(async ({ data }) => {
-            if (!mounted) return;
-            const nextId = data.user?.id ?? null;
+        if (getOnlineSnapshot()) {
+          void supabase.auth
+            .getUser()
+            .then(async ({ data }) => {
+              if (!mounted) return;
+              const nextId = data.user?.id ?? null;
+              const prev = prevUserIdRef.current;
+              if (prev && prev !== nextId) {
+                await switchOfflineUser(prev, nextId);
+              }
+              prevUserIdRef.current = nextId;
+              setResolvedUserId(nextId);
+              setActiveOfflineUserId(nextId);
+              writeStoredActiveUserId(nextId);
+            })
+            .catch(() => {
+              // Keep offline pointer when unreachable
+            });
+        }
+
+        const {
+          data: { subscription },
+        } = supabase.auth.onAuthStateChange((event, session) => {
+          if (!mounted) return;
+          if (event === "SIGNED_OUT") {
             const prev = prevUserIdRef.current;
-            if (prev && prev !== nextId) {
-              await switchOfflineUser(prev, nextId);
-            }
+            prevUserIdRef.current = null;
+            setResolvedUserId(null);
+            setSyncSummaryState(null);
+            void clearOfflineDataForLogout(prev);
+            setOfflineRevision((r) => r + 1);
+            return;
+          }
+
+          const nextId = session?.user?.id ?? null;
+          if (nextId && nextId !== prevUserIdRef.current) {
+            const prev = prevUserIdRef.current;
             prevUserIdRef.current = nextId;
+            void switchOfflineUser(prev, nextId);
             setResolvedUserId(nextId);
             setActiveOfflineUserId(nextId);
             writeStoredActiveUserId(nextId);
-          })
-          .catch(() => {
-            // Keep offline pointer when unreachable
-          });
-      }
+            setOfflineRevision((r) => r + 1);
+          }
+        });
 
-      const {
-        data: { subscription },
-      } = supabase.auth.onAuthStateChange((event, session) => {
-        if (!mounted) return;
-        if (event === "SIGNED_OUT") {
-          const prev = prevUserIdRef.current;
-          prevUserIdRef.current = null;
-          setResolvedUserId(null);
-          setSyncSummaryState(null);
-          void clearOfflineDataForLogout(prev);
-          setOfflineRevision((r) => r + 1);
-          return;
+        if (!mounted) {
+          subscription.unsubscribe();
+        } else {
+          unsubscribeAuth = () => subscription.unsubscribe();
         }
-
-        const nextId = session?.user?.id ?? null;
-        if (nextId && nextId !== prevUserIdRef.current) {
-          const prev = prevUserIdRef.current;
-          prevUserIdRef.current = nextId;
-          void switchOfflineUser(prev, nextId);
-          setResolvedUserId(nextId);
-          setActiveOfflineUserId(nextId);
-          writeStoredActiveUserId(nextId);
-          setOfflineRevision((r) => r + 1);
-        }
-      });
-
-      if (!mounted) {
-        subscription.unsubscribe();
-      } else {
-        unsubscribeAuth = () => subscription.unsubscribe();
-      }
-    })();
+      })();
+    }, 2500);
 
     return () => {
       mounted = false;
+      cancelIdleDb?.();
       unsubscribeAuth?.();
     };
   }, [explicitUserId, pathname]);
@@ -488,26 +559,28 @@ export function PwaProvider({
     [activeUserId, refreshOfflineState],
   );
 
-  // Load initial sync summary & auto-sync when online or returning to foreground
+  // Load initial sync summary & auto-sync when online or returning to foreground (deferred to idle)
   React.useEffect(() => {
     if (!activeUserId) {
       return;
     }
 
     let active = true;
-    void (async () => {
-      try {
-        const { getSyncQueueSummary } = await import("@/lib/offline/sync-queue");
-        const summary = await getSyncQueueSummary(activeUserId);
-        if (!active) return;
-        setSyncSummaryState(summary);
-        if (isOnline && summary.pendingCount > 0) {
-          await syncNow(false);
+    const cancelDeferred = scheduleAfterLoadIdle(() => {
+      void (async () => {
+        try {
+          const { getSyncQueueSummary } = await import("@/lib/offline/sync-queue");
+          const summary = await getSyncQueueSummary(activeUserId);
+          if (!active) return;
+          setSyncSummaryState(summary);
+          if (isOnline && summary.pendingCount > 0) {
+            await syncNow(false);
+          }
+        } catch {
+          // Ignore IDB errors in restricted environments
         }
-      } catch {
-        // Ignore IDB errors in restricted environments
-      }
-    })();
+      })();
+    }, 2500);
 
     const handleVisibility = () => {
       if (
@@ -522,6 +595,7 @@ export function PwaProvider({
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       active = false;
+      cancelDeferred();
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [activeUserId, isOnline, syncNow]);

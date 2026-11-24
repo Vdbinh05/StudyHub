@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { getFriendlyErrorMessage } from "@/components/layout/api-client";
+import {
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -18,7 +21,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useI18n } from "@/lib/i18n";
-import { isSupabaseConfigured, tryCreateClient } from "@/lib/supabase/client";
 
 const GOOGLE_OAUTH_ENABLED =
   process.env.NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH === "true";
@@ -54,7 +56,7 @@ export function RegisterForm() {
   const emailRef = React.useRef<HTMLInputElement>(null);
   const passwordRef = React.useRef<HTMLInputElement>(null);
 
-  const configured = isSupabaseConfigured();
+  const configured = isSupabaseConfiguredClient();
   const controlsDisabled = !configured || loading;
 
   const displayNameInvalid = (touched.displayName || submitted) && displayName.trim().length < 2;
@@ -90,14 +92,15 @@ export function RegisterForm() {
       return;
     }
 
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      setFormError(t("common.serviceUnavailableDesc"));
-      return;
-    }
-
     setLoading(true);
     try {
+      const { tryCreateClient } = await import("@/lib/supabase/client");
+      const supabase = tryCreateClient();
+      if (!supabase) {
+        setFormError(t("common.serviceUnavailableDesc"));
+        return;
+      }
+
       const origin = window.location.origin;
       const { data, error } = await supabase.auth.signUp({
         email: email.trim(),
@@ -134,13 +137,15 @@ export function RegisterForm() {
 
   const handleGoogleSignUp = async () => {
     setFormError(null);
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      setFormError(t("common.serviceUnavailableDesc"));
-      return;
-    }
     setOauthLoading(true);
     try {
+      const { tryCreateClient } = await import("@/lib/supabase/client");
+      const supabase = tryCreateClient();
+      if (!supabase) {
+        setFormError(t("common.serviceUnavailableDesc"));
+        setOauthLoading(false);
+        return;
+      }
       const origin = window.location.origin;
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",

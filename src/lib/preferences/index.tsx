@@ -363,11 +363,28 @@ const PreferencesContext = React.createContext<PreferencesContextValue | null>(
   null,
 );
 
+export function hasStoredLocalPreferences(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return Boolean(window.localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return false;
+  }
+}
+
+export interface PreferencesProviderProps {
+  children: React.ReactNode;
+  /** Optional server/profile-hydrated preferences to avoid duplicate GET /api/preferences calls */
+  initialPreferences?: UserPreferences | null;
+  /** Skip automatic GET /api/preferences when parent already fetches `/api/profile` */
+  deferRemoteFetch?: boolean;
+}
+
 export function PreferencesProvider({
   children,
-}: {
-  children: React.ReactNode;
-}) {
+  initialPreferences,
+  deferRemoteFetch = false,
+}: PreferencesProviderProps) {
   const pathname = usePathname() ?? "/";
   const queryClient = useQueryClient();
   const { setLocale } = useI18n();
@@ -385,12 +402,21 @@ export function PreferencesProvider({
   );
   const [isSaving, setIsSaving] = React.useState(false);
 
+  React.useEffect(() => {
+    if (!initialPreferences) return;
+    const merged = normalizePreferences(initialPreferences, DEFAULT_USER_PREFERENCES);
+    writeLocalPreferences(merged);
+  }, [initialPreferences]);
+
   const shouldFetchRemote =
-    isSupabaseConfiguredClient() && !PUBLIC_UNAUTH_PATHS.has(pathname);
+    !deferRemoteFetch &&
+    isSupabaseConfiguredClient() &&
+    !PUBLIC_UNAUTH_PATHS.has(pathname);
 
   const remoteQuery = useQuery<UserPreferences | null>({
     queryKey: ["user-preferences"],
     enabled: shouldFetchRemote,
+    initialData: initialPreferences ?? undefined,
     staleTime: 60_000,
     retry: false,
     queryFn: async () => {
@@ -533,8 +559,12 @@ export function PreferencesProvider({
 
   const refreshPreferences = React.useCallback(async () => {
     if (!isSupabaseConfiguredClient()) return;
+    if (deferRemoteFetch) {
+      await queryClient.refetchQueries({ queryKey: ["user-preferences"] });
+      return;
+    }
     await queryClient.invalidateQueries({ queryKey: ["user-preferences"] });
-  }, [queryClient]);
+  }, [deferRemoteFetch, queryClient]);
 
   const playFeedbackSound = React.useCallback(
     (kind: FeedbackSoundKind) => {
@@ -549,7 +579,7 @@ export function PreferencesProvider({
       preferences,
       isLoading: !hydratedLocal || (shouldFetchRemote && remoteQuery.isLoading),
       isSaving,
-      isServerSynced: Boolean(remoteQuery.data),
+      isServerSynced: Boolean(initialPreferences ?? remoteQuery.data),
       updatePreferences,
       refreshPreferences,
       playFeedbackSound,
@@ -560,6 +590,7 @@ export function PreferencesProvider({
       shouldFetchRemote,
       remoteQuery.isLoading,
       remoteQuery.data,
+      initialPreferences,
       isSaving,
       updatePreferences,
       refreshPreferences,

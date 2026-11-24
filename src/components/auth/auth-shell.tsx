@@ -2,15 +2,15 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { isSupabaseConfiguredClient } from "@/components/layout/api-client";
 import { BrandLogo } from "@/components/layout/brand-logo";
 import { LanguageToggle } from "@/components/layout/language-toggle";
 import { ServiceSetupNotice } from "@/components/layout/service-setup-notice";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { FadeIn } from "@/components/motion";
-import { isSupabaseConfigured } from "@/lib/supabase/client";
 
 export function AuthShell({ children }: { children: React.ReactNode }) {
-  const configured = isSupabaseConfigured();
+  const configured = isSupabaseConfiguredClient();
 
   return (
     <div className="bg-background text-foreground flex min-h-dvh flex-col">

@@ -1,12 +1,11 @@
 import * as React from "react";
-import "katex/dist/katex.min.css";
 import {
-  renderSafeKatexHtml,
   sanitizeRichTextDoc,
   tokenizePlainTextWithMath,
-} from "@/lib/richtext";
+} from "@/lib/richtext/ast";
 import { cn } from "@/lib/utils";
 import type { RichTextDoc, RichTextMark, RichTextNode } from "@/types/v3";
+import { SafeMathFragment } from "./SafeMathFragment";
 
 export interface RichContentRendererProps {
   /** Canonical TipTap/ProseMirror v1 AST JSON. Takes precedence when non-empty. */
@@ -24,41 +23,6 @@ export interface RichContentRendererProps {
    * Default: `false`.
    */
   allowDataImagePreview?: boolean;
-}
-
-function SafeMathFragment({
-  latex,
-  displayMode,
-}: {
-  latex: string;
-  displayMode: boolean;
-}): React.ReactElement | null {
-  const rendered = renderSafeKatexHtml(latex, displayMode);
-  if (!rendered.html) {
-    return (
-      <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-muted-foreground">
-        {latex}
-      </code>
-    );
-  }
-
-  if (displayMode) {
-    return (
-      <div
-        className="my-2 overflow-x-auto py-1 text-center"
-        data-math-mode="block"
-        dangerouslySetInnerHTML={{ __html: rendered.html }}
-      />
-    );
-  }
-
-  return (
-    <span
-      className="inline-block align-baseline"
-      data-math-mode="inline"
-      dangerouslySetInnerHTML={{ __html: rendered.html }}
-    />
-  );
 }
 
 function wrapTextWithMarks(
@@ -307,6 +271,7 @@ function renderNodes(
             alt={alt}
             title={title}
             loading="lazy"
+            decoding="async"
             className="my-2 max-h-80 max-w-full rounded-lg border border-border object-contain"
           />
         );
@@ -322,8 +287,19 @@ function renderPlainTextFallback(
   enableMathInPlainText: boolean,
   inline: boolean,
 ): React.ReactNode {
-  if (!enableMathInPlainText) {
-    return <span className="whitespace-pre-wrap">{text}</span>;
+  if (
+    !enableMathInPlainText ||
+    (!text.includes("$") && !text.includes("\\(") && !text.includes("\\["))
+  ) {
+    return (
+      <span
+        className={
+          inline ? "whitespace-pre-wrap" : "whitespace-pre-wrap leading-relaxed"
+        }
+      >
+        {text}
+      </span>
+    );
   }
 
   const tokens = tokenizePlainTextWithMath(text);

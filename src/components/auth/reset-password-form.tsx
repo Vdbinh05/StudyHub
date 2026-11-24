@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { getFriendlyErrorMessage } from "@/components/layout/api-client";
+import {
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -17,7 +20,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
-import { isSupabaseConfigured, tryCreateClient } from "@/lib/supabase/client";
 
 export function ResetPasswordForm() {
   const { locale, t } = useI18n();
@@ -34,7 +36,7 @@ export function ResetPasswordForm() {
 
   const passwordRef = React.useRef<HTMLInputElement>(null);
 
-  const configured = isSupabaseConfigured();
+  const configured = isSupabaseConfiguredClient();
   const controlsDisabled = !configured || loading;
   const passwordInvalid = (touched || submitted) && password.length < 8;
 
@@ -48,14 +50,14 @@ export function ResetPasswordForm() {
       return;
     }
 
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      setFormError(t("common.serviceUnavailableDesc"));
-      return;
-    }
-
     setLoading(true);
     try {
+      const { tryCreateClient } = await import("@/lib/supabase/client");
+      const supabase = tryCreateClient();
+      if (!supabase) {
+        setFormError(t("common.serviceUnavailableDesc"));
+        return;
+      }
       const { error } = await supabase.auth.updateUser({ password });
       if (error) {
         setFormError(getFriendlyErrorMessage(error, locale));

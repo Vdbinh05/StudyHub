@@ -1,49 +1,16 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
-import { ApiError } from "@/components/layout/api-client";
-import { ShortcutProvider } from "@/components/layout/ShortcutProvider";
-import { PwaProvider } from "@/components/pwa/PwaProvider";
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { I18nProvider, useI18n } from "@/lib/i18n";
-import { PreferencesProvider, useUserPreferences } from "@/lib/preferences";
 import type { Locale } from "@/types/domain";
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: {
-      queries: {
-        staleTime: 30_000,
-        gcTime: 5 * 60_000,
-        retry: (failureCount, error) => {
-          if (failureCount >= 1) return false;
-          if (error instanceof ApiError) {
-            if (
-              error.status === 400 ||
-              error.status === 401 ||
-              error.status === 403 ||
-              error.status === 404 ||
-              error.status === 503 ||
-              error.code === "SUPABASE_NOT_CONFIGURED"
-            ) {
-              return false;
-            }
-          }
-          return true;
-        },
-        refetchOnWindowFocus: false,
-      },
-      mutations: {
-        retry: 0,
-      },
-    },
-  });
-}
+const LazyOfflinePwaProvider = dynamic(
+  () => import("@/components/pwa/PwaProvider").then((mod) => mod.PwaProvider),
+  { ssr: true },
+);
 
 const EXACT_ROUTE_TITLES: Record<string, { vi: string; en: string }> = {
   "/": {
@@ -130,7 +97,7 @@ function resolveLocalizedTitle(pathname: string, locale: Locale): string | null 
       : "Import questions | StudyHub";
   }
   if (/^\/sets\/[^/]+\/flashcards$/.test(pathname)) {
-    return locale === "vi" ? "Flashcards | StudyHub" : "Flashcards | StudyHub";
+    return "Flashcards | StudyHub";
   }
   if (/^\/sets\/[^/]+\/learn$/.test(pathname)) {
     return locale === "vi" ? "Học thích ứng | StudyHub" : "Adaptive Learn | StudyHub";
@@ -159,7 +126,10 @@ function resolveLocalizedTitle(pathname: string, locale: Locale): string | null 
   if (/^\/sets\/[^/]+\/test$/.test(pathname)) {
     return locale === "vi" ? "Phòng thi thử | StudyHub" : "Mock Exam | StudyHub";
   }
-  if (/^\/sets\/[^/]+\/results\/[^/]+$/.test(pathname) || /^\/exams\/[^/]+\/results$/.test(pathname)) {
+  if (
+    /^\/sets\/[^/]+\/results\/[^/]+$/.test(pathname) ||
+    /^\/exams\/[^/]+\/results$/.test(pathname)
+  ) {
     return locale === "vi" ? "Kết quả bài thi | StudyHub" : "Exam Results | StudyHub";
   }
   if (/^\/exams\/[^/]+$/.test(pathname)) {
@@ -190,18 +160,55 @@ function DocumentTitleSync() {
     applyTitle();
     const rafId = window.requestAnimationFrame(applyTitle);
 
-    const observer = new MutationObserver(applyTitle);
-    if (document.head) {
-      observer.observe(document.head, {
-        childList: true,
-        subtree: true,
-        characterData: true,
+    let titleObserver: MutationObserver | null = null;
+    let headObserver: MutationObserver | null = null;
+
+    if (typeof MutationObserver !== "undefined" && document.head) {
+      const observeCurrentTitle = () => {
+        titleObserver?.disconnect();
+        const titleEl = document.head.querySelector("title");
+        if (titleEl) {
+          titleObserver = new MutationObserver(applyTitle);
+          titleObserver.observe(titleEl, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+          });
+        }
+      };
+
+      observeCurrentTitle();
+      headObserver = new MutationObserver((mutations) => {
+        let titleChanged = false;
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeName === "TITLE") {
+              titleChanged = true;
+              break;
+            }
+          }
+          if (!titleChanged) {
+            for (const node of mutation.removedNodes) {
+              if (node.nodeName === "TITLE") {
+                titleChanged = true;
+                break;
+              }
+            }
+          }
+          if (titleChanged) break;
+        }
+        if (titleChanged) {
+          observeCurrentTitle();
+          applyTitle();
+        }
       });
+      headObserver.observe(document.head, { childList: true });
     }
 
     return () => {
       window.cancelAnimationFrame(rafId);
-      observer.disconnect();
+      titleObserver?.disconnect();
+      headObserver?.disconnect();
     };
   }, [pathname, locale]);
 
@@ -217,45 +224,25 @@ function SkipToContentLink() {
   );
 }
 
-function ResponsiveToaster() {
-  const [isMobile, setIsMobile] = React.useState(false);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const mql = window.matchMedia("(max-width: 767px)");
-    const update = () => setIsMobile(mql.matches);
-    update();
-    mql.addEventListener("change", update);
-    return () => mql.removeEventListener("change", update);
-  }, []);
-
-  return (
-    <Toaster
-      position={isMobile ? "top-center" : "bottom-right"}
-      richColors
-      closeButton
-    />
-  );
+/**
+ * Only the standalone `/offline` route lives outside `src/app/(app)/` while still
+ * needing `PwaProvider`. Loading it dynamically here keeps `/` and `/login` free of
+ * PWA/offline/IDB runtime code.
+ */
+function RouteScopedPwaBridge({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname() ?? "/";
+  if (pathname === "/offline") {
+    return <LazyOfflinePwaProvider>{children}</LazyOfflinePwaProvider>;
+  }
+  return <>{children}</>;
 }
 
-function PreferencesMotionShell({ children }: { children: React.ReactNode }) {
-  const { preferences } = useUserPreferences();
-
-  return (
-    <MotionConfig reducedMotion={preferences.reduced_motion ? "always" : "user"}>
-      <TooltipProvider>
-        <SkipToContentLink />
-        <DocumentTitleSync />
-        {children}
-        <ResponsiveToaster />
-      </TooltipProvider>
-    </MotionConfig>
-  );
-}
-
+/**
+ * Lightweight Root Providers for public routes (`/`, `/login`, `/register`, `/share/*`).
+ * Authenticated app infrastructure (QueryClient, Preferences, PWA, Shortcuts, Tooltip,
+ * Toaster) lives strictly in `src/app/(app)/authenticated-providers.tsx`.
+ */
 export function AppProviders({ children }: { children: React.ReactNode }) {
-  const [queryClient] = React.useState(makeQueryClient);
-
   return (
     <ThemeProvider
       attribute="class"
@@ -263,17 +250,11 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       enableSystem
       disableTransitionOnChange
     >
-      <QueryClientProvider client={queryClient}>
-        <I18nProvider defaultLocale="vi">
-          <PreferencesProvider>
-            <PwaProvider>
-              <ShortcutProvider>
-                <PreferencesMotionShell>{children}</PreferencesMotionShell>
-              </ShortcutProvider>
-            </PwaProvider>
-          </PreferencesProvider>
-        </I18nProvider>
-      </QueryClientProvider>
+      <I18nProvider defaultLocale="vi">
+        <SkipToContentLink />
+        <DocumentTitleSync />
+        <RouteScopedPwaBridge>{children}</RouteScopedPwaBridge>
+      </I18nProvider>
     </ThemeProvider>
   );
 }

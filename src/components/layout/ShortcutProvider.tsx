@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import {
   isActiveExamRoute,
@@ -8,8 +9,16 @@ import {
   type ShortcutBinding,
   type ShortcutScope,
 } from "@/lib/shortcuts";
-import { GlobalSearchDialog } from "./GlobalSearchDialog";
-import { ShortcutHelpModal } from "./ShortcutHelpModal";
+
+const GlobalSearchDialog = dynamic(
+  () => import("./GlobalSearchDialog").then((mod) => mod.GlobalSearchDialog),
+  { ssr: false },
+);
+
+const ShortcutHelpModal = dynamic(
+  () => import("./ShortcutHelpModal").then((mod) => mod.ShortcutHelpModal),
+  { ssr: false },
+);
 
 export interface ShortcutContextValue {
   registry: ShortcutRegistry;
@@ -243,22 +252,26 @@ export function ShortcutProvider({
   return (
     <ShortcutContext.Provider value={value}>
       {children}
-      <ShortcutHelpModal
-        open={helpOpen}
-        onOpenChange={setHelpOpen}
-        activeScopes={activeScopes}
-        registeredBindings={registeredBindings}
-      />
-      <GlobalSearchDialog
-        open={effectiveSearchOpen}
-        onOpenChange={(next) => {
-          if (examRoute) {
-            setSearchOpen(false);
-            return;
-          }
-          setSearchOpen(next);
-        }}
-      />
+      {helpOpen ? (
+        <ShortcutHelpModal
+          open={helpOpen}
+          onOpenChange={setHelpOpen}
+          activeScopes={activeScopes}
+          registeredBindings={registeredBindings}
+        />
+      ) : null}
+      {effectiveSearchOpen ? (
+        <GlobalSearchDialog
+          open={effectiveSearchOpen}
+          onOpenChange={(next) => {
+            if (examRoute) {
+              setSearchOpen(false);
+              return;
+            }
+            setSearchOpen(next);
+          }}
+        />
+      ) : null}
     </ShortcutContext.Provider>
   );
 }

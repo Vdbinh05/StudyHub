@@ -1,11 +1,11 @@
-"use client";
-
 import * as React from "react";
-import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
+import { cn } from "@/lib/utils";
 
 /**
  * StudyHub Motion Design Constants
  * Strictly GPU-composited properties (transform, opacity) and restrained academic timing budgets.
+ * Zero Framer Motion runtime cost — animations are pure CSS keyframes respecting both
+ * `prefers-reduced-motion: reduce` and `html[data-reduced-motion="true"]`.
  */
 export const MOTION_EASE = [0.2, 0, 0, 1] as const;
 
@@ -15,7 +15,7 @@ export const MOTION_TIMINGS = {
   flip: 0.32,
 } as const;
 
-interface FadeInProps extends Omit<HTMLMotionProps<"div">, "children"> {
+export interface FadeInProps extends React.HTMLAttributes<HTMLDivElement> {
   children?: React.ReactNode;
   delay?: number;
   yOffset?: number;
@@ -29,32 +29,35 @@ export function FadeIn({
   yOffset = 8,
   aboveFold = false,
   className,
+  style,
   ...props
 }: FadeInProps) {
-  const prefersReduced = useReducedMotion();
-
-  if (aboveFold || prefersReduced) {
+  if (aboveFold) {
     return (
-      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
+      <div className={className} style={style} {...props}>
         {children}
       </div>
     );
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: yOffset }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: MOTION_TIMINGS.panel, delay, ease: MOTION_EASE }}
-      className={className}
+    <div
+      className={cn("sh-fade-in", className)}
+      style={
+        {
+          ...style,
+          "--sh-enter-y": `${yOffset}px`,
+          animationDelay: delay > 0 ? `${delay}s` : undefined,
+        } as React.CSSProperties
+      }
       {...props}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
-interface ScaleInProps extends Omit<HTMLMotionProps<"div">, "children"> {
+export interface ScaleInProps extends React.HTMLAttributes<HTMLDivElement> {
   children?: React.ReactNode;
   delay?: number;
 }
@@ -63,73 +66,43 @@ export function ScaleIn({
   children,
   delay = 0,
   className,
+  style,
   ...props
 }: ScaleInProps) {
-  const prefersReduced = useReducedMotion();
-
-  if (prefersReduced) {
-    return (
-      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
-        {children}
-      </div>
-    );
-  }
-
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.97 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: MOTION_TIMINGS.micro, delay, ease: MOTION_EASE }}
-      className={className}
+    <div
+      className={cn("sh-scale-in", className)}
+      style={{
+        ...style,
+        animationDelay: delay > 0 ? `${delay}s` : undefined,
+      }}
       {...props}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
-interface StaggerListProps extends Omit<HTMLMotionProps<"div">, "children"> {
+export interface StaggerListProps extends React.HTMLAttributes<HTMLDivElement> {
   children?: React.ReactNode;
   staggerDelay?: number;
 }
 
 export function StaggerList({
   children,
-  staggerDelay = 0.035,
+  staggerDelay: _staggerDelay,
   className,
   ...props
 }: StaggerListProps) {
-  const prefersReduced = useReducedMotion();
-
-  if (prefersReduced) {
-    return (
-      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
-        {children}
-      </div>
-    );
-  }
-
+  void _staggerDelay;
   return (
-    <motion.div
-      initial="hidden"
-      animate="visible"
-      variants={{
-        hidden: {},
-        visible: {
-          transition: {
-            staggerChildren: staggerDelay,
-          },
-        },
-      }}
-      className={className}
-      {...props}
-    >
+    <div className={className} {...props}>
       {children}
-    </motion.div>
+    </div>
   );
 }
 
-interface StaggerItemProps extends Omit<HTMLMotionProps<"div">, "children"> {
+export interface StaggerItemProps extends React.HTMLAttributes<HTMLDivElement> {
   children?: React.ReactNode;
 }
 
@@ -138,30 +111,9 @@ export function StaggerItem({
   className,
   ...props
 }: StaggerItemProps) {
-  const prefersReduced = useReducedMotion();
-
-  if (prefersReduced) {
-    return (
-      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
-        {children}
-      </div>
-    );
-  }
-
   return (
-    <motion.div
-      variants={{
-        hidden: { opacity: 0, y: 8 },
-        visible: {
-          opacity: 1,
-          y: 0,
-          transition: { duration: MOTION_TIMINGS.micro, ease: MOTION_EASE },
-        },
-      }}
-      className={className}
-      {...props}
-    >
+    <div className={cn("sh-fade-in", className)} {...props}>
       {children}
-    </motion.div>
+    </div>
   );
 }

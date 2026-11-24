@@ -232,7 +232,6 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    text-rendering: optimizeLegibility;
     overflow-wrap: break-word;
   }
 
@@ -240,6 +239,11 @@
   h2,
   h3 {
     text-wrap: balance;
+  }
+
+  p,
+  li {
+    text-wrap: pretty;
   }
 
   /* WCAG 2.2 AA crisp focus-visible outline */
@@ -273,11 +277,71 @@
 }
 
 @media (pointer: coarse) {
+  :root {
+    --target-size: 2.75rem;
+  }
+
   button:not([role="switch"]):not([role="checkbox"]):not([data-compact="true"]),
   [role="button"]:not([role="switch"]):not([role="checkbox"]):not([data-compact="true"]) {
-    min-block-size: 2.75rem;
-    min-inline-size: 2.75rem;
+    min-block-size: var(--target-size, 2.75rem);
+    min-inline-size: var(--target-size, 2.75rem);
   }
+}
+
+/* Below-the-fold list virtualization/containment (Modern Web Guidance — NEVER apply above the fold) */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 160px;
+}
+
+@supports not (content-visibility: auto) {
+  .cv-auto {
+    contain: layout style paint;
+  }
+}
+
+/* Pure GPU-composited micro-transitions replacing global Framer Motion runtime */
+@keyframes sh-fade-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, var(--sh-enter-y, 8px), 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes sh-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes sh-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sh-fade-in {
+  animation: sh-fade-in 180ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.sh-scale-in {
+  animation: sh-scale-in 180ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.sh-overlay-in {
+  animation: sh-overlay-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
 }
 
 /* Targeted reduced-motion rules (system preference OR in-app reduced_motion setting).
@@ -289,7 +353,10 @@
   }
 
   .animate-bounce,
-  .animate-ping {
+  .animate-ping,
+  .sh-fade-in,
+  .sh-scale-in,
+  .sh-overlay-in {
     animation: none;
   }
 
@@ -307,7 +374,10 @@ html[data-reduced-motion="true"] {
 }
 
 html[data-reduced-motion="true"] .animate-bounce,
-html[data-reduced-motion="true"] .animate-ping {
+html[data-reduced-motion="true"] .animate-ping,
+html[data-reduced-motion="true"] .sh-fade-in,
+html[data-reduced-motion="true"] .sh-scale-in,
+html[data-reduced-motion="true"] .sh-overlay-in {
   animation: none;
 }
 

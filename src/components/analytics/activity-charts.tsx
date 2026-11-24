@@ -18,6 +18,57 @@ import {
 import { useI18n } from "@/lib/i18n";
 import type { DailyActivityPoint } from "./analytics-types";
 
+/**
+ * Defers Recharts SVG layout & ResizeObserver mounting until the chart is within
+ * 200px of the viewport, reserving exact height to guarantee 0 CLS.
+ */
+function DeferredChartViewport({
+  height,
+  children,
+}: {
+  height: number;
+  children: React.ReactNode;
+}) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = React.useState<boolean>(
+    () => typeof window === "undefined" || typeof IntersectionObserver === "undefined",
+  );
+
+  React.useEffect(() => {
+    if (visible) return;
+    const node = containerRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  return (
+    <div ref={containerRef} style={{ width: "100%", height }}>
+      {visible ? (
+        children
+      ) : (
+        <div
+          className="bg-muted/40 h-full w-full rounded-lg"
+          aria-hidden="true"
+        />
+      )}
+    </div>
+  );
+}
+
 interface ActivityChartProps {
   data: DailyActivityPoint[];
   variant?: "bar" | "area";
@@ -53,7 +104,7 @@ export function ActivityChart({
           ? "Biểu đồ số câu hỏi đã trả lời theo ngày"
           : "Daily study activity chart showing questions answered"}
       </figcaption>
-      <div style={{ width: "100%", height }}>
+      <DeferredChartViewport height={height}>
         <ResponsiveContainer width="100%" height="100%">
           {variant === "area" ? (
             <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -146,7 +197,7 @@ export function ActivityChart({
             </BarChart>
           )}
         </ResponsiveContainer>
-      </div>
+      </DeferredChartViewport>
       {/* Screen-reader accessible tabular alternative */}
       <table className="sr-only">
         <caption>{vi ? "Dữ liệu hoạt động theo ngày" : "Daily study activity data"}</caption>
@@ -196,7 +247,7 @@ export function AccuracyTrendChart({ data, height = 240 }: AccuracyTrendChartPro
       <figcaption className="sr-only">
         {vi ? "Biểu đồ xu hướng độ chính xác" : "Accuracy trend chart"}
       </figcaption>
-      <div style={{ width: "100%", height }}>
+      <DeferredChartViewport height={height}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 12, left: -16, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -236,7 +287,7 @@ export function AccuracyTrendChart({ data, height = 240 }: AccuracyTrendChartPro
             />
           </LineChart>
         </ResponsiveContainer>
-      </div>
+      </DeferredChartViewport>
       <table className="sr-only">
         <caption>{vi ? "Dữ liệu xu hướng độ chính xác" : "Accuracy trend data"}</caption>
         <thead>

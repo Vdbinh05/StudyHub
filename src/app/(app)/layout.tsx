@@ -1,10 +1,15 @@
 import * as React from "react";
 import { AppShell } from "@/components/layout/app-shell";
+import { AuthenticatedProviders } from "./authenticated-providers";
 
 export default function AuthenticatedAppLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return <AppShell>{children}</AppShell>;
+  return (
+    <AuthenticatedProviders>
+      <AppShell>{children}</AppShell>
+    </AuthenticatedProviders>
+  );
 }

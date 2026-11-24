@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,7 +12,6 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { MOTION_EASE, MOTION_TIMINGS } from "@/components/motion";
 import { Button } from "@/components/ui/button";
 import {
   clampViewportTransform,
@@ -65,7 +63,6 @@ export function ImageLightbox({
 }: ImageLightboxProps) {
   const i18n = useOptionalI18n();
   const vi = (i18n?.locale ?? "vi") === "vi";
-  const prefersReduced = useReducedMotion();
 
   const items = React.useMemo<LightboxImageItem[]>(() => {
     if (images && images.length > 0) {
@@ -374,32 +371,15 @@ export function ImageLightbox({
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
-      <AnimatePresence>
-        {open && (
-          <DialogPrimitive.Portal forceMount>
-            <DialogPrimitive.Overlay asChild forceMount>
-              <motion.div
-                initial={prefersReduced ? false : { opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={prefersReduced ? { opacity: 0 } : { opacity: 0 }}
-                transition={{ duration: MOTION_TIMINGS.micro, ease: MOTION_EASE }}
-                className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-[2px]"
-              />
-            </DialogPrimitive.Overlay>
+      {open ? (
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="sh-overlay-in fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-[2px]" />
 
-            <DialogPrimitive.Content
-              asChild
-              forceMount
-              aria-describedby={currentItem.caption ? undefined : undefined}
-            >
-              <motion.div
-                ref={dialogContainerRef}
-                initial={prefersReduced ? false : { opacity: 0, scale: 0.98 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={prefersReduced ? { opacity: 0 } : { opacity: 0, scale: 0.98 }}
-                transition={{ duration: MOTION_TIMINGS.panel, ease: MOTION_EASE }}
-                className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-2xl sm:inset-4 md:inset-6"
-              >
+          <DialogPrimitive.Content
+            ref={dialogContainerRef}
+            aria-describedby={currentItem.caption ? undefined : undefined}
+            className="sh-scale-in fixed inset-2 z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-2xl sm:inset-4 md:inset-6"
+          >
                 {/* Header & Zoom Controls */}
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 sm:px-4">
                   <div className="min-w-0 flex-1">
@@ -560,11 +540,9 @@ export function ImageLightbox({
                     {currentItem.caption}
                   </div>
                 )}
-              </motion.div>
-            </DialogPrimitive.Content>
-          </DialogPrimitive.Portal>
-        )}
-      </AnimatePresence>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      ) : null}
     </DialogPrimitive.Root>
   );
 }
@@ -628,13 +606,15 @@ export function ZoomableImage({
       {caption && (
         <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>
       )}
-      <ImageLightbox
-        open={open}
-        onOpenChange={setOpen}
-        src={src}
-        alt={alt}
-        caption={caption}
-      />
+      {open ? (
+        <ImageLightbox
+          open={open}
+          onOpenChange={setOpen}
+          src={src}
+          alt={alt}
+          caption={caption}
+        />
+      ) : null}
     </figure>
   );
 }
