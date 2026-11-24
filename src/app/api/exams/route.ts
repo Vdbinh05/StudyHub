@@ -6,7 +6,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import {
   computeSubjectAllocations,
   cryptoShuffle,
@@ -23,6 +26,9 @@ import type {
   ExamSourceInput,
   SelectionPolicy,
 } from "@/types/domain";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
@@ -68,7 +74,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.EXAM_START, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.EXAM_START,
+      user.id,
+    );
     if (limited) return limited;
 
     const body = await parseJsonBody(request);

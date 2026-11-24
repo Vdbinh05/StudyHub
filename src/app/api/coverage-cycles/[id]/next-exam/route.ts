@@ -1,10 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { issueNextExamForCycle } from "@/lib/supabase/coverage-helper";
 import { uuidSchema } from "@/lib/validation/common";
 import type { CoverageCycle } from "@/types/domain";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -16,7 +22,11 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.EXAM_START, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.EXAM_START,
+      user.id,
+    );
     if (limited) return limited;
 
     const { id: rawId } = await context.params;

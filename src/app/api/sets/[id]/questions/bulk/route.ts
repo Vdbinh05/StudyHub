@@ -21,6 +21,9 @@ import {
 } from "@/lib/validation/questions";
 import type { Json, TablesUpdate } from "@/types/database";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 interface RouteContext {
   params: Promise<{ id: string }>;
 }

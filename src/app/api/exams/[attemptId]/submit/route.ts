@@ -9,6 +9,9 @@ import type {
   ExamTagBreakdown,
 } from "@/types/domain";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 interface RouteContext {
   params: Promise<{ attemptId: string }>;
 }

@@ -111,5 +111,23 @@ export function getAppUrl(): string {
   if (raw && isValidHttpUrl(raw)) {
     return raw.replace(/\/+$/, "");
   }
+  const vercelProd = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  if (vercelProd) {
+    const candidate = vercelProd.startsWith("http")
+      ? vercelProd
+      : `https://${vercelProd}`;
+    if (isValidHttpUrl(candidate)) {
+      return candidate.replace(/\/+$/, "");
+    }
+  }
+  const vercelPreview = process.env.VERCEL_URL?.trim();
+  if (vercelPreview) {
+    const candidate = vercelPreview.startsWith("http")
+      ? vercelPreview
+      : `https://${vercelPreview}`;
+    if (isValidHttpUrl(candidate)) {
+      return candidate.replace(/\/+$/, "");
+    }
+  }
   return "http://localhost:3000";
 }

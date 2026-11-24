@@ -6,7 +6,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { createFriendRequestSchema } from "@/lib/validation/social";
 
@@ -81,7 +84,7 @@ export async function GET(): Promise<NextResponse> {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(
+    const limited = await enforceDistributedRateLimit(
       request,
       RATE_LIMITS.FRIEND_REQUEST,
       user.id,

@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { userSearchQuerySchema } from "@/lib/validation/social";
 
 /**
@@ -11,7 +14,7 @@ import { userSearchQuerySchema } from "@/lib/validation/social";
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(
+    const limited = await enforceDistributedRateLimit(
       request,
       RATE_LIMITS.FRIEND_REQUEST,
       user.id,

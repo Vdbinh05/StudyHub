@@ -50,11 +50,14 @@ function isCacheableStaticResponse(response) {
   if (!response || !response.ok || response.status !== 200) {
     return false;
   }
+  if (response.redirected) {
+    return false;
+  }
   if (response.type !== "basic") {
     return false;
   }
-  const cacheControl = response.headers.get("cache-control") || "";
-  if (cacheControl.toLowerCase().includes("no-store")) {
+  const cacheControl = (response.headers.get("cache-control") || "").toLowerCase();
+  if (cacheControl.includes("no-store") || cacheControl.includes("private")) {
     return false;
   }
   return true;

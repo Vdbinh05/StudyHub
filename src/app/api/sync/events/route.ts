@@ -6,10 +6,16 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { sanitizeRichTextDoc, sanitizeText } from "@/lib/security/sanitize";
 import { rpcSyncOfflineLearningEvents } from "@/lib/supabase/rpc";
 import { syncEventsBatchSchema } from "@/lib/validation/v3";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 /**
  * Idempotent Offline Learning Sync Endpoint (V3.0).
@@ -20,7 +26,11 @@ import { syncEventsBatchSchema } from "@/lib/validation/v3";
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.SYNC_EVENTS, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SYNC_EVENTS,
+      user.id,
+    );
     if (limited) return limited;
 
     // Allow up to 2 MB batch payload for rich notes/checkpoints (max 200 events)

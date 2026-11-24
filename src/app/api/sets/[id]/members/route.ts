@@ -6,7 +6,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import { addStudySetMemberSchema } from "@/lib/validation/sets";
@@ -75,7 +78,11 @@ export async function POST(
   try {
     const { supabase, user } = await requireAuth();
     // SH-040 / SEC-014: Rate-limit member invitation / identifier lookup to prevent enumeration
-    const limited = enforceRateLimit(request, RATE_LIMITS.FRIEND_REQUEST, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.FRIEND_REQUEST,
+      user.id,
+    );
     if (limited) return limited;
 
     const { id } = await context.params;

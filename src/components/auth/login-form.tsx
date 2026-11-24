@@ -27,7 +27,9 @@ function sanitizeNextPath(raw: string | null): string {
     trimmed.startsWith("/") &&
     !trimmed.startsWith("//") &&
     !trimmed.startsWith("/\\") &&
-    !trimmed.includes("\\")
+    !trimmed.includes("\\") &&
+    !trimmed.includes("://") &&
+    !/[\x00-\x1F\x7F]/.test(trimmed)
   ) {
     return trimmed;
   }

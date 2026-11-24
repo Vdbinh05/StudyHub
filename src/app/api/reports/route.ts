@@ -6,7 +6,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import {
   createReportSchema,
   listReportsQuerySchema,
@@ -70,7 +73,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.REPORT_CREATE, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.REPORT_CREATE,
+      user.id,
+    );
     if (limited) return limited;
 
     const body = createReportSchema.parse(await parseJsonBody(request));

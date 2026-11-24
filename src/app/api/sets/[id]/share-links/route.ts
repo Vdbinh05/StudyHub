@@ -7,7 +7,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { getAppUrl } from "@/lib/supabase/env";
 import { uuidSchema } from "@/lib/validation/common";
 import { createShareLinkSchema } from "@/lib/validation/sets";
@@ -55,7 +58,11 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.SHARE_CREATE, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SHARE_CREATE,
+      user.id,
+    );
     if (limited) return limited;
 
     const { id } = await context.params;

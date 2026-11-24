@@ -6,10 +6,16 @@ import {
   handleApiError,
   parseOptionalJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { rpcCloneStudySet } from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import { duplicateStudySetSchema } from "@/lib/validation/sets";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -26,7 +32,11 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.SET_CLONE, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SET_CLONE,
+      user.id,
+    );
     if (limited) return limited;
 
     const { id } = await context.params;

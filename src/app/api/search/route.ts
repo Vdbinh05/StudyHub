@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { rpcGlobalLibrarySearch } from "@/lib/supabase/rpc";
 import { globalSearchQuerySchema } from "@/lib/validation/v3";
 
@@ -13,7 +16,11 @@ import { globalSearchQuerySchema } from "@/lib/validation/v3";
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.SEARCH, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SEARCH,
+      user.id,
+    );
     if (limited) return limited;
 
     const sp = request.nextUrl.searchParams;

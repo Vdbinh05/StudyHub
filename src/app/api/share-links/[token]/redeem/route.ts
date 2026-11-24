@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getOptionalAuth, requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { rpcPreviewShareLink, rpcRedeemShareLink } from "@/lib/supabase/rpc";
 
 interface RouteContext {
@@ -21,7 +24,10 @@ export async function GET(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const limited = enforceRateLimit(request, RATE_LIMITS.SHARE_REDEEM);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SHARE_REDEEM,
+    );
     if (limited) return limited;
 
     const { token } = await context.params;
@@ -50,7 +56,11 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.SHARE_REDEEM, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.SHARE_REDEEM,
+      user.id,
+    );
     if (limited) return limited;
 
     const { token } = await context.params;

@@ -6,7 +6,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { rpcResetLearningProgress } from "@/lib/supabase/rpc";
 import { progressResetSchema } from "@/lib/validation/v3";
 
@@ -19,7 +22,11 @@ import { progressResetSchema } from "@/lib/validation/v3";
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.PROGRESS_RESET, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.PROGRESS_RESET,
+      user.id,
+    );
     if (limited) return limited;
 
     const body = progressResetSchema.parse(await parseJsonBody(request));

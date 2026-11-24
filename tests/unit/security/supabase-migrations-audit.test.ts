@@ -60,6 +60,14 @@ const sql0015 = readFileSync(
   path.join(MIGRATIONS_DIR, "0015_v3_rpcs_grading_search_reset_sync.sql"),
   "utf8",
 );
+const sql0016 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0016_v3_live_fixes.sql"),
+  "utf8",
+);
+const sql0017 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0017_v3_production_vercel_hardening.sql"),
+  "utf8",
+);
 const allSql = [sql0001, sql0002, sql0003, sql0004].join("\n");
 
 const ALL_20_TABLES = [
@@ -353,5 +361,65 @@ describe("Security: Supabase SQL Migrations Structural Audit", () => {
       expect(sql0015).toMatch(new RegExp(`CREATE OR REPLACE FUNCTION public\\.${fn}\\b`, "i"));
       expect(sql0015).toMatch(new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}\\([^)]*\\) FROM PUBLIC, anon;`, "i"));
     }
+  });
+
+  it("V3.0 migrations 0016–0017 remain 100% additive/MCP-safe, lock down study-temp (20 MB, own-prefix RLS, NO SVG/HTML), and isolate api_rate_limits to service_role", () => {
+    const combinedExec = [sql0016, sql0017]
+      .join("\n")
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+
+    // Zero destructive policy/trigger/table drops or temp tables across 0016-0017
+    expect(combinedExec).not.toMatch(/\bDROP\s+POLICY\b/i);
+    expect(combinedExec).not.toMatch(/\bDROP\s+TRIGGER\b/i);
+    expect(combinedExec).not.toMatch(/\bDROP\s+TABLE\b/i);
+    expect(combinedExec).not.toMatch(/\bCREATE\s+TEMP\s+TABLE\b/i);
+
+    // Zero deprecated auth.role() and 100% wrapped (SELECT auth.uid())
+    expect(combinedExec).not.toMatch(/\bauth\.role\s*\(\s*\)/i);
+    const wrapped = combinedExec.match(/\(\s*SELECT\s+auth\.uid\s*\(\s*\)\s*\)/gi) ?? [];
+    const total = combinedExec.match(/\bauth\.uid\s*\(\s*\)/gi) ?? [];
+    expect(total.length).toBeGreaterThanOrEqual(7);
+    expect(wrapped.length).toBe(total.length);
+
+    // Every SECURITY DEFINER function in 0016-0017 sets search_path = ''
+    const fnBlocks = combinedExec.split(/CREATE OR REPLACE FUNCTION\s+/i).slice(1);
+    const secDefBlocks = fnBlocks.filter((block) =>
+      /\bSECURITY DEFINER\b/i.test(block.split(/AS \$\$/i)[0] ?? ""),
+    );
+    expect(secDefBlocks.length).toBeGreaterThanOrEqual(5);
+    for (const block of secDefBlocks) {
+      const header = block.split(/AS \$\$/i)[0] ?? "";
+      const fnName = header.match(/^([^\s(]+)/)?.[1] ?? "unknown";
+      expect(header, `SECURITY DEFINER ${fnName} missing SET search_path = ''`).toMatch(
+        /SET\s+search_path\s*=\s*''/i,
+      );
+    }
+
+    // 0017: private study-temp bucket (20 MB, NO SVG/HTML) + 3 own-prefix RLS policies
+    const exec0017 = sql0017
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+    expect(exec0017).toContain("'study-temp'");
+    expect(exec0017).toContain("20971520");
+    expect(exec0017).not.toContain("image/svg+xml");
+    expect(exec0017).not.toContain("text/html");
+    expect(exec0017).toMatch(/CREATE POLICY "study_temp_select_own"/);
+    expect(exec0017).toMatch(/CREATE POLICY "study_temp_insert_own"/);
+    expect(exec0017).toMatch(/CREATE POLICY "study_temp_delete_own"/);
+
+    // 0017: deny-all RLS on api_rate_limits + service_role-only check_and_increment_rate_limit
+    expect(exec0017).toMatch(/CREATE TABLE IF NOT EXISTS public\.api_rate_limits\b/i);
+    expect(exec0017).toMatch(/ALTER TABLE public\.api_rate_limits\s+ENABLE ROW LEVEL SECURITY;/i);
+    expect(exec0017).toMatch(/REVOKE ALL ON public\.api_rate_limits FROM PUBLIC, anon, authenticated;/i);
+    expect(exec0017).toMatch(/CREATE OR REPLACE FUNCTION public\.check_and_increment_rate_limit\b/i);
+    expect(exec0017).toMatch(
+      /REVOKE ALL ON FUNCTION public\.check_and_increment_rate_limit\(text, integer, integer\) FROM PUBLIC, anon, authenticated;/i,
+    );
+    expect(exec0017).toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.check_and_increment_rate_limit\(text, integer, integer\) TO service_role;/i,
+    );
   });
 });
