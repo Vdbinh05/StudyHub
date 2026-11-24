@@ -600,18 +600,18 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             </Link>
 
             {!isExamRoute && (
-              <div className="hidden max-w-md flex-1 sm:block">
+              <div className="hidden min-w-0 max-w-md flex-1 sm:block">
                 <button
                   type="button"
                   onClick={openSearch}
                   aria-label={t("search.dialogTitle")}
-                  className="border-input bg-background text-muted-foreground hover:bg-secondary/60 hover:text-foreground focus-visible:ring-ring flex h-9 w-full items-center justify-between gap-2 rounded-md border px-3 text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                  className="border-input bg-background text-muted-foreground hover:bg-secondary/60 hover:text-foreground focus-visible:ring-ring flex h-9 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-md border px-3 text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
                 >
-                  <span className="flex min-w-0 items-center gap-2">
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
                     <Search className="size-4 shrink-0" aria-hidden="true" />
                     <span className="truncate">{t("search.triggerPlaceholder")}</span>
                   </span>
-                  <kbd className="border-border bg-muted text-muted-foreground hidden shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium md:inline-block">
+                  <kbd className="border-border bg-muted text-muted-foreground hidden shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium lg:inline-block">
                     Ctrl K
                   </kbd>
                 </button>
@@ -735,7 +735,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="min-h-11 min-w-11 gap-2 rounded-full pr-2 pl-1 sm:min-h-9 sm:min-w-0"
+                    className="min-h-11 min-w-11 gap-2 rounded-full px-1.5 sm:min-h-9 sm:min-w-0 lg:pr-2 lg:pl-1"
                     aria-label={locale === "vi" ? "Menu tài khoản" : "Account menu"}
                   >
                     <Avatar className="size-7">
@@ -746,7 +746,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                         {getInitials(profile?.display_name, profile?.email)}
                       </AvatarFallback>
                     </Avatar>
-                    <span className="hidden max-w-28 truncate text-xs font-medium md:inline">
+                    <span className="hidden max-w-28 truncate text-xs font-medium lg:inline">
                       {displayName}
                     </span>
                   </Button>

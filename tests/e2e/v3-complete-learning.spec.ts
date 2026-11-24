@@ -1277,8 +1277,13 @@ test.describe("StudyHub V3.0 Complete Learning Edition — Live E2E Verification
       timeout: 8_000,
     });
 
-    // 2. Audio Flashcards (`/sets/[id]/flashcards`): <audio controls> present, Space flip, rate 3
+    // 2. Audio Flashcards (`/sets/[id]/flashcards`): disable default shuffle if active so card #1 ("Atmosphere" w/ audio_url) is deterministically at index 0, verify <audio controls> present, Space flip, rate 3
     await page.goto(`/sets/${setId}/flashcards`, { waitUntil: "networkidle" });
+    const shuffleBtn = page.getByRole("button", { name: /trộn thẻ|shuffle/i });
+    await expect(shuffleBtn).toBeVisible({ timeout: 15_000 });
+    if ((await shuffleBtn.getAttribute("aria-pressed")) === "true") {
+      await shuffleBtn.click();
+    }
     await expect(page.locator("audio").first()).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Space");
     await page.keyboard.press("3");
