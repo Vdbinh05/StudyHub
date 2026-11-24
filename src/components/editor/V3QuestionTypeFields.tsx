@@ -12,7 +12,8 @@ import {
   Volume2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
+import { getFriendlyErrorMessage } from "@/components/layout/api-client";
+import { uploadAudioSmart, uploadImageSmart } from "@/lib/media/direct-upload";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -231,14 +232,19 @@ export function V3QuestionTypeFields({
     }
     setUploadingKey(key);
     try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("purpose", "question");
-      form.append("studySetId", setId);
-      const res = await apiFetch<{ proxyUrl?: string; signedUrl?: string; path?: string }>(
-        "/api/uploads/image",
-        { method: "POST", body: form },
-      );
+      const response = await uploadImageSmart({
+        file,
+        fileName: file.name,
+        purpose: "question",
+        studySetId: setId,
+      });
+      const res = (await response.json()) as {
+        data?: { proxyUrl?: string; signedUrl?: string; path?: string };
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(res.error?.message ?? "Upload failed");
+      }
       const url = res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
       if (!url) throw new Error("Upload failed");
       onSuccess(url);
@@ -258,13 +264,19 @@ export function V3QuestionTypeFields({
     }
     setUploadingKey("audio");
     try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("studySetId", setId);
-      const res = await apiFetch<{ proxyUrl?: string; signedUrl?: string; path?: string }>(
-        "/api/uploads/audio",
-        { method: "POST", body: form },
-      );
+      const response = await uploadAudioSmart({
+        file,
+        fileName: file.name,
+        studySetId: setId,
+        purpose: "audio",
+      });
+      const res = (await response.json()) as {
+        data?: { proxyUrl?: string; signedUrl?: string; path?: string };
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(res.error?.message ?? "Upload failed");
+      }
       const url = res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
       if (!url) throw new Error("Upload failed");
       setDraft((prev) => ({

@@ -41,11 +41,20 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   serverExternalPackages: ["pdfjs-dist"],
+  outputFileTracingIncludes: {
+    "/api/export/pdf": ["./src/assets/fonts/NotoSans-*.ttf"],
+    "/api/import/parse": [
+      "./node_modules/pdfjs-dist/legacy/build/*.mjs",
+      "./node_modules/pdfjs-dist/standard_fonts/**/*",
+      "./node_modules/pdfjs-dist/cmaps/**/*",
+    ],
+  },
   experimental: {
-    cpus: 4,
+    ...(process.env.VERCEL ? {} : { cpus: 4 }),
     memoryBasedWorkersCount: true,
   },
   images: {
+    unoptimized: true,
     remotePatterns: [
       {
         protocol: "https",

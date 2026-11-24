@@ -1,13 +1,18 @@
+import crypto from "node:crypto";
 import { z } from "zod";
 import {
   compactPreviewForTransport,
+  parseImportInput,
+  type ExtendedImportPreviewResult,
+} from "@/lib/import/index";
+import { normalizeForComparison } from "@/lib/import/text-utils";
+import { validateImportBatch } from "@/lib/import/validator";
+import {
   ImportSecurityError,
+  inspectRasterImageBytes,
   MAX_IMPORT_FILE_BYTES,
   MAX_RAW_TEXT_BYTES,
-  normalizeForComparison,
-  parseImportInput,
-  validateImportBatch,
-} from "@/lib/import";
+} from "@/lib/import/zip-guard";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
   apiError,
@@ -15,11 +20,26 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
+import { streamJsonResponse } from "@/lib/security/stream-response";
+import {
+  consumeTempUploadBytes,
+  stageTempImportMedia,
+} from "@/lib/supabase/temp-storage";
 import type { ImportOptions } from "@/types/import";
 import { fetchExistingQuestionFingerprints } from "../_existing-fingerprints";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 const MAX_PARSE_JSON_BYTES = MAX_RAW_TEXT_BYTES + 1024 * 1024; // 11 MB cap for JSON rawText + options
+const STAGE_PREVIEW_MEDIA_THRESHOLD_BYTES = 1_500_000; // 1.5 MB inline base64 cap before staging to study-temp
+const STREAM_JSON_THRESHOLD_BYTES = 2_000_000; // 2 MB outbound threshold -> chunked streaming
+const SAFE_DATA_IMAGE_RE =
+  /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i;
 
 const AnswerRuleSchema = z.object({
   mode: z.enum([
@@ -131,21 +151,45 @@ const ImportOptionsSchema = z
   })
   .optional();
 
-const JsonParseBodySchema = z.object({
-  rawText: z
-    .string()
-    .min(1, "Please provide text content to parse.")
-    .max(MAX_RAW_TEXT_BYTES, "Pasted text exceeds the 10 MB maximum limit."),
-  fileName: z.string().max(200).optional(),
-  studySetId: z.string().uuid().optional(),
-  options: ImportOptionsSchema,
-});
+const JsonParseBodySchema = z
+  .object({
+    rawText: z
+      .string()
+      .min(1, "Please provide text content to parse.")
+      .max(MAX_RAW_TEXT_BYTES, "Pasted text exceeds the 10 MB maximum limit.")
+      .optional(),
+    storagePath: z.string().min(3).max(320).optional(),
+    fileName: z.string().max(200).optional(),
+    fileSizeBytes: z.number().int().min(0).max(MAX_IMPORT_FILE_BYTES).optional(),
+    studySetId: z.string().uuid().optional(),
+    options: ImportOptionsSchema,
+  })
+  .refine((v) => Boolean(v.rawText || v.storagePath), {
+    message: "Please provide text content or a staged storagePath to parse.",
+  });
+
+function decodeSafeRasterDataUrl(
+  dataUrl: string,
+): { bytes: Uint8Array; mime: string; ext: string } | null {
+  const match = SAFE_DATA_IMAGE_RE.exec(dataUrl.trim());
+  if (!match) return null;
+  try {
+    const buf = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+    const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    const inspected = inspectRasterImageBytes(bytes);
+    if (!inspected.valid || !inspected.mime || !inspected.ext) return null;
+    return { bytes, mime: inspected.mime, ext: inspected.ext };
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(request: Request) {
+  let tempCleanup: (() => Promise<void>) | null = null;
   try {
     const { supabase, user } = await requireAuth();
 
-    const rateLimited = enforceRateLimit(
+    const rateLimited = await enforceDistributedRateLimit(
       request,
       RATE_LIMITS.IMPORT_PARSE,
       user.id,
@@ -156,6 +200,7 @@ export async function POST(request: Request) {
     let fileBytes: Uint8Array | undefined;
     let fileName: string | undefined;
     let rawText: string | undefined;
+    let storagePath: string | undefined;
     let studySetId: string | undefined;
     let options: ImportOptions | undefined;
 
@@ -201,14 +246,27 @@ export async function POST(request: Request) {
       const rawBody = await parseJsonBody(request, MAX_PARSE_JSON_BYTES);
       const parsed = JsonParseBodySchema.parse(rawBody);
       rawText = parsed.rawText;
+      storagePath = parsed.storagePath;
       fileName = parsed.fileName ?? "pasted-input.txt";
       studySetId = parsed.studySetId;
       options = parsed.options;
     }
 
-    // Authorize study set access BEFORE parsing untrusted files
+    // Authorize study set access BEFORE downloading/parsing untrusted files
     if (studySetId) {
       await requireStudySetAccess(supabase, studySetId, user.id, "edit");
+    }
+
+    // Dual-mode Vercel Hobby direct-upload ingestion (> 3.5 MB files staged in `study-temp`)
+    if (storagePath) {
+      const consumed = await consumeTempUploadBytes(supabase, {
+        userId: user.id,
+        storagePath,
+        expectedPurpose: "import",
+        maxBytes: MAX_IMPORT_FILE_BYTES,
+      });
+      fileBytes = consumed.bytes;
+      tempCleanup = consumed.cleanup;
     }
 
     const preview = await parseImportInput({
@@ -222,7 +280,7 @@ export async function POST(request: Request) {
     });
 
     // Paginated, prompt-prefiltered full-fingerprint duplicate check beyond 1,000 existing rows
-    let finalPreview = preview;
+    let finalPreview: ExtendedImportPreviewResult = preview;
     if (studySetId && preview.questions.length > 0) {
       const candidateNormalizedPrompts = new Set(
         preview.questions
@@ -252,12 +310,105 @@ export async function POST(request: Request) {
       }
     }
 
-    // Strip unused rawSource & option formatting bloat (~38% payload reduction on DOCX)
-    return apiSuccess(compactPreviewForTransport(finalPreview));
+    // Stage extracted DOCX media to `study-temp/{userId}/import-media/{sha256}.{ext}`
+    // when total preview media exceeds 1.5 MB so outbound preview JSON stays lean on Vercel Hobby.
+    // Small previews (<= 1.5 MB) remain inline so existing tests & fast thumbnails stay untouched.
+    const uniqueDataUrlByRId = new Map<string, string>();
+    for (const q of finalPreview.questions) {
+      for (const m of q.promptMedia ?? []) {
+        if (m.dataUrl && !uniqueDataUrlByRId.has(m.rId)) {
+          uniqueDataUrlByRId.set(m.rId, m.dataUrl);
+        }
+      }
+      for (const o of q.options) {
+        for (const m of o.media ?? []) {
+          if (m.dataUrl && !uniqueDataUrlByRId.has(m.rId)) {
+            uniqueDataUrlByRId.set(m.rId, m.dataUrl);
+          }
+        }
+      }
+    }
+
+    let totalInlineMediaChars = 0;
+    for (const url of uniqueDataUrlByRId.values()) {
+      totalInlineMediaChars += url.length;
+    }
+
+    if (totalInlineMediaChars > STAGE_PREVIEW_MEDIA_THRESHOLD_BYTES) {
+      const stagedPathByRId = new Map<string, string>();
+      for (const [rId, dataUrl] of uniqueDataUrlByRId.entries()) {
+        const decoded = decodeSafeRasterDataUrl(dataUrl);
+        if (!decoded) continue;
+        const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
+        try {
+          const { storagePath: stagedMediaPath } = await stageTempImportMedia(supabase, {
+            userId: user.id,
+            sha256,
+            extension: decoded.ext,
+            mimeType: decoded.mime,
+            bytes: decoded.bytes,
+          });
+          stagedPathByRId.set(rId, stagedMediaPath);
+        } catch {
+          // Graceful fallback if study-temp bucket is unavailable in local dev
+        }
+      }
+
+      if (stagedPathByRId.size > 0) {
+        finalPreview = {
+          ...finalPreview,
+          questions: finalPreview.questions.map((q) => ({
+            ...q,
+            promptMedia: q.promptMedia?.map((m) => {
+              const staged = stagedPathByRId.get(m.rId);
+              if (!staged) return m;
+              const { dataUrl: _removed, ...rest } = m;
+              void _removed;
+              return { ...rest, tempStoragePath: staged };
+            }),
+            options: q.options.map((o) => ({
+              ...o,
+              media: o.media?.map((m) => {
+                const staged = stagedPathByRId.get(m.rId);
+                if (!staged) return m;
+                const { dataUrl: _removed, ...rest } = m;
+                void _removed;
+                return { ...rest, tempStoragePath: staged };
+              }),
+            })),
+          })),
+          extractedMedia: finalPreview.extractedMedia?.map((m) => {
+            const staged = stagedPathByRId.get(m.rId);
+            if (!staged) return m;
+            const { dataUrl: _removed, ...rest } = m;
+            void _removed;
+            return { ...rest, tempStoragePath: staged };
+          }),
+        };
+      }
+    }
+
+    // Strip unused rawSource, option formatting, and duplicated extractedMedia dataUrls
+    const compacted = compactPreviewForTransport(finalPreview);
+    const envelope = { data: compacted };
+    const approxByteLength = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+
+    if (approxByteLength > STREAM_JSON_THRESHOLD_BYTES) {
+      return streamJsonResponse(envelope, {
+        status: 200,
+        headers: { "Cache-Control": "private, no-store" },
+      });
+    }
+
+    return apiSuccess(compacted);
   } catch (err) {
     if (err instanceof ImportSecurityError) {
       return apiError(err.code, err.message, err.statusCode);
     }
     return handleApiError(err);
+  } finally {
+    if (tempCleanup) {
+      await tempCleanup();
+    }
   }
 }

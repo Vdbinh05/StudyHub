@@ -8,11 +8,17 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 import {
-  chunkArray,
+  buildVercelSafeCommitChunks,
+} from "@/lib/import/commit-chunker";
+import {
   computeImportSummary,
   validateImportBatch,
   validateParsedQuestion,
 } from "@/lib/import/validator-client";
+import {
+  uploadFileToTempStorage,
+  VERCEL_SAFE_DIRECT_PAYLOAD_BYTES,
+} from "@/lib/media/direct-upload";
 import { cn } from "@/lib/utils";
 import type {
   AnswerRule,
@@ -333,25 +339,69 @@ export function ImportWizard({
       try {
         let response: Response;
         if (sourceMode === "file" && selectedFile) {
-          const form = new FormData();
-          form.append("file", selectedFile);
-          form.append("studySetId", studySetId);
-          form.append("options", JSON.stringify(effectiveOptions));
-          response = await fetch("/api/import/parse", {
-            method: "POST",
-            body: form,
-          });
-        } else {
-          response = await fetch("/api/import/parse", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              rawText,
-              fileName: "pasted-input.txt",
+          if (selectedFile.size > VERCEL_SAFE_DIRECT_PAYLOAD_BYTES) {
+            const staged = await uploadFileToTempStorage({
+              file: selectedFile,
+              fileName: selectedFile.name,
+              purpose: "import",
+              contentType: selectedFile.type || undefined,
               studySetId,
-              options: effectiveOptions,
-            }),
-          });
+            });
+            response = await fetch("/api/import/parse", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                storagePath: staged.storagePath,
+                fileName: staged.fileName,
+                fileSizeBytes: selectedFile.size,
+                studySetId,
+                options: effectiveOptions,
+              }),
+            });
+          } else {
+            const form = new FormData();
+            form.append("file", selectedFile);
+            form.append("studySetId", studySetId);
+            form.append("options", JSON.stringify(effectiveOptions));
+            response = await fetch("/api/import/parse", {
+              method: "POST",
+              body: form,
+            });
+          }
+        } else {
+          const textBytes = new TextEncoder().encode(rawText);
+          if (textBytes.byteLength > VERCEL_SAFE_DIRECT_PAYLOAD_BYTES) {
+            const textBlob = new Blob([textBytes], { type: "text/plain;charset=utf-8" });
+            const staged = await uploadFileToTempStorage({
+              file: textBlob,
+              fileName: "pasted-input.txt",
+              purpose: "import",
+              contentType: "text/plain",
+              studySetId,
+            });
+            response = await fetch("/api/import/parse", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                storagePath: staged.storagePath,
+                fileName: staged.fileName,
+                fileSizeBytes: textBytes.byteLength,
+                studySetId,
+                options: effectiveOptions,
+              }),
+            });
+          } else {
+            response = await fetch("/api/import/parse", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                rawText,
+                fileName: "pasted-input.txt",
+                studySetId,
+                options: effectiveOptions,
+              }),
+            });
+          }
         }
 
         const payload = (await response.json()) as ParseApiResponse;
@@ -542,39 +592,9 @@ export function ImportWizard({
     const activeRows = readyToImportQuestions;
     if (activeRows.length === 0) return;
 
-    const hasEmbeddedDataUrls = activeRows.some(
-      (q) =>
-        (q.promptMedia?.some((m) => Boolean(m.dataUrl)) ?? false) ||
-        q.options.some((o) => o.media?.some((m) => Boolean(m.dataUrl)) ?? false),
-    );
-    // Keep JSON commit payload well under 12MB cap when raster images are embedded
-    const chunks: ParsedQuestion[][] = hasEmbeddedDataUrls
-      ? (() => {
-          const out: ParsedQuestion[][] = [];
-          let cur: ParsedQuestion[] = [];
-          let curBytes = 0;
-          const MAX_CHUNK_BYTES = 7 * 1024 * 1024;
-          for (const q of activeRows) {
-            const mediaLen =
-              (q.promptMedia ?? []).reduce((s, m) => s + (m.dataUrl?.length ?? 0), 0) +
-              q.options.reduce(
-                (s, o) =>
-                  s + (o.media ?? []).reduce((ms, m) => ms + (m.dataUrl?.length ?? 0), 0),
-                0,
-              );
-            const approxBytes = 2048 + mediaLen;
-            if (cur.length > 0 && (cur.length >= 250 || curBytes + approxBytes > MAX_CHUNK_BYTES)) {
-              out.push(cur);
-              cur = [];
-              curBytes = 0;
-            }
-            cur.push(q);
-            curBytes += approxBytes;
-          }
-          if (cur.length > 0) out.push(cur);
-          return out;
-        })()
-      : chunkArray(activeRows, 500);
+    // Keep every JSON commit chunk <= 2.5 MB and <= 500 questions across ALL formats
+    // so multi-chunk commits never exceed Vercel Hobby's 4.5 MB request body cap.
+    const chunks: ParsedQuestion[][] = buildVercelSafeCommitChunks(activeRows);
     const defaultTags = defaultTagsText
       .split(",")
       .map((t) => t.trim())

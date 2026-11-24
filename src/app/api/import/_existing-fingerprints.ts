@@ -1,9 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  chunkArray,
-  computeQuestionDuplicateFingerprint,
-  normalizeForComparison,
-} from "@/lib/import";
+import { chunkArray, normalizeForComparison } from "@/lib/import/text-utils";
+import { computeQuestionDuplicateFingerprint } from "@/lib/import/validator";
 import type { Database } from "@/types/database";
 
 const QUESTION_PAGE_SIZE = 1000;

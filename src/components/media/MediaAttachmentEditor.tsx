@@ -21,7 +21,7 @@ import {
   AudioRecorderControl,
   type UploadedAudioPayload,
 } from "@/components/audio/AudioRecorderControl";
-import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
+import { ApiError, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { ImageLightbox } from "@/components/media/ImageLightbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useOptionalI18n } from "@/lib/i18n";
+import { uploadAudioSmart, uploadImageSmart } from "@/lib/media/direct-upload";
 import { resolveSafeMediaUrl } from "@/lib/media/urls";
 import {
   cropAndRotateImageFile,
@@ -111,6 +112,39 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function parseSmartUploadResponse(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const isJson = contentType.includes("application/json");
+  const payload = isJson
+    ? ((await response.json().catch(() => null)) as
+        | {
+            data?: Record<string, unknown>;
+            error?: { code?: string; message?: string; details?: unknown };
+            message?: string;
+          }
+        | null)
+    : null;
+
+  if (!response.ok) {
+    if (payload?.error) {
+      throw new ApiError(
+        payload.error.code ?? "API_ERROR",
+        payload.error.message ?? response.statusText,
+        response.status,
+        payload.error.details,
+      );
+    }
+    if (payload?.message) {
+      throw new ApiError("API_ERROR", payload.message, response.status);
+    }
+    throw new ApiError("HTTP_ERROR", response.statusText || "Upload failed", response.status);
+  }
+
+  return (payload?.data ?? payload ?? {}) as Record<string, unknown>;
 }
 
 export function MediaAttachmentEditor({
@@ -218,41 +252,40 @@ export function MediaAttachmentEditor({
       if (onUploadFile) {
         uploaded = await onUploadFile(fileToUpload, validation.kind);
       } else {
-        const formData = new FormData();
-        formData.append("file", fileToUpload);
-        formData.append("studySetId", studySetId);
-
-        const uploadPurpose =
+        const response =
           validation.kind === "audio"
-            ? role === "option"
-              ? "option"
-              : role === "passage"
-                ? "passage"
-                : role === "audio"
-                  ? "audio"
-                  : "question"
-            : role === "option"
-              ? "option"
-              : role === "diagram_base"
-                ? "diagram"
-                : role === "explanation"
-                  ? "explanation"
-                  : role === "passage"
-                    ? "passage"
-                    : "question";
+            ? await uploadAudioSmart({
+                file: fileToUpload,
+                fileName: fileToUpload.name,
+                studySetId,
+                purpose:
+                  role === "option"
+                    ? "option"
+                    : role === "passage"
+                      ? "passage"
+                      : role === "audio"
+                        ? "audio"
+                        : "question",
+              })
+            : await uploadImageSmart({
+                file: fileToUpload,
+                fileName: fileToUpload.name,
+                studySetId,
+                purpose:
+                  role === "option"
+                    ? "option"
+                    : role === "diagram_base"
+                      ? "diagram"
+                      : role === "explanation"
+                        ? "explanation"
+                        : role === "passage"
+                          ? "passage"
+                          : "question",
+                width: width && width > 0 ? Math.round(width) : undefined,
+                height: height && height > 0 ? Math.round(height) : undefined,
+              });
 
-        formData.append("purpose", uploadPurpose);
-        if (width && width > 0) formData.append("width", String(Math.round(width)));
-        if (height && height > 0) formData.append("height", String(Math.round(height)));
-
-        const endpoint =
-          validation.kind === "audio" ? "/api/uploads/audio" : "/api/uploads/image";
-        const res = await apiFetch<Record<string, unknown>>(endpoint, {
-          method: "POST",
-          body: formData,
-        });
-
-        const d = res.data;
+        const d = await parseSmartUploadResponse(response);
         const storagePath = String(d.path ?? d.storage_path ?? "");
         const resolvedUrl =
           resolveSafeMediaUrl({

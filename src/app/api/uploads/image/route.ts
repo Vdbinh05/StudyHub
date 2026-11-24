@@ -1,14 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
-import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  apiSuccess,
+  AppError,
+  handleApiError,
+  parseJsonBody,
+} from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import {
   computeSha256Hex,
   MAX_IMAGE_FILE_BYTES,
   validateImageUpload,
 } from "@/lib/security/upload";
+import { consumeTempUploadBytes } from "@/lib/supabase/temp-storage";
 import { uuidSchema } from "@/lib/validation/common";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const ALLOWED_PURPOSES = new Set([
   "avatar",
@@ -20,6 +33,19 @@ const ALLOWED_PURPOSES = new Set([
   "attachment",
 ]);
 const SIGNED_URL_TTL_SECONDS = 3600;
+
+const jsonUploadSchema = z.object({
+  storagePath: z.string().trim().min(1).max(300),
+  fileName: z.string().trim().min(1).max(240).optional(),
+  contentType: z.string().trim().max(120).optional(),
+  mimeType: z.string().trim().max(120).optional(),
+  purpose: z.string().trim().min(1).max(40).default("question"),
+  studySetId: uuidSchema.optional(),
+  width: z.number().int().min(1).max(20_000).nullable().optional(),
+  height: z.number().int().min(1).max(20_000).nullable().optional(),
+  altText: z.string().trim().max(300).optional(),
+  caption: z.string().trim().max(500).optional(),
+});
 
 function parseOptionalPositiveInt(
   raw: FormDataEntryValue | null,
@@ -33,27 +59,85 @@ function parseOptionalPositiveInt(
 
 /**
  * Server-side validated raster image upload into private `study-media` bucket (SH-019 / V3.0).
+ * Supports both direct `multipart/form-data` (`<= 3.5 MB`) and JSON `{ storagePath }` finalize
+ * from the private `study-temp` bucket (for files `> 3.5 MB` on Vercel Hobby).
  * Validates PNG/JPEG/WebP/GIF magic bytes, blocks SVG, enforces 5 MB cap, registers `media_assets`
  * with SHA-256 hash, and returns canonical `id`/`mediaId`, `path`, `proxyUrl`, and `signedUrl`.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  let cleanupTemp: (() => Promise<void>) | null = null;
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.UPLOAD, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.UPLOAD,
+      user.id,
+    );
     if (limited) return limited;
 
-    const formData = await request.formData().catch(() => {
-      throw new AppError("BAD_REQUEST", "Expected multipart/form-data payload.", 400);
-    });
+    const reqContentType = (request.headers.get("content-type") ?? "").toLowerCase();
+    const isJsonMode = reqContentType.includes("application/json");
 
-    const fileEntry = formData.get("file");
-    if (!(fileEntry instanceof File)) {
-      throw new AppError("VALIDATION_ERROR", "Image file is required.", 400);
+    let bytes: Uint8Array;
+    let fileName: string;
+    let declaredMime: string;
+    let rawPurpose: string;
+    let rawSetId: string;
+    let width: number | null;
+    let height: number | null;
+
+    if (isJsonMode) {
+      const body = jsonUploadSchema.parse(await parseJsonBody(request, 64 * 1024));
+      const staged = await consumeTempUploadBytes(supabase, {
+        userId: user.id,
+        storagePath: body.storagePath,
+        expectedPurpose: "image",
+        maxBytes: MAX_IMAGE_FILE_BYTES,
+      });
+      cleanupTemp = staged.cleanup;
+      bytes = staged.bytes;
+      fileName =
+        body.fileName ??
+        body.storagePath.split("/").pop() ??
+        "image.png";
+      declaredMime = body.contentType ?? body.mimeType ?? "";
+      rawPurpose = body.purpose.trim().toLowerCase();
+      rawSetId = body.studySetId ?? "";
+      width = body.width ?? null;
+      height = body.height ?? null;
+    } else {
+      const formData = await request.formData().catch(() => {
+        throw new AppError("BAD_REQUEST", "Expected multipart/form-data payload.", 400);
+      });
+
+      const fileEntry = formData.get("file");
+      if (!(fileEntry instanceof File)) {
+        throw new AppError("VALIDATION_ERROR", "Image file is required.", 400);
+      }
+
+      rawPurpose = String(formData.get("purpose") ?? "question")
+        .trim()
+        .toLowerCase();
+
+      if (fileEntry.size === 0) {
+        throw new AppError("VALIDATION_ERROR", "Uploaded image file is empty.", 400);
+      }
+      if (fileEntry.size > MAX_IMAGE_FILE_BYTES) {
+        throw new AppError(
+          "PAYLOAD_TOO_LARGE",
+          `Image exceeds maximum size (${Math.round(MAX_IMAGE_FILE_BYTES / (1024 * 1024))} MB).`,
+          413,
+        );
+      }
+
+      bytes = new Uint8Array(await fileEntry.arrayBuffer());
+      fileName = fileEntry.name;
+      declaredMime = fileEntry.type;
+      rawSetId = String(formData.get("studySetId") ?? "").trim();
+      width = parseOptionalPositiveInt(formData.get("width"), 20_000);
+      height = parseOptionalPositiveInt(formData.get("height"), 20_000);
     }
 
-    const rawPurpose = String(formData.get("purpose") ?? "question")
-      .trim()
-      .toLowerCase();
     if (!ALLOWED_PURPOSES.has(rawPurpose)) {
       throw new AppError(
         "VALIDATION_ERROR",
@@ -62,19 +146,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    if (fileEntry.size === 0) {
-      throw new AppError("VALIDATION_ERROR", "Uploaded image file is empty.", 400);
-    }
-    if (fileEntry.size > MAX_IMAGE_FILE_BYTES) {
-      throw new AppError(
-        "PAYLOAD_TOO_LARGE",
-        `Image exceeds maximum size (${Math.round(MAX_IMAGE_FILE_BYTES / (1024 * 1024))} MB).`,
-        413,
-      );
-    }
-
-    const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-    const validation = validateImageUpload(bytes, fileEntry.name, fileEntry.type);
+    const validation = validateImageUpload(bytes, fileName, declaredMime);
 
     if (!validation.valid) {
       throw new AppError(
@@ -93,7 +165,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (rawPurpose === "avatar") {
       storagePath = `avatars/${user.id}/${randomUUID()}.${validation.extension}`;
     } else {
-      const rawSetId = String(formData.get("studySetId") ?? "").trim();
       studySetId = uuidSchema.parse(rawSetId);
       const access = await requireStudySetAccess(
         supabase,
@@ -105,8 +176,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const sha256 = computeSha256Hex(bytes);
-    const width = parseOptionalPositiveInt(formData.get("width"), 20_000);
-    const height = parseOptionalPositiveInt(formData.get("height"), 20_000);
 
     const { error: uploadErr } = await supabase.storage
       .from("study-media")
@@ -181,5 +250,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   } catch (err) {
     return handleApiError(err);
+  } finally {
+    if (cleanupTemp) {
+      await cleanupTemp();
+    }
   }
 }

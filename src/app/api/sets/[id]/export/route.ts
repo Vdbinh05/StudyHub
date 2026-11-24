@@ -1,16 +1,22 @@
-import { NextResponse } from "next/server";
 import { z } from "zod";
 import { exportStudySet, type StudySetExportFormat } from "@/lib/export";
-import { chunkArray } from "@/lib/import";
+import { chunkArray } from "@/lib/import/text-utils";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiError, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
+import { streamBinaryResponse } from "@/lib/security/stream-response";
 import type {
   Question,
   QuestionAcceptedAnswer,
   QuestionOption,
   Tag,
 } from "@/types/domain";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const EXPORT_QUESTION_PAGE_SIZE = 500;
 const EXPORT_IN_CHUNK_SIZE = 120;
@@ -59,7 +65,11 @@ export async function GET(
     const { supabase, user } = await requireAuth();
 
     // Enforce export rate limit (SEC-014)
-    const rateLimited = enforceRateLimit(request, RATE_LIMITS.EXPORT, user.id);
+    const rateLimited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.EXPORT,
+      user.id,
+    );
     if (rateLimited) return rateLimited;
 
     const access = await requireStudySetAccess(
@@ -197,7 +207,7 @@ export async function GET(
     const asciiFallbackName = exported.fileName.replace(/[^\x20-\x7E]/g, "_");
     const encodedUtf8Name = encodeURIComponent(exported.fileName);
 
-    return new NextResponse(Buffer.from(exported.content), {
+    return streamBinaryResponse(exported.content, {
       status: 200,
       headers: {
         "Content-Type": exported.contentType,

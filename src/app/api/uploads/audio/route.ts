@@ -1,14 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
-import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  apiSuccess,
+  AppError,
+  handleApiError,
+  parseJsonBody,
+} from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import {
   computeSha256Hex,
   MAX_AUDIO_FILE_BYTES,
   validateAudioUpload,
 } from "@/lib/security/upload";
+import { consumeTempUploadBytes } from "@/lib/supabase/temp-storage";
 import { uuidSchema } from "@/lib/validation/common";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const ALLOWED_AUDIO_PURPOSES = new Set([
   "question",
@@ -20,6 +33,16 @@ const ALLOWED_AUDIO_PURPOSES = new Set([
 ]);
 const SIGNED_URL_TTL_SECONDS = 3600;
 
+const jsonAudioUploadSchema = z.object({
+  storagePath: z.string().trim().min(1).max(300),
+  fileName: z.string().trim().min(1).max(240).optional(),
+  contentType: z.string().trim().max(120).optional(),
+  mimeType: z.string().trim().max(120).optional(),
+  studySetId: uuidSchema,
+  purpose: z.string().trim().min(1).max(40).default("question"),
+  durationMs: z.number().int().min(0).max(3_600_000).nullable().optional(),
+});
+
 function parseOptionalNonNegInt(raw: FormDataEntryValue | null, max: number): number | null {
   if (typeof raw !== "string" || raw.trim() === "") return null;
   const n = Number(raw);
@@ -29,48 +52,92 @@ function parseOptionalNonNegInt(raw: FormDataEntryValue | null, max: number): nu
 
 /**
  * Server-side validated audio upload into private `study-media` bucket (V3.0).
+ * Supports both direct `multipart/form-data` (`<= 3.5 MB`) and JSON `{ storagePath }` finalize
+ * from the private `study-temp` bucket (for files `> 3.5 MB` on Vercel Hobby).
  * Validates MP3/WAV/M4A/AAC/WebM/OGG magic bytes, rejects SVG/HTML/executables,
  * enforces 10 MB cap, registers `media_assets`, and returns canonical proxy + signed URLs.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  let cleanupTemp: (() => Promise<void>) | null = null;
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(request, RATE_LIMITS.AUDIO_UPLOAD, user.id);
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.AUDIO_UPLOAD,
+      user.id,
+    );
     if (limited) return limited;
 
-    const formData = await request.formData().catch(() => {
-      throw new AppError("BAD_REQUEST", "Expected multipart/form-data payload.", 400);
-    });
+    const reqContentType = (request.headers.get("content-type") ?? "").toLowerCase();
+    const isJsonMode = reqContentType.includes("application/json");
 
-    const fileEntry = formData.get("file");
-    if (!(fileEntry instanceof File)) {
-      throw new AppError("VALIDATION_ERROR", "Audio file is required.", 400);
+    let bytes: Uint8Array;
+    let fileName: string;
+    let declaredMime: string;
+    let rawPurpose: string;
+    let rawSetId: string;
+    let durationMs: number | null;
+
+    if (isJsonMode) {
+      const body = jsonAudioUploadSchema.parse(
+        await parseJsonBody(request, 64 * 1024),
+      );
+      const staged = await consumeTempUploadBytes(supabase, {
+        userId: user.id,
+        storagePath: body.storagePath,
+        expectedPurpose: "audio",
+        maxBytes: MAX_AUDIO_FILE_BYTES,
+      });
+      cleanupTemp = staged.cleanup;
+      bytes = staged.bytes;
+      fileName =
+        body.fileName ??
+        body.storagePath.split("/").pop() ??
+        "recording.webm";
+      declaredMime = body.contentType ?? body.mimeType ?? "";
+      rawPurpose = body.purpose.trim().toLowerCase();
+      rawSetId = body.studySetId;
+      durationMs = body.durationMs ?? null;
+    } else {
+      const formData = await request.formData().catch(() => {
+        throw new AppError("BAD_REQUEST", "Expected multipart/form-data payload.", 400);
+      });
+
+      const fileEntry = formData.get("file");
+      if (!(fileEntry instanceof File)) {
+        throw new AppError("VALIDATION_ERROR", "Audio file is required.", 400);
+      }
+
+      rawPurpose = String(formData.get("purpose") ?? "question")
+        .trim()
+        .toLowerCase();
+
+      if (fileEntry.size === 0) {
+        throw new AppError("VALIDATION_ERROR", "Uploaded audio file is empty.", 400);
+      }
+      if (fileEntry.size > MAX_AUDIO_FILE_BYTES) {
+        throw new AppError(
+          "PAYLOAD_TOO_LARGE",
+          `Audio file exceeds maximum size (${Math.round(MAX_AUDIO_FILE_BYTES / (1024 * 1024))} MB).`,
+          413,
+        );
+      }
+
+      rawSetId = String(formData.get("studySetId") ?? "").trim();
+      bytes = new Uint8Array(await fileEntry.arrayBuffer());
+      fileName = fileEntry.name;
+      declaredMime = fileEntry.type;
+      durationMs = parseOptionalNonNegInt(formData.get("durationMs"), 3_600_000);
     }
 
-    const rawPurpose = String(formData.get("purpose") ?? "question")
-      .trim()
-      .toLowerCase();
     if (!ALLOWED_AUDIO_PURPOSES.has(rawPurpose)) {
       throw new AppError("VALIDATION_ERROR", "Invalid audio upload purpose.", 400);
     }
 
-    if (fileEntry.size === 0) {
-      throw new AppError("VALIDATION_ERROR", "Uploaded audio file is empty.", 400);
-    }
-    if (fileEntry.size > MAX_AUDIO_FILE_BYTES) {
-      throw new AppError(
-        "PAYLOAD_TOO_LARGE",
-        `Audio file exceeds maximum size (${Math.round(MAX_AUDIO_FILE_BYTES / (1024 * 1024))} MB).`,
-        413,
-      );
-    }
-
-    const rawSetId = String(formData.get("studySetId") ?? "").trim();
     const studySetId = uuidSchema.parse(rawSetId);
     const access = await requireStudySetAccess(supabase, studySetId, user.id, "edit");
 
-    const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-    const validation = validateAudioUpload(bytes, fileEntry.name, fileEntry.type);
+    const validation = validateAudioUpload(bytes, fileName, declaredMime);
 
     if (!validation.valid) {
       throw new AppError(
@@ -85,7 +152,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const sha256 = computeSha256Hex(bytes);
-    const durationMs = parseOptionalNonNegInt(formData.get("durationMs"), 3_600_000);
     const storagePath = `${access.studySet.owner_id}/${studySetId}/audio-${randomUUID()}.${validation.extension}`;
 
     const { error: uploadErr } = await supabase.storage
@@ -156,5 +222,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   } catch (err) {
     return handleApiError(err);
+  } finally {
+    if (cleanupTemp) {
+      await cleanupTemp();
+    }
   }
 }

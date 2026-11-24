@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { DiagramStudyPlayer } from "@/components/diagram/DiagramStudyPlayer";
-import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
+import { ApiError, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -60,6 +60,7 @@ import {
   type ViewportTransform,
 } from "@/lib/diagram/geometry";
 import { useOptionalI18n } from "@/lib/i18n";
+import { uploadImageSmart } from "@/lib/media/direct-upload";
 import { resolveSafeMediaUrl } from "@/lib/media/urls";
 import {
   extractImageDimensionsFromBytes,
@@ -309,19 +310,42 @@ export function DiagramEditor({
         // Keep validated original if browser canvas decode unavailable
       }
 
-      const formData = new FormData();
-      formData.append("file", fileToUpload);
-      formData.append("studySetId", studySetId);
-      formData.append("purpose", "diagram");
-      if (width && width > 0) formData.append("width", String(Math.round(width)));
-      if (height && height > 0) formData.append("height", String(Math.round(height)));
-
-      const res = await apiFetch<Record<string, unknown>>("/api/uploads/image", {
-        method: "POST",
-        body: formData,
+      const response = await uploadImageSmart({
+        file: fileToUpload,
+        fileName: fileToUpload.name,
+        studySetId,
+        purpose: "diagram",
+        width: width && width > 0 ? Math.round(width) : undefined,
+        height: height && height > 0 ? Math.round(height) : undefined,
       });
 
-      const d = res.data;
+      const contentType = response.headers.get("content-type") ?? "";
+      const parsed = contentType.includes("application/json")
+        ? ((await response.json().catch(() => null)) as
+            | {
+                data?: Record<string, unknown>;
+                error?: { code?: string; message?: string; details?: unknown };
+                message?: string;
+              }
+            | null)
+        : null;
+      if (!response.ok) {
+        if (parsed?.error) {
+          throw new ApiError(
+            parsed.error.code ?? "API_ERROR",
+            parsed.error.message ?? response.statusText,
+            response.status,
+            parsed.error.details,
+          );
+        }
+        throw new ApiError(
+          "HTTP_ERROR",
+          parsed?.message ?? (response.statusText || "Upload failed"),
+          response.status,
+        );
+      }
+
+      const d = (parsed?.data ?? parsed ?? {}) as Record<string, unknown>;
       const storagePath = String(d.path ?? d.storage_path ?? "");
       const nextUrl =
         resolveSafeMediaUrl({

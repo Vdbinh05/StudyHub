@@ -1,37 +1,106 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
 import { requireAuth } from "@/lib/security/authz";
 import {
   apiSuccess,
+  AppError,
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
 import { chunkArray } from "@/lib/supabase/query-helpers";
+import { consumeTempUploadBytes } from "@/lib/supabase/temp-storage";
 import { restoreAccountBackupSchema } from "@/lib/validation/profile";
 import type { Json } from "@/types/database";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const MAX_BACKUP_BYTES = 12 * 1024 * 1024; // 12 MB cap
 const INSERT_BATCH_SIZE = 200;
 
+const stagedRestoreSchema = z.object({
+  storagePath: z.string().trim().min(1).max(300),
+  mode: z.enum(["merge", "append"]).optional(),
+});
+
 /**
  * Restores a StudyHub JSON account backup exported via `GET /api/account/data` (SH-033).
+ * Supports both direct JSON payloads (`<= 3.5 MB`) and `{ storagePath, mode? }` referencing
+ * a temporary JSON backup uploaded to the private `study-temp` bucket (for backups `> 3.5 MB`).
  * Creates clean user-owned copies with fresh UUIDs, preserving folder hierarchy, study sets,
  * questions, options, accepted answers, tags, and optional preferences.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
-    const limited = enforceRateLimit(
+    const limited = await enforceDistributedRateLimit(
       request,
       RATE_LIMITS.ACCOUNT_RESTORE,
       user.id,
     );
     if (limited) return limited;
 
-    const body = await parseJsonBody(request, MAX_BACKUP_BYTES);
-    const input = restoreAccountBackupSchema.parse(body);
+    const rawBody = await parseJsonBody(request, MAX_BACKUP_BYTES);
+    let backupPayload: unknown = rawBody;
+
+    if (
+      rawBody &&
+      typeof rawBody === "object" &&
+      !Array.isArray(rawBody) &&
+      typeof (rawBody as Record<string, unknown>).storagePath === "string"
+    ) {
+      const stagedReq = stagedRestoreSchema.parse(rawBody);
+      const { bytes, cleanup } = await consumeTempUploadBytes(supabase, {
+        userId: user.id,
+        storagePath: stagedReq.storagePath,
+        expectedPurpose: "restore",
+        maxBytes: MAX_BACKUP_BYTES,
+      });
+
+      try {
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new AppError(
+            "VALIDATION_ERROR",
+            "Uploaded backup file is not valid JSON.",
+            400,
+          );
+        }
+
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new AppError(
+            "VALIDATION_ERROR",
+            "Uploaded backup file must be a JSON object.",
+            400,
+          );
+        }
+
+        const record = parsed as Record<string, unknown>;
+        const unwrapped =
+          record.data &&
+          typeof record.data === "object" &&
+          !Array.isArray(record.data)
+            ? (record.data as Record<string, unknown>)
+            : record;
+
+        backupPayload = stagedReq.mode
+          ? { ...unwrapped, mode: stagedReq.mode }
+          : unwrapped;
+      } finally {
+        await cleanup();
+      }
+    }
+
+    const input = restoreAccountBackupSchema.parse(backupPayload);
 
     let preferencesRestored = false;
     if (input.preferences && Object.keys(input.preferences).length > 0) {

@@ -11,7 +11,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
+import { ApiError, apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +21,7 @@ import {
   type RecorderSnapshot,
 } from "@/lib/audio/recorder";
 import { useOptionalI18n } from "@/lib/i18n";
+import { uploadAudioSmart } from "@/lib/media/direct-upload";
 import { cn } from "@/lib/utils";
 
 export interface UploadedAudioPayload {
@@ -163,20 +164,59 @@ export function AudioRecorderControl({
 
     setIsUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("purpose", "audio");
-      if (studySetId) {
-        formData.append("studySetId", studySetId);
+      const durationMs = Math.max(0, Math.round(snapshot.elapsedSeconds * 1000));
+      let d: Record<string, unknown>;
+
+      if (uploadEndpoint === "/api/uploads/audio" && studySetId) {
+        const response = await uploadAudioSmart({
+          file,
+          fileName: file.name,
+          studySetId,
+          purpose: "audio",
+          durationMs,
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        const parsed = contentType.includes("application/json")
+          ? ((await response.json().catch(() => null)) as
+              | {
+                  data?: Record<string, unknown>;
+                  error?: { code?: string; message?: string; details?: unknown };
+                  message?: string;
+                }
+              | null)
+          : null;
+        if (!response.ok) {
+          if (parsed?.error) {
+            throw new ApiError(
+              parsed.error.code ?? "API_ERROR",
+              parsed.error.message ?? response.statusText,
+              response.status,
+              parsed.error.details,
+            );
+          }
+          throw new ApiError(
+            "HTTP_ERROR",
+            parsed?.message ?? (response.statusText || "Upload failed"),
+            response.status,
+          );
+        }
+        d = (parsed?.data ?? parsed ?? {}) as Record<string, unknown>;
+      } else {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("purpose", "audio");
+        if (studySetId) {
+          formData.append("studySetId", studySetId);
+        }
+        formData.append("durationMs", String(durationMs));
+
+        const res = await apiFetch<Record<string, unknown>>(uploadEndpoint, {
+          method: "POST",
+          body: formData,
+        });
+        d = res.data;
       }
-      formData.append("durationMs", String(Math.max(0, Math.round(snapshot.elapsedSeconds * 1000))));
 
-      const res = await apiFetch<Record<string, unknown>>(uploadEndpoint, {
-        method: "POST",
-        body: formData,
-      });
-
-      const d = res.data;
       const uploaded: UploadedAudioPayload = {
         mediaId: typeof d.mediaId === "string" ? d.mediaId : typeof d.id === "string" ? d.id : undefined,
         path: String(d.path ?? d.storage_path ?? ""),

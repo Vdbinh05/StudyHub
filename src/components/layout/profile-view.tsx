@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  ApiError,
   apiFetch,
   getFriendlyErrorMessage,
   isSupabaseConfiguredClient,
@@ -31,6 +32,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
+import { uploadImageSmart } from "@/lib/media/direct-upload";
 import type { Profile } from "@/types/domain";
 
 interface UploadedAvatarResponse {
@@ -144,16 +146,30 @@ export function ProfileView() {
 
     setUploadingAvatar(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("purpose", "avatar");
-
-      const res = await apiFetch<UploadedAvatarResponse>("/api/uploads/image", {
-        method: "POST",
-        body: formData,
+      const response = await uploadImageSmart({
+        file,
+        fileName: file.name,
+        purpose: "avatar",
       });
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            data?: UploadedAvatarResponse;
+            error?: { code?: string; message?: string; details?: unknown };
+          }
+        | null;
+
+      if (!response.ok) {
+        throw new ApiError(
+          payload?.error?.code ?? "HTTP_ERROR",
+          payload?.error?.message ?? response.statusText ?? t("common.errorGeneric"),
+          response.status,
+          payload?.error?.details,
+        );
+      }
+
+      const uploaded = payload?.data;
       const resolvedUrl =
-        res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
+        uploaded?.proxyUrl ?? uploaded?.signedUrl ?? uploaded?.path ?? "";
       if (!resolvedUrl) {
         throw new Error(t("common.errorGeneric"));
       }

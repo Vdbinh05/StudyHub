@@ -74,6 +74,10 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/lib/i18n";
 import {
+  uploadFileToTempStorage,
+  VERCEL_SAFE_DIRECT_PAYLOAD_BYTES,
+} from "@/lib/media/direct-upload";
+import {
   DEFAULT_MODE_PREFERENCES,
   useUserPreferences,
 } from "@/lib/preferences";
@@ -386,10 +390,37 @@ function SettingsViewInner() {
   };
 
   const restoreMutation = useMutation({
-    mutationFn: async (payload: Record<string, unknown>) => {
+    mutationFn: async (backup: ParsedBackupPreview) => {
+      const serialized = JSON.stringify(backup.payload);
+      const serializedBytes = new TextEncoder().encode(serialized).byteLength;
+
+      if (serializedBytes > VERCEL_SAFE_DIRECT_PAYLOAD_BYTES) {
+        const baseName = backup.fileName?.trim() || "studyhub-backup.json";
+        const safeFileName = baseName.toLowerCase().endsWith(".json")
+          ? baseName
+          : `${baseName}.json`;
+        const jsonBlob = new Blob([serialized], { type: "application/json" });
+        const staged = await uploadFileToTempStorage({
+          file: jsonBlob,
+          fileName: safeFileName,
+          purpose: "restore",
+          contentType: "application/json",
+        });
+        const res = await apiFetch<RestoreSummary>("/api/account/restore", {
+          method: "POST",
+          body: JSON.stringify({
+            storagePath: staged.storagePath,
+            ...(typeof backup.payload.mode === "string"
+              ? { mode: backup.payload.mode }
+              : {}),
+          }),
+        });
+        return res.data;
+      }
+
       const res = await apiFetch<RestoreSummary>("/api/account/restore", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: serialized,
       });
       return res.data;
     },
@@ -1456,7 +1487,7 @@ function SettingsViewInner() {
               onClick={(e) => {
                 e.preventDefault();
                 if (backupPreview) {
-                  restoreMutation.mutate(backupPreview.payload);
+                  restoreMutation.mutate(backupPreview);
                 }
               }}
             >

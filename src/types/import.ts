@@ -90,6 +90,11 @@ export interface ParsedMediaAttachment {
    * NEVER persisted raw into `questions` or `question_options` DB columns!
    */
   dataUrl?: string;
+  /**
+   * Temporary private `study-temp/{userId}/import-media/{sha256}.{ext}` storage path used when
+   * extracted DOCX media exceeds the Vercel Hobby inline preview budget (> 1.5 MB).
+   */
+  tempStoragePath?: string;
   /** Whether the image was strictly inline (`wp:inline`) or floating (`wp:anchor`) */
   anchorType: "inline" | "floating";
   /** True when layout placement is uncertain (e.g. floating anchor) and needs user review */

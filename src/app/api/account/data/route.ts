@@ -1,10 +1,11 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest, type NextResponse } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import {
   apiSuccess,
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { streamJsonResponse } from "@/lib/security/stream-response";
 import { tryCreateAdminClient } from "@/lib/supabase/admin";
 import {
   fetchAllPages,
@@ -12,14 +13,19 @@ import {
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
 import { rpcGetMyProfile } from "@/lib/supabase/rpc";
+import { TEMP_STORAGE_BUCKET } from "@/lib/supabase/temp-storage";
 import { deleteAccountDataSchema } from "@/lib/validation/profile";
 import type { Database } from "@/types/database";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 /**
  * Exports all personal StudyHub data belonging to the authenticated user as JSON.
- * Paginated cleanly across all tables so large accounts (10,000+ Qs) are never truncated.
+ * Paginated cleanly across all tables so large accounts (10,000+ Qs) are never truncated,
+ * and streamed without `Content-Length` to bypass Vercel Hobby's 4.5 MB buffered response cap.
  */
-export async function GET(): Promise<NextResponse> {
+export async function GET(): Promise<Response> {
   try {
     const { supabase, user } = await requireAuth();
 
@@ -203,12 +209,11 @@ export async function GET(): Promise<NextResponse> {
       coverage_cycles: cycles,
     };
 
-    return new NextResponse(JSON.stringify(exportPayload, null, 2), {
+    return streamJsonResponse(exportPayload, {
       status: 200,
       headers: {
-        "Content-Type": "application/json; charset=utf-8",
         "Content-Disposition": `attachment; filename="studyhub-export-${new Date().toISOString().slice(0, 10)}.json"`,
-        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
       },
     });
   } catch (err) {
@@ -302,6 +307,8 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
           const bucket = admin.storage.from("study-media");
           await purgeUserStorageFolder(bucket, `avatars/${user.id}`);
           await purgeUserStorageFolder(bucket, user.id);
+          const tempBucket = admin.storage.from(TEMP_STORAGE_BUCKET);
+          await purgeUserStorageFolder(tempBucket, user.id);
           storagePurged = true;
         } catch {
           // Non-fatal if bucket is empty or storage unavailable

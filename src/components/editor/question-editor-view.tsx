@@ -35,6 +35,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
 import { RichContentRenderer } from "@/components/richtext/RichContentRenderer";
 import { computeQuestionDuplicateFingerprint } from "@/lib/import/validator";
+import { uploadImageSmart } from "@/lib/media/direct-upload";
 import { validateQuestionByType } from "@/lib/questions";
 import { PdfExportDialog } from "./PdfExportDialog";
 import { QuestionNotePanel } from "./QuestionNotePanel";
@@ -682,15 +683,19 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
     setUploadingImage(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("purpose", "question");
-      formData.append("studySetId", setId);
-
-      const res = await apiFetch<UploadedImageResponse>("/api/uploads/image", {
-        method: "POST",
-        body: formData,
+      const response = await uploadImageSmart({
+        file,
+        fileName: file.name,
+        purpose: "question",
+        studySetId: setId,
       });
+      const res = (await response.json()) as {
+        data?: UploadedImageResponse;
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(res.error?.message ?? t("common.errorGeneric"));
+      }
       const resolvedUrl =
         res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
       if (!resolvedUrl) {

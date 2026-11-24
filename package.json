@@ -2,7 +2,10 @@
   "name": "studyhub",
   "version": "1.0.0",
   "private": true,
-  "description": "StudyHub V1.0 — Personal study and exam prep web app with 100% deterministic import, learning, and testing.",
+  "description": "StudyHub V3.0 Complete Learning Edition — Personal study and exam prep web app with 100% deterministic import, learning, multimedia, visual diagrams, PDF export, and offline PWA.",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

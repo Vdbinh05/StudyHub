@@ -5,19 +5,27 @@ import {
   type PdfExportOption,
   type PdfExportQuestion,
 } from "@/lib/export/pdf-exporter";
-import { chunkArray, inspectRasterImageBytes, sanitizeFileName } from "@/lib/import";
+import { chunkArray, sanitizeFileName } from "@/lib/import/text-utils";
+import { inspectRasterImageBytes } from "@/lib/import/zip-guard";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiError, handleApiError, parseJsonBody } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
+import { streamBinaryResponse } from "@/lib/security/stream-response";
 import { stripPreSubmitQuestions } from "@/lib/supabase/exam-engine";
 import { rpcGetExamAttemptDetail } from "@/lib/supabase/rpc";
 import type { QuestionType } from "@/types/domain";
 import type { QuestionTypePayload, RichTextDoc } from "@/types/v3";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 const MAX_PDF_REQUEST_BYTES = 256 * 1024;
 const PAGE_SIZE = 1000;
 const IN_QUERY_CHUNK_SIZE = 120;
-const MAX_TOTAL_EMBED_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_TOTAL_EMBED_IMAGE_BYTES = 14 * 1024 * 1024;
 
 const ExportPdfBodySchema = z
   .object({
@@ -97,7 +105,11 @@ export async function POST(request: Request) {
   try {
     const { supabase, user } = await requireAuth();
 
-    const rateLimited = enforceRateLimit(request, RATE_LIMITS.EXPORT, user.id);
+    const rateLimited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.EXPORT,
+      user.id,
+    );
     if (rateLimited) return rateLimited;
 
     const rawBody = await parseJsonBody(request, MAX_PDF_REQUEST_BYTES);
@@ -445,7 +457,7 @@ export async function POST(request: Request) {
     );
     const fileName = `${safeFileBase}-${body.mode}.pdf`;
 
-    return new Response(new Uint8Array(pdf.bytes), {
+    return streamBinaryResponse(pdf.bytes, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",

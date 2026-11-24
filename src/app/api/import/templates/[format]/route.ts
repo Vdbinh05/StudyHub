@@ -3,8 +3,11 @@ import {
   generateImportTemplate,
   isSupportedTemplateFormat,
   SUPPORTED_TEMPLATE_FORMATS,
-} from "@/lib/import";
+} from "@/lib/import/templates";
 import { apiError, handleApiError } from "@/lib/security/errors";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function GET(
   _request: Request,

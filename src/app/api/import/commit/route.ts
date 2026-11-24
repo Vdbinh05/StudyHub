@@ -2,12 +2,17 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   chunkArray,
-  computeQuestionDuplicateFingerprint,
-  inspectRasterImageBytes,
   normalizeForComparison,
   sanitizeFileName,
+} from "@/lib/import/text-utils";
+import {
+  computeQuestionDuplicateFingerprint,
   validateParsedQuestion,
-} from "@/lib/import";
+} from "@/lib/import/validator";
+import {
+  inspectRasterImageBytes,
+  MAX_IMAGE_FILE_BYTES,
+} from "@/lib/import/zip-guard";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
   apiError,
@@ -15,15 +20,25 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import {
   isSafeHttpOrStorageUrl,
   normalizeAnswerText,
   slugifyTag,
 } from "@/lib/security/sanitize";
+import {
+  cleanupTempObjects,
+  consumeTempUploadBytes,
+} from "@/lib/supabase/temp-storage";
 import type { Database, Json } from "@/types/database";
 import type { ParsedQuestion } from "@/types/import";
 import { fetchExistingQuestionFingerprints } from "../_existing-fingerprints";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const MAX_COMMIT_JSON_BYTES = 12 * 1024 * 1024; // 12 MB cap per commit chunk (SEC-021)
 const NEW_IMPORT_JOB_RATE_LIMIT = {
@@ -42,6 +57,7 @@ const CommitMediaAttachmentSchema = z.object({
   byteLength: z.number().int().min(0).max(5 * 1024 * 1024).optional(),
   previewPath: z.string().max(512).optional(),
   dataUrl: z.string().max(7_000_000).optional(),
+  tempStoragePath: z.string().max(320).optional(),
   anchorType: z.enum(["inline", "floating"]).default("inline"),
   ambiguous: z.boolean().optional(),
   alt: z.string().max(300).optional(),
@@ -203,12 +219,15 @@ function decodeSafeRasterDataUrl(
 }
 
 export async function POST(request: Request) {
+  let supabaseRef: Awaited<ReturnType<typeof requireAuth>>["supabase"] | null = null;
+  const tempMediaPathsToCleanup: string[] = [];
   try {
     const { supabase, user } = await requireAuth();
+    supabaseRef = supabase;
 
     // High chunk ceiling (120 chunks / 5m = up to 60,000 questions across a single job)
     // so multi-chunk 10k-20k imports never falsely trip 429 at chunk 21 (SH-025).
-    const chunkRateLimited = enforceRateLimit(
+    const chunkRateLimited = await enforceDistributedRateLimit(
       request,
       RATE_LIMITS.IMPORT_COMMIT,
       user.id,
@@ -218,11 +237,17 @@ export async function POST(request: Request) {
     const rawBody = await parseJsonBody(request, MAX_COMMIT_JSON_BYTES);
     const body = ImportCommitBodySchema.parse(rawBody);
 
-    await requireStudySetAccess(supabase, body.studySetId, user.id, "edit");
+    const access = await requireStudySetAccess(
+      supabase,
+      body.studySetId,
+      user.id,
+      "edit",
+    );
+    const mediaOwnerId = access.studySet.owner_id || user.id;
 
     // Enforce stricter job-start rate limit on new imports, and verify active job ownership on continuation chunks
     if (body.isFirstChunk || !body.importJobId) {
-      const newJobLimited = enforceRateLimit(
+      const newJobLimited = await enforceDistributedRateLimit(
         request,
         NEW_IMPORT_JOB_RATE_LIMIT,
         user.id,
@@ -291,6 +316,7 @@ export async function POST(request: Request) {
             byteLength: m.byteLength ?? 0,
             previewPath: m.previewPath ?? `/docx-media/${sanitizeFileName(m.fileName)}`,
             dataUrl: m.dataUrl,
+            tempStoragePath: m.tempStoragePath,
             anchorType: m.anchorType,
             ambiguous: m.ambiguous,
             alt: m.alt,
@@ -321,6 +347,7 @@ export async function POST(request: Request) {
               byteLength: m.byteLength ?? 0,
               previewPath: m.previewPath ?? `/docx-media/${sanitizeFileName(m.fileName)}`,
               dataUrl: m.dataUrl,
+              tempStoragePath: m.tempStoragePath,
               anchorType: m.anchorType,
               ambiguous: m.ambiguous,
               alt: m.alt,
@@ -500,21 +527,59 @@ export async function POST(request: Request) {
     }
 
     // 7b. Deduplicated upload of validated V3 DOCX raster media attachments to private `study-media`
+    // Supports BOTH inline `dataUrl` and staged `study-temp` `tempStoragePath` (cleaned up in `finally`).
     const uploadedByHash = new Map<string, UploadedImportMedia>();
+    const uploadedByTempPath = new Map<string, UploadedImportMedia | null>();
+
     const uploadAttachmentIfNeeded = async (
       att: NonNullable<ParsedQuestion["promptMedia"]>[number],
     ): Promise<UploadedImportMedia | null> => {
-      if (!att.dataUrl) return null;
-      const decoded = decodeSafeRasterDataUrl(att.dataUrl);
+      let decoded: { bytes: Uint8Array; mime: string; ext: string } | null = null;
+
+      if (att.tempStoragePath) {
+        if (uploadedByTempPath.has(att.tempStoragePath)) {
+          const cachedTemp = uploadedByTempPath.get(att.tempStoragePath) ?? null;
+          return cachedTemp ? { ...cachedTemp, alt: att.alt ?? cachedTemp.alt } : null;
+        }
+        try {
+          const consumed = await consumeTempUploadBytes(supabase, {
+            userId: user.id,
+            storagePath: att.tempStoragePath,
+            expectedPurpose: "import-media",
+            maxBytes: MAX_IMAGE_FILE_BYTES,
+          });
+          tempMediaPathsToCleanup.push(att.tempStoragePath);
+          const inspected = inspectRasterImageBytes(consumed.bytes);
+          if (inspected.valid && inspected.mime && inspected.ext) {
+            decoded = {
+              bytes: consumed.bytes,
+              mime: inspected.mime,
+              ext: inspected.ext,
+            };
+          } else {
+            uploadedByTempPath.set(att.tempStoragePath, null);
+            return null;
+          }
+        } catch {
+          uploadedByTempPath.set(att.tempStoragePath, null);
+          return null;
+        }
+      } else if (att.dataUrl) {
+        decoded = decodeSafeRasterDataUrl(att.dataUrl);
+      }
+
       if (!decoded) return null;
 
       const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
       const cached = uploadedByHash.get(sha256);
       if (cached) {
+        if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, cached);
         return { ...cached, alt: att.alt ?? cached.alt };
       }
 
-      const storagePath = `${user.id}/${body.studySetId}/import-${sha256.slice(0, 24)}.${decoded.ext}`;
+      // Store under study-set owner namespace (`access.studySet.owner_id`) so shared editors
+      // satisfy `can_access_study_media_path` RLS cleanly (#197).
+      const storagePath = `${mediaOwnerId}/${body.studySetId}/import-${sha256.slice(0, 24)}.${decoded.ext}`;
       const { error: uploadErr } = await supabase.storage
         .from("study-media")
         .upload(storagePath, decoded.bytes, {
@@ -522,6 +587,7 @@ export async function POST(request: Request) {
           upsert: true,
         });
       if (uploadErr) {
+        if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, null);
         return null;
       }
 
@@ -574,6 +640,7 @@ export async function POST(request: Request) {
         alt: att.alt,
       };
       uploadedByHash.set(sha256, record);
+      if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, record);
       return record;
     };
 
@@ -790,5 +857,9 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     return handleApiError(err);
+  } finally {
+    if (supabaseRef && tempMediaPathsToCleanup.length > 0) {
+      await cleanupTempObjects(supabaseRef, tempMediaPathsToCleanup);
+    }
   }
 }

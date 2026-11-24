@@ -312,14 +312,36 @@ export async function parseImportInput(
 }
 
 /**
- * Strip unused heavy parser fields (`rawSource` and per-option `formatting`) before
- * serializing preview payloads over HTTP (cuts ~38% payload bloat on large DOCX files).
+ * Strip unused heavy parser fields (`rawSource` and per-option `formatting`) and
+ * omit duplicated base64 `dataUrl` from top-level `extractedMedia` when already
+ * attached to questions/options (cuts ~38-50% payload bloat over HTTP while keeping
+ * `extractedMedia` metadata objects intact).
  */
 export function compactPreviewForTransport(
   preview: ExtendedImportPreviewResult,
 ): ExtendedImportPreviewResult {
+  const attachedRIds = new Set<string>();
+  for (const q of preview.questions) {
+    for (const m of q.promptMedia ?? []) {
+      if (m.dataUrl || m.tempStoragePath) attachedRIds.add(m.rId);
+    }
+    for (const o of q.options) {
+      for (const m of o.media ?? []) {
+        if (m.dataUrl || m.tempStoragePath) attachedRIds.add(m.rId);
+      }
+    }
+  }
+
   return {
     ...preview,
+    extractedMedia: preview.extractedMedia?.map((m) => {
+      if (attachedRIds.has(m.rId) && m.dataUrl) {
+        const { dataUrl: _dupDataUrl, ...metaOnly } = m;
+        void _dupDataUrl;
+        return metaOnly;
+      }
+      return m;
+    }),
     questions: preview.questions.map((q) => {
       const { rawSource: _unusedRaw, ...restQ } = q;
       void _unusedRaw;
