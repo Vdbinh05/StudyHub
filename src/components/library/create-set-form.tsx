@@ -5,7 +5,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Loader2, PenLine, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
 import { Button } from "@/components/ui/button";
@@ -24,12 +28,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
 import type { Folder, StudySet, StudySetType, Visibility } from "@/types/domain";
 
+function clampInt(raw: string, min: number, max: number, fallback: number): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 function CreateSetFormInner() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const initialFolderId = searchParams.get("folderId") ?? "none";
 
@@ -39,13 +50,16 @@ function CreateSetFormInner() {
   const [folderId, setFolderId] = React.useState(initialFolderId);
   const [setType, setSetType] = React.useState<StudySetType>("multiple_choice");
   const [visibility, setVisibility] = React.useState<Visibility>("private");
-  const [durationMinutes, setDurationMinutes] = React.useState(45);
-  const [passThreshold, setPassThreshold] = React.useState(70);
+  const [durationDraft, setDurationDraft] = React.useState("45");
+  const [passDraft, setPassDraft] = React.useState("70");
   const [touchedTitle, setTouchedTitle] = React.useState(false);
   const [submitted, setSubmitted] = React.useState(false);
 
+  const titleInputRef = React.useRef<HTMLInputElement>(null);
+
   const foldersQuery = useQuery<Folder[]>({
     queryKey: ["folders"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<Folder[]>("/api/folders");
       return Array.isArray(res.data) ? res.data : [];
@@ -54,6 +68,8 @@ function CreateSetFormInner() {
 
   const createMutation = useMutation({
     mutationFn: async (nextAction: "edit" | "import") => {
+      const durationMinutes = clampInt(durationDraft, 1, 300, 45);
+      const passThreshold = clampInt(passDraft, 1, 100, 70);
       const res = await apiFetch<StudySet>("/api/sets", {
         method: "POST",
         body: JSON.stringify({
@@ -64,8 +80,8 @@ function CreateSetFormInner() {
           set_type: setType,
           visibility,
           source_language: locale,
-          default_exam_duration_minutes: Math.max(1, Math.min(300, durationMinutes)),
-          default_pass_threshold: Math.max(1, Math.min(100, passThreshold)),
+          default_exam_duration_minutes: durationMinutes,
+          default_pass_threshold: passThreshold,
         }),
       });
       return { set: res.data, nextAction };
@@ -77,7 +93,7 @@ function CreateSetFormInner() {
       router.push(`/sets/${set.id}/${nextAction}`);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -85,12 +101,15 @@ function CreateSetFormInner() {
 
   const triggerCreate = (nextAction: "edit" | "import") => {
     setSubmitted(true);
-    if (!title.trim()) return;
+    if (!title.trim()) {
+      titleInputRef.current?.focus();
+      return;
+    }
     createMutation.mutate(nextAction);
   };
 
   return (
-    <FadeIn className="mx-auto max-w-2xl space-y-6">
+    <FadeIn aboveFold className="mx-auto max-w-2xl space-y-6">
       <PageHeader
         title={t("library.newSet")}
         description={
@@ -120,6 +139,7 @@ function CreateSetFormInner() {
                 <span className="text-destructive">*</span>
               </Label>
               <Input
+                ref={titleInputRef}
                 id="set-title"
                 required
                 maxLength={200}
@@ -137,6 +157,7 @@ function CreateSetFormInner() {
               {titleInvalid && (
                 <p
                   id="set-title-error"
+                  role="alert"
                   className="text-destructive flex items-center gap-1.5 text-xs font-medium"
                 >
                   <AlertCircle className="size-3.5" aria-hidden="true" />
@@ -257,11 +278,13 @@ function CreateSetFormInner() {
                 </Label>
                 <Input
                   id="set-duration"
-                  type="number"
-                  min={1}
-                  max={300}
-                  value={durationMinutes}
-                  onChange={(e) => setDurationMinutes(Number(e.target.value) || 45)}
+                  type="text"
+                  inputMode="numeric"
+                  value={durationDraft}
+                  onChange={(e) => setDurationDraft(e.target.value.replace(/[^0-9]/g, ""))}
+                  onBlur={() =>
+                    setDurationDraft(String(clampInt(durationDraft, 1, 300, 45)))
+                  }
                 />
               </div>
 
@@ -271,11 +294,13 @@ function CreateSetFormInner() {
                 </Label>
                 <Input
                   id="set-pass-threshold"
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={passThreshold}
-                  onChange={(e) => setPassThreshold(Number(e.target.value) || 70)}
+                  type="text"
+                  inputMode="numeric"
+                  value={passDraft}
+                  onChange={(e) => setPassDraft(e.target.value.replace(/[^0-9]/g, ""))}
+                  onBlur={() =>
+                    setPassDraft(String(clampInt(passDraft, 1, 100, 70)))
+                  }
                 />
               </div>
             </div>

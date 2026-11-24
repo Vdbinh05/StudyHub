@@ -13,7 +13,11 @@ import {
   LogIn,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, ApiError } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  ApiError,
+  getFriendlyErrorMessage,
+} from "@/components/layout/api-client";
 import { BrandLogo } from "@/components/layout/brand-logo";
 import { LanguageToggle } from "@/components/layout/language-toggle";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
@@ -26,15 +30,19 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { useI18n } from "@/lib/i18n";
 
 interface RedeemResponse {
   study_set_id: string;
+  /** Canonical API fields returned by /api/share-links/[token]/redeem (fixes SH-030) */
+  title?: string;
+  role?: "owner" | "editor" | "viewer";
+  /** Legacy fallbacks */
   study_set_title?: string;
   permission?: "viewer" | "editor";
   allow_clone?: boolean;
+  question_count?: number;
   study_set?: {
     id: string;
     title: string;
@@ -74,23 +82,29 @@ export function ShareRedeemView({ token }: { token: string }) {
         return;
       }
       setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : vi
+        getFriendlyErrorMessage(
+          err,
+          locale,
+          vi
             ? "Liên kết chia sẻ không hợp lệ hoặc đã bị thu hồi."
             : "This share link is invalid, expired, or revoked.",
+        ),
       );
     },
   });
 
   const studySetId = redeemed?.study_set?.id ?? redeemed?.study_set_id;
   const studySetTitle =
+    redeemed?.title ??
     redeemed?.study_set?.title ??
     redeemed?.study_set_title ??
     (vi ? "Học phần được chia sẻ" : "Shared Study Set");
+  const grantedRole = redeemed?.role ?? redeemed?.permission;
+  const questionCount =
+    redeemed?.study_set?.question_count ?? redeemed?.question_count;
 
   return (
-    <div className="bg-background text-foreground flex min-h-screen flex-col">
+    <div className="bg-background text-foreground flex min-h-dvh flex-col">
       <header className="border-border bg-card border-b">
         <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-4 sm:px-6">
           <Link href="/" aria-label="StudyHub">
@@ -107,7 +121,7 @@ export function ShareRedeemView({ token }: { token: string }) {
         id="main-content"
         className="flex flex-1 items-center justify-center px-4 py-12"
       >
-        <FadeIn className="w-full max-w-md">
+        <FadeIn aboveFold className="w-full max-w-md">
           <Card className="shadow-sm">
             {redeemed && studySetId ? (
               <>
@@ -115,7 +129,9 @@ export function ShareRedeemView({ token }: { token: string }) {
                   <div className="bg-success-subtle text-success-subtle-foreground mb-2 flex size-10 items-center justify-center rounded-lg">
                     <CheckCircle2 className="size-5" aria-hidden="true" />
                   </div>
-                  <CardTitle className="text-xl">{studySetTitle}</CardTitle>
+                  <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
+                    {studySetTitle}
+                  </h1>
                   <CardDescription>
                     {vi
                       ? "Học phần đã được thêm vào danh sách Được chia sẻ với tôi."
@@ -123,16 +139,18 @@ export function ShareRedeemView({ token }: { token: string }) {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-2">
-                  {redeemed.permission && (
+                  {grantedRole && (
                     <Badge variant="accent">
-                      {redeemed.permission === "editor"
-                        ? t("friends.roleEditor")
-                        : t("friends.roleViewer")}
+                      {grantedRole === "owner"
+                        ? t("friends.roleOwner")
+                        : grantedRole === "editor"
+                          ? t("friends.roleEditor")
+                          : t("friends.roleViewer")}
                     </Badge>
                   )}
-                  {redeemed.study_set?.question_count !== undefined && (
+                  {questionCount !== undefined && (
                     <Badge variant="secondary" className="font-mono tabular-nums">
-                      {redeemed.study_set.question_count} {vi ? "câu hỏi" : "questions"}
+                      {questionCount} {vi ? "câu hỏi" : "questions"}
                     </Badge>
                   )}
                 </CardContent>
@@ -152,9 +170,9 @@ export function ShareRedeemView({ token }: { token: string }) {
                   <div className="bg-accent text-accent-foreground mb-2 flex size-10 items-center justify-center rounded-lg">
                     <LogIn className="size-5" aria-hidden="true" />
                   </div>
-                  <CardTitle className="text-xl">
+                  <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
                     {vi ? "Đăng nhập để mở học phần chia sẻ" : "Sign in to open shared set"}
-                  </CardTitle>
+                  </h1>
                   <CardDescription>
                     {vi
                       ? "Vui lòng đăng nhập tài khoản StudyHub của bạn để nhận quyền truy cập liên kết chia sẻ này."
@@ -178,9 +196,9 @@ export function ShareRedeemView({ token }: { token: string }) {
                   <div className="bg-primary/10 text-primary mb-2 flex size-10 items-center justify-center rounded-lg">
                     <BookOpen className="size-5" aria-hidden="true" />
                   </div>
-                  <CardTitle className="text-xl">
+                  <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
                     {vi ? "Liên kết chia sẻ học phần" : "Shared Study Set Link"}
-                  </CardTitle>
+                  </h1>
                   <CardDescription>
                     {vi
                       ? "Nhấn xác nhận để mở học phần này trong tài khoản StudyHub của bạn."

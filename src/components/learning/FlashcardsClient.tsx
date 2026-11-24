@@ -37,9 +37,11 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   isEditableEventTarget,
+  isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   recordStudySessionAnswer,
   updateStudySession,
@@ -49,7 +51,7 @@ import {
   projectQuestionToFlashcard,
   type ProjectedFlashcard,
 } from "@/lib/learning/flashcard-projection";
-import { fisherYatesShuffle } from "@/lib/learning/shuffle";
+import { createSeededRng, fisherYatesShuffle } from "@/lib/learning/shuffle";
 import { calculateNextReview } from "@/lib/learning/sm2";
 import type { SelfRating } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
@@ -68,7 +70,8 @@ interface FlashcardsClientProps {
 
 export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const { locale, t } = useI18n();
-  const prefersReducedMotion = useReducedMotion();
+  const { preferences, playFeedbackSound } = useUserPreferences();
+  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
     data: bundle,
     isLoading,
@@ -81,12 +84,23 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
 
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
   const [starredOnly, setStarredOnly] = React.useState(false);
-  const [isShuffled, setIsShuffled] = React.useState(false);
+  const [starredFilterSnapshot, setStarredFilterSnapshot] =
+    React.useState<Set<string> | null>(null);
+  const [isShuffled, setIsShuffled] = React.useState<boolean>(
+    () => preferences.default_shuffle_questions,
+  );
   const [swapSides, setSwapSides] = React.useState(false);
   const [reviewSubsetIds, setReviewSubsetIds] = React.useState<string[] | null>(
     null,
   );
-  const [shuffleSeed, setShuffleSeed] = React.useState(0);
+  const [shuffleSeed, setShuffleSeed] = React.useState(1);
+
+  const syncedPrefsRef = React.useRef(false);
+  React.useEffect(() => {
+    if (syncedPrefsRef.current) return;
+    syncedPrefsRef.current = true;
+    setIsShuffled(preferences.default_shuffle_questions);
+  }, [preferences.default_shuffle_questions]);
 
   const [currentIndex, setCurrentIndex] = React.useState(0);
   const [isFlipped, setIsFlipped] = React.useState(false);
@@ -133,9 +147,12 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     return () => document.removeEventListener("fullscreenchange", handleFsChange);
   }, []);
 
+  // Stable deck ordering: depends ONLY on `bundle?.questions` & explicit seeded shuffle
+  // NEVER depends on mutable `bundle` object, preventing deck reshuffle on every card rating (SH-021)!
+  const bundleQuestions = bundle?.questions;
   const cards = React.useMemo<ProjectedFlashcard[]>(() => {
-    if (!bundle) return [];
-    let filtered = bundle.questions;
+    if (!bundleQuestions) return [];
+    let filtered = bundleQuestions;
 
     if (reviewSubsetIds) {
       const idSet = new Set(reviewSubsetIds);
@@ -146,22 +163,34 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
           (q) => (q.chapter?.trim() || "") === selectedChapter,
         );
       }
-      if (starredOnly) {
-        filtered = filtered.filter((q) => bundle.starredIds.has(q.id));
+      if (starredOnly && starredFilterSnapshot) {
+        filtered = filtered.filter((q) => starredFilterSnapshot.has(q.id));
       }
     }
 
     const projected = filtered.map(projectQuestionToFlashcard);
     if (isShuffled) {
-      return fisherYatesShuffle(projected);
+      const rng = createSeededRng(
+        `${setId}:${selectedChapter}:${starredOnly}:${shuffleSeed}`,
+      );
+      return fisherYatesShuffle(projected, rng);
     }
     return projected;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundle, selectedChapter, starredOnly, isShuffled, reviewSubsetIds, shuffleSeed]);
+  }, [
+    bundleQuestions,
+    isShuffled,
+    reviewSubsetIds,
+    selectedChapter,
+    setId,
+    shuffleSeed,
+    starredFilterSnapshot,
+    starredOnly,
+  ]);
 
-  // Ensure session exists once cards load
+  // Ensure session exists once per deck configuration (never spawns duplicate sessions on rating)
+  const studySetIdLoaded = bundle?.studySet.id ?? null;
   React.useEffect(() => {
-    if (!bundle || cards.length === 0 || sessionIdRef.current) return;
+    if (!studySetIdLoaded || cards.length === 0 || sessionIdRef.current) return;
     let active = true;
     createStudySession({
       study_set_id: setId,
@@ -185,7 +214,15 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     return () => {
       active = false;
     };
-  }, [bundle, cards.length, setId, selectedChapter, starredOnly, isShuffled, swapSides]);
+  }, [
+    cards.length,
+    isShuffled,
+    selectedChapter,
+    setId,
+    starredOnly,
+    studySetIdLoaded,
+    swapSides,
+  ]);
 
   const safeIndex = Math.min(currentIndex, Math.max(0, cards.length - 1));
   const activeCard = cards[safeIndex] ?? null;
@@ -291,6 +328,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       }
       setKnownIds(nextKnown);
       setUnknownIds(nextUnknown);
+      playFeedbackSound(isKnown ? "correct" : "wrong");
 
       // Deterministic SM-2 progress calculation
       const prevProgress = bundle.progressMap.get(activeCard.questionId);
@@ -342,6 +380,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
 
       // Advance to next card or complete
       if (safeIndex + 1 >= cards.length) {
+        playFeedbackSound("complete");
         const durationSeconds = Math.max(
           1,
           Math.round((Date.now() - sessionStartRef.current) / 1000),
@@ -367,12 +406,18 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       bundle,
       cards.length,
       knownIds,
+      playFeedbackSound,
       safeIndex,
       setId,
       unknownIds,
       updateLocalProgress,
     ],
   );
+
+  const handleFlipToggle = React.useCallback(() => {
+    playFeedbackSound("flip");
+    setIsFlipped((prev) => !prev);
+  }, [playFeedbackSound]);
 
   const handleStarToggle = React.useCallback(async () => {
     if (!activeCard) return;
@@ -383,16 +428,16 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     }
   }, [activeCard, toggleStar, t]);
 
-  // Global keyboard shortcuts (strictly ignoring editable inputs!)
+  // Global keyboard shortcuts: strictly 1=Again, 2=Hard, 3=Good, 4=Easy (SH-021!)
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isCompleted || !activeCard) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableEventTarget(event.target)) return;
 
-      if (event.code === "Space") {
+      if (event.code === "Space" && !isInteractiveControlTarget(event.target)) {
         event.preventDefault();
-        setIsFlipped((prev) => !prev);
+        handleFlipToggle();
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         if (safeIndex > 0) goToIndex(safeIndex - 1);
@@ -404,10 +449,10 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         void handleRateCard("again");
       } else if (event.key === "2") {
         event.preventDefault();
-        void handleRateCard("good");
+        void handleRateCard("hard");
       } else if (event.key === "3") {
         event.preventDefault();
-        void handleRateCard("hard");
+        void handleRateCard("good");
       } else if (event.key === "4") {
         event.preventDefault();
         void handleRateCard("easy");
@@ -422,6 +467,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   }, [
     activeCard,
     goToIndex,
+    handleFlipToggle,
     handleRateCard,
     handleStarToggle,
     isCompleted,
@@ -516,15 +562,27 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                     </kbd>
                   </li>
                   <li className="flex justify-between">
-                    <span>{t("study.stillLearning")}</span>
+                    <span>{lText(locale, "Lại (Chưa thuộc)", "Again")}</span>
                     <kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-foreground">
                       1
                     </kbd>
                   </li>
                   <li className="flex justify-between">
-                    <span>{t("study.knowIt")}</span>
+                    <span>{lText(locale, "Khó", "Hard")}</span>
                     <kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-foreground">
                       2
+                    </kbd>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>{lText(locale, "Tốt", "Good")}</span>
+                    <kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-foreground">
+                      3
+                    </kbd>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>{lText(locale, "Dễ", "Easy")}</span>
+                    <kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-foreground">
+                      4
                     </kbd>
                   </li>
                   <li className="flex justify-between">
@@ -599,6 +657,9 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                 checked={starredOnly}
                 onCheckedChange={(checked) => {
                   setStarredOnly(checked);
+                  setStarredFilterSnapshot(
+                    checked ? new Set(bundle.starredIds) : null,
+                  );
                   resetDeckState(null);
                 }}
               />
@@ -830,34 +891,43 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                       </div>
                     </div>
 
-                    {/* Interactive Flip Surface */}
-                    <button
-                      type="button"
-                      onClick={() => setIsFlipped((prev) => !prev)}
-                      aria-label={
-                        isFlipped
-                          ? lText(locale, "Lật về mặt trước", "Flip to front")
-                          : lText(locale, "Lật xem đáp án mặt sau", "Flip to reveal back")
-                      }
-                      className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl"
+                    {/* Readable Accessible Flip Surface (NO card-erasing aria-label, NO clipping absolute inset-0 — SH-021!) */}
+                    <article
+                      aria-live="polite"
+                      onClick={() => {
+                        if (
+                          typeof window !== "undefined" &&
+                          window.getSelection()?.toString()
+                        ) {
+                          return;
+                        }
+                        handleFlipToggle();
+                      }}
+                      className="cursor-pointer select-text rounded-xl focus-within:ring-2 focus-within:ring-ring"
                     >
                       {prefersReducedMotion ? (
-                        <div className="flex min-h-[300px] sm:min-h-[360px] flex-col items-center justify-center rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs transition-opacity duration-150">
-                          <div className="max-w-2xl space-y-4">
+                        <div className="flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs transition-opacity duration-150">
+                          <div className="my-auto w-full max-w-2xl space-y-4">
                             <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed sm:text-xl">
                               {(isFlipped ? backText : frontText) ||
                                 lText(locale, "(Chưa có nội dung)", "(No content)")}
                             </p>
-                            {isSafeDisplayImageUrl(isFlipped ? backImage : frontImage) ? (
+                            {isSafeDisplayImageUrl(
+                              isFlipped ? backImage : frontImage,
+                            ) ? (
                               // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 src={(isFlipped ? backImage : frontImage) ?? ""}
-                                alt={lText(locale, "Hình ảnh minh họa thẻ", "Flashcard illustration")}
-                                className="mx-auto max-h-48 rounded-lg border border-border object-contain"
+                                alt={lText(
+                                  locale,
+                                  "Hình ảnh minh họa thẻ",
+                                  "Flashcard illustration",
+                                )}
+                                className="mx-auto max-h-56 rounded-lg border border-border object-contain"
                               />
                             ) : null}
                             {isFlipped && activeCard.explanation ? (
-                              <div className="mt-4 rounded-lg bg-secondary/70 p-3 text-left text-sm text-muted-foreground">
+                              <div className="mt-4 rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
                                 <span className="font-semibold text-foreground">
                                   {t("study.explanation")}:{" "}
                                 </span>
@@ -867,27 +937,46 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                               </div>
                             ) : null}
                           </div>
-                          <p className="mt-6 text-xs text-muted-foreground">
-                            {lText(
-                              locale,
-                              "Bấm vào thẻ hoặc nhấn Space để lật",
-                              "Click card or press Space to flip",
-                            )}
-                          </p>
+                          <div className="mt-6 flex items-center justify-center">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="min-h-10 text-xs text-muted-foreground"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleFlipToggle();
+                              }}
+                            >
+                              {isFlipped
+                                ? lText(
+                                    locale,
+                                    "Lật về mặt trước (Space)",
+                                    "Flip to front (Space)",
+                                  )
+                                : lText(
+                                    locale,
+                                    "Lật xem đáp án (Space)",
+                                    "Flip card (Space)",
+                                  )}
+                            </Button>
+                          </div>
                         </div>
                       ) : (
+                        /* CSS Grid single-cell stacking so height expands naturally for tall content with ZERO clipping! */
                         <motion.div
                           animate={{ rotateY: isFlipped ? 180 : 0 }}
-                          transition={{ duration: 0.32, ease: [0.2, 0, 0, 1] }}
+                          transition={{ duration: 0.3, ease: [0.2, 0, 0, 1] }}
                           style={{ transformStyle: "preserve-3d" }}
-                          className="relative min-h-[300px] sm:min-h-[360px] w-full"
+                          className="grid grid-cols-1 grid-rows-1 w-full"
                         >
                           {/* Front face */}
                           <div
+                            aria-hidden={isFlipped}
                             style={{ backfaceVisibility: "hidden" }}
-                            className="absolute inset-0 flex flex-col items-center justify-center rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs"
+                            className="col-start-1 row-start-1 flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-border bg-card p-6 sm:p-10 text-center shadow-xs"
                           >
-                            <div className="max-w-2xl space-y-4 overflow-y-auto">
+                            <div className="my-auto w-full max-w-2xl space-y-4">
                               <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed sm:text-xl">
                                 {frontText ||
                                   lText(locale, "(Chưa có nội dung)", "(No content)")}
@@ -896,8 +985,12 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={frontImage}
-                                  alt={lText(locale, "Hình ảnh mặt trước", "Front side illustration")}
-                                  className="mx-auto max-h-44 rounded-lg border border-border object-contain"
+                                  alt={lText(
+                                    locale,
+                                    "Hình ảnh mặt trước",
+                                    "Front side illustration",
+                                  )}
+                                  className="mx-auto max-h-56 rounded-lg border border-border object-contain"
                                 />
                               ) : null}
                               {activeCard.hint ? (
@@ -906,24 +999,37 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 </p>
                               ) : null}
                             </div>
-                            <p className="mt-6 text-xs text-muted-foreground">
-                              {lText(
-                                locale,
-                                "Bấm vào thẻ hoặc nhấn Space để lật",
-                                "Click card or press Space to flip",
-                              )}
-                            </p>
+                            <div className="mt-6">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                tabIndex={isFlipped ? -1 : 0}
+                                className="min-h-10 text-xs text-muted-foreground"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleFlipToggle();
+                                }}
+                              >
+                                {lText(
+                                  locale,
+                                  "Lật xem đáp án · Space",
+                                  "Flip to reveal answer · Space",
+                                )}
+                              </Button>
+                            </div>
                           </div>
 
                           {/* Back face */}
                           <div
+                            aria-hidden={!isFlipped}
                             style={{
                               backfaceVisibility: "hidden",
                               transform: "rotateY(180deg)",
                             }}
-                            className="absolute inset-0 flex flex-col items-center justify-center rounded-xl border border-primary/30 bg-card p-6 sm:p-10 text-center shadow-xs"
+                            className="col-start-1 row-start-1 flex min-h-[280px] sm:min-h-[340px] flex-col items-center justify-between rounded-xl border border-primary/40 bg-card p-6 sm:p-10 text-center shadow-xs"
                           >
-                            <div className="max-w-2xl space-y-4 overflow-y-auto">
+                            <div className="my-auto w-full max-w-2xl space-y-4">
                               <p className="whitespace-pre-wrap text-lg font-medium leading-relaxed text-foreground sm:text-xl">
                                 {backText ||
                                   lText(locale, "(Chưa có đáp án)", "(No answer)")}
@@ -932,12 +1038,16 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={backImage}
-                                  alt={lText(locale, "Hình ảnh mặt sau", "Back side illustration")}
-                                  className="mx-auto max-h-44 rounded-lg border border-border object-contain"
+                                  alt={lText(
+                                    locale,
+                                    "Hình ảnh mặt sau",
+                                    "Back side illustration",
+                                  )}
+                                  className="mx-auto max-h-56 rounded-lg border border-border object-contain"
                                 />
                               ) : null}
                               {activeCard.explanation ? (
-                                <div className="rounded-lg bg-secondary/70 p-3 text-left text-sm text-muted-foreground">
+                                <div className="rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
                                   <span className="font-semibold text-foreground">
                                     {t("study.explanation")}:{" "}
                                   </span>
@@ -947,68 +1057,110 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 </div>
                               ) : null}
                             </div>
-                            <p className="mt-6 text-xs text-muted-foreground">
-                              {lText(
-                                locale,
-                                "Nhấn 1 (Cần ôn lại) hoặc 2 (Đã thuộc)",
-                                "Press 1 (Still Learning) or 2 (Known)",
-                              )}
-                            </p>
+                            <div className="mt-6">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                tabIndex={isFlipped ? 0 : -1}
+                                className="min-h-10 text-xs text-muted-foreground"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleFlipToggle();
+                                }}
+                              >
+                                {lText(
+                                  locale,
+                                  "Lật về mặt trước · Space",
+                                  "Flip to front · Space",
+                                )}
+                              </Button>
+                            </div>
                           </div>
                         </motion.div>
                       )}
-                    </button>
+                    </article>
                   </div>
                 </motion.div>
               </AnimatePresence>
             </div>
 
-            {/* Action Controls */}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <Button
-                variant="outline"
-                className="min-h-11"
-                disabled={safeIndex === 0}
-                onClick={() => goToIndex(safeIndex - 1)}
-              >
-                <ChevronLeft className="size-4" aria-hidden="true" />
-                {t("common.previous")}
-              </Button>
-
-              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:items-center">
+            {/* All 4 SM-2 Rating Controls (1=Again, 2=Hard, 3=Good, 4=Easy — SH-021!) */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <Button
+                  type="button"
                   variant="outline"
-                  className="min-h-11 border-destructive/40 text-destructive-subtle-foreground hover:bg-destructive-subtle"
+                  className="min-h-12 border-destructive/50 text-destructive-subtle-foreground hover:bg-destructive-subtle"
                   onClick={() => void handleRateCard("again")}
                 >
-                  <XCircle className="size-4" aria-hidden="true" />
-                  <span>{t("study.stillLearning")}</span>
+                  <XCircle className="size-4 shrink-0" aria-hidden="true" />
+                  <span>{lText(locale, "Lại", "Again")}</span>
                   <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
                     1
                   </kbd>
                 </Button>
 
                 <Button
-                  variant="success"
-                  className="min-h-11"
+                  type="button"
+                  variant="outline"
+                  className="min-h-12 border-warning/50 text-warning-subtle-foreground hover:bg-warning-subtle"
+                  onClick={() => void handleRateCard("hard")}
+                >
+                  <span>{lText(locale, "Khó", "Hard")}</span>
+                  <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
+                    2
+                  </kbd>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="default"
+                  className="min-h-12"
                   onClick={() => void handleRateCard("good")}
                 >
-                  <CheckCircle2 className="size-4" aria-hidden="true" />
-                  <span>{t("study.knowIt")}</span>
+                  <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
+                  <span>{lText(locale, "Tốt", "Good")}</span>
                   <kbd className="ml-1 hidden rounded bg-white/20 px-1.5 py-0.5 font-mono text-[11px] sm:inline">
-                    2
+                    3
+                  </kbd>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="success"
+                  className="min-h-12"
+                  onClick={() => void handleRateCard("easy")}
+                >
+                  <span>{lText(locale, "Dễ", "Easy")}</span>
+                  <kbd className="ml-1 hidden rounded bg-white/20 px-1.5 py-0.5 font-mono text-[11px] sm:inline">
+                    4
                   </kbd>
                 </Button>
               </div>
 
-              <Button
-                variant="outline"
-                className="min-h-11"
-                onClick={() => goToIndex(safeIndex + 1)}
-              >
-                {t("common.next")}
-                <ChevronRight className="size-4" aria-hidden="true" />
-              </Button>
+              <div className="flex items-center justify-between gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-11"
+                  disabled={safeIndex === 0}
+                  onClick={() => goToIndex(safeIndex - 1)}
+                >
+                  <ChevronLeft className="size-4" aria-hidden="true" />
+                  {t("common.previous")}
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-11"
+                  onClick={() => goToIndex(safeIndex + 1)}
+                >
+                  {t("common.next")}
+                  <ChevronRight className="size-4" aria-hidden="true" />
+                </Button>
+              </div>
             </div>
           </div>
         ) : null}

@@ -5,3 +5,6 @@ export * from "./write-grader";
 export * from "./match-engine";
 export * from "./exam-scoring";
 export * from "./flashcard-projection";
+export * from "./exam-allocator";
+export * from "./exam-selector";
+export * from "./coverage-engine";

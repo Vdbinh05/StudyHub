@@ -13,10 +13,24 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,12 +76,19 @@ export function FriendsView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const [searchInput, setSearchInput] = React.useState("");
   const [submittedQuery, setSubmittedQuery] = React.useState("");
+  const [removingFriend, setRemovingFriend] = React.useState<{
+    id: string;
+    name: string;
+    isOutgoing?: boolean;
+  } | null>(null);
 
   const profileQuery = useQuery<Profile | null>({
     queryKey: ["current-profile-id"],
+    enabled: configured,
     queryFn: async () => {
       try {
         const res = await apiFetch<Profile | { profile: Profile }>("/api/profile");
@@ -82,6 +103,7 @@ export function FriendsView() {
 
   const friendsQuery = useQuery<FriendsPayload | FriendItem[]>({
     queryKey: ["friends"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<FriendsPayload | FriendItem[]>("/api/friends");
       return res.data;
@@ -90,7 +112,7 @@ export function FriendsView() {
 
   const userSearchQuery = useQuery<Profile[]>({
     queryKey: ["user-search", submittedQuery],
-    enabled: submittedQuery.trim().length >= 3,
+    enabled: configured && submittedQuery.trim().length >= 3,
     queryFn: async () => {
       const res = await apiFetch<Profile[]>(
         `/api/users/search?q=${encodeURIComponent(submittedQuery.trim())}`,
@@ -113,7 +135,7 @@ export function FriendsView() {
       toast.success(vi ? "Đã gửi lời mời kết bạn." : "Friend request sent.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -143,7 +165,7 @@ export function FriendsView() {
       );
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -152,11 +174,12 @@ export function FriendsView() {
       await apiFetch(`/api/friends/${id}`, { method: "DELETE" });
     },
     onSuccess: () => {
+      setRemovingFriend(null);
       queryClient.invalidateQueries({ queryKey: ["friends"] });
       toast.success(vi ? "Đã xóa kết nối." : "Connection removed.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -207,7 +230,7 @@ export function FriendsView() {
   };
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader title={t("friends.title")} description={t("friends.subtitle")} />
 
       {/* Find Friends Card */}
@@ -216,40 +239,47 @@ export function FriendsView() {
           <CardTitle className="text-base">{t("friends.findFriends")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <form onSubmit={handleSearchSubmit} className="flex flex-col gap-2 sm:flex-row">
-            <div className="relative flex-1">
-              <Search
-                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                aria-hidden="true"
-              />
-              <Input
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                spellCheck={false}
-                placeholder={t("friends.searchByUsername")}
-                aria-label={t("friends.searchByUsername")}
-                className="pl-9"
-              />
-            </div>
-            <Button type="submit" variant="secondary">
-              <Search className="size-4" aria-hidden="true" />
-              <span>{t("common.search")}</span>
-            </Button>
-            <Button
-              type="button"
-              disabled={searchInput.trim().length < 3 || sendRequestMutation.isPending}
-              onClick={() =>
-                sendRequestMutation.mutate({ identifier: searchInput.trim() })
-              }
-            >
-              {sendRequestMutation.isPending ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <UserPlus className="size-4" aria-hidden="true" />
-              )}
-              <span>{t("friends.sendRequest")}</span>
-            </Button>
-          </form>
+          <search>
+            <form onSubmit={handleSearchSubmit} className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative flex-1">
+                <Search
+                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                  aria-hidden="true"
+                />
+                <Input
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  spellCheck={false}
+                  placeholder={t("friends.searchByUsername")}
+                  aria-label={t("friends.searchByUsername")}
+                  className="pl-9"
+                  disabled={!configured}
+                />
+              </div>
+              <Button type="submit" variant="secondary" disabled={!configured}>
+                <Search className="size-4" aria-hidden="true" />
+                <span>{t("common.search")}</span>
+              </Button>
+              <Button
+                type="button"
+                disabled={
+                  !configured ||
+                  searchInput.trim().length < 3 ||
+                  sendRequestMutation.isPending
+                }
+                onClick={() =>
+                  sendRequestMutation.mutate({ identifier: searchInput.trim() })
+                }
+              >
+                {sendRequestMutation.isPending ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <UserPlus className="size-4" aria-hidden="true" />
+                )}
+                <span>{t("friends.sendRequest")}</span>
+              </Button>
+            </form>
+          </search>
 
           {userSearchQuery.isFetching && (
             <p className="text-muted-foreground text-xs">{t("common.loading")}</p>
@@ -283,6 +313,7 @@ export function FriendsView() {
                   <Button
                     size="sm"
                     disabled={sendRequestMutation.isPending}
+                    aria-label={`${t("friends.sendRequest")} ${u.display_name}`}
                     onClick={() =>
                       sendRequestMutation.mutate({ addressee_id: u.id })
                     }
@@ -308,17 +339,19 @@ export function FriendsView() {
       </Card>
 
       {/* Friends & Requests Tabs */}
-      {friendsQuery.isLoading ? (
+      {!configured ? (
+        <EmptyState
+          icon={Users}
+          title={vi ? "Chưa thể tải danh sách bạn bè" : "Friends unavailable"}
+          description={t("common.serviceUnavailableDesc")}
+        />
+      ) : friendsQuery.isLoading ? (
         <Skeleton className="h-64 w-full rounded-xl" />
       ) : friendsQuery.error ? (
         <EmptyState
           icon={AlertCircle}
           title={vi ? "Không thể tải danh sách bạn bè" : "Unable to load friends"}
-          description={
-            friendsQuery.error instanceof Error
-              ? friendsQuery.error.message
-              : t("common.errorGeneric")
-          }
+          description={getFriendlyErrorMessage(friendsQuery.error, locale)}
           action={
             <Button onClick={() => void friendsQuery.refetch()}>
               {t("common.retry")}
@@ -350,6 +383,10 @@ export function FriendsView() {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {accepted.map((item) => {
                   const peer = getPeerProfile(item, currentUserId);
+                  const peerName =
+                    peer?.display_name ??
+                    peer?.username ??
+                    (vi ? "Người dùng" : "User");
                   return (
                     <Card key={item.id} className="py-4">
                       <CardContent className="flex items-center justify-between gap-3 px-4">
@@ -358,14 +395,14 @@ export function FriendsView() {
                             {peer?.avatar_url ? (
                               <AvatarImage
                                 src={peer.avatar_url}
-                                alt={peer.display_name}
+                                alt={peerName}
                               />
                             ) : null}
                             <AvatarFallback>{getInitials(peer)}</AvatarFallback>
                           </Avatar>
                           <div className="min-w-0">
                             <p className="text-foreground truncate text-sm font-semibold">
-                              {peer?.display_name ?? (vi ? "Người dùng" : "User")}
+                              {peerName}
                             </p>
                             {peer?.username && (
                               <p className="text-muted-foreground truncate text-xs">
@@ -378,8 +415,10 @@ export function FriendsView() {
                           variant="ghost"
                           size="icon-sm"
                           className="text-destructive hover:bg-destructive-subtle"
-                          aria-label={t("friends.removeFriend")}
-                          onClick={() => removeMutation.mutate(item.id)}
+                          aria-label={`${t("friends.removeFriend")} ${peerName}`}
+                          onClick={() =>
+                            setRemovingFriend({ id: item.id, name: peerName })
+                          }
                         >
                           <UserMinus className="size-4" aria-hidden="true" />
                         </Button>
@@ -406,6 +445,7 @@ export function FriendsView() {
               <ul className="divide-border bg-card divide-y rounded-xl border">
                 {incoming.map((item) => {
                   const peer = getPeerProfile(item, currentUserId);
+                  const peerName = peer?.display_name ?? peer?.username ?? item.requester_id;
                   return (
                     <li
                       key={item.id}
@@ -413,11 +453,14 @@ export function FriendsView() {
                     >
                       <div className="flex min-w-0 items-center gap-3">
                         <Avatar className="size-9">
+                          {peer?.avatar_url ? (
+                            <AvatarImage src={peer.avatar_url} alt={peerName} />
+                          ) : null}
                           <AvatarFallback>{getInitials(peer)}</AvatarFallback>
                         </Avatar>
                         <div className="min-w-0">
                           <p className="text-foreground truncate text-sm font-semibold">
-                            {peer?.display_name ?? item.requester_id}
+                            {peerName}
                           </p>
                           {peer?.username && (
                             <p className="text-muted-foreground text-xs">
@@ -430,6 +473,7 @@ export function FriendsView() {
                         <Button
                           size="sm"
                           disabled={respondMutation.isPending}
+                          aria-label={`${t("friends.accept")} ${peerName}`}
                           onClick={() =>
                             respondMutation.mutate({ id: item.id, action: "accept" })
                           }
@@ -441,6 +485,7 @@ export function FriendsView() {
                           size="sm"
                           variant="outline"
                           disabled={respondMutation.isPending}
+                          aria-label={`${t("friends.decline")} ${peerName}`}
                           onClick={() =>
                             respondMutation.mutate({ id: item.id, action: "decline" })
                           }
@@ -471,6 +516,7 @@ export function FriendsView() {
               <ul className="divide-border bg-card divide-y rounded-xl border">
                 {outgoing.map((item) => {
                   const peer = getPeerProfile(item, currentUserId);
+                  const peerName = peer?.display_name ?? peer?.username ?? item.addressee_id;
                   return (
                     <li
                       key={item.id}
@@ -478,11 +524,14 @@ export function FriendsView() {
                     >
                       <div className="flex min-w-0 items-center gap-3">
                         <Avatar className="size-9">
+                          {peer?.avatar_url ? (
+                            <AvatarImage src={peer.avatar_url} alt={peerName} />
+                          ) : null}
                           <AvatarFallback>{getInitials(peer)}</AvatarFallback>
                         </Avatar>
                         <div className="min-w-0">
                           <p className="text-foreground truncate text-sm font-semibold">
-                            {peer?.display_name ?? item.addressee_id}
+                            {peerName}
                           </p>
                           <Badge variant="secondary" className="mt-0.5">
                             {vi ? "Đang chờ" : "Pending"}
@@ -493,7 +542,14 @@ export function FriendsView() {
                         size="sm"
                         variant="outline"
                         disabled={removeMutation.isPending}
-                        onClick={() => removeMutation.mutate(item.id)}
+                        aria-label={`${t("common.cancel")} ${peerName}`}
+                        onClick={() =>
+                          setRemovingFriend({
+                            id: item.id,
+                            name: peerName,
+                            isOutgoing: true,
+                          })
+                        }
                       >
                         {t("common.cancel")}
                       </Button>
@@ -505,6 +561,49 @@ export function FriendsView() {
           </TabsContent>
         </Tabs>
       )}
+
+      {/* Confirm Remove Friend / Cancel Request (fixes SH-037 / AN-02) */}
+      <AlertDialog
+        open={Boolean(removingFriend)}
+        onOpenChange={(o) => !o && setRemovingFriend(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {removingFriend?.isOutgoing
+                ? vi
+                  ? `Hủy lời mời đã gửi tới ${removingFriend.name}?`
+                  : `Cancel request sent to ${removingFriend.name}?`
+                : vi
+                  ? `Hủy kết bạn với ${removingFriend?.name ?? ""}?`
+                  : `Remove ${removingFriend?.name ?? ""} from friends?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {removingFriend?.isOutgoing
+                ? vi
+                  ? "Người nhận sẽ không còn thấy lời mời kết bạn này nữa."
+                  : "They will no longer see your pending friend request."
+                : vi
+                  ? "Bạn luôn có thể gửi lại lời mời kết bạn sau nếu muốn."
+                  : "You can always send a new friend request later."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={removeMutation.isPending}
+              onClick={() =>
+                removingFriend && removeMutation.mutate(removingFriend.id)
+              }
+            >
+              {removingFriend?.isOutgoing
+                ? t("common.confirm")
+                : t("friends.removeFriend")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </FadeIn>
   );
 }

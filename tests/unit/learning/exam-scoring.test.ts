@@ -219,4 +219,119 @@ describe("Deterministic Exam Scoring & Wall-Clock Timer Engine (exam-scoring.ts)
       expect("is_correct" in opt).toBe(false);
     }
   });
+
+  it("computes true weighted overall accuracy (NEVER unweighted average of subject percentages) and subject/tag breakdowns", () => {
+    // Subject A: 9 questions (all 9 correct -> 100%)
+    // Subject B: 1 question (0 correct -> 0%)
+    // True weighted overall = 9/10 = 90%, NOT unweighted avg (100% + 0%) / 2 = 50%!
+    const questions: ExamSnapshotQuestion[] = [
+      ...Array.from({ length: 9 }, (_, i) =>
+        makeSnapshotQuestion({
+          id: `aq-a-${i}`,
+          position: i,
+          source_study_set_id: "set-a",
+          source_subject_title: "Principles of Flight",
+          chapter_snapshot: "Lift",
+          tags_snapshot: [{ id: "tag-aero", name: "Aero" }],
+          correct_option_ids: ["opt-b"],
+        }),
+      ),
+      makeSnapshotQuestion({
+        id: "aq-b-0",
+        position: 9,
+        source_study_set_id: "set-b",
+        source_subject_title: "Meteorology",
+        chapter_snapshot: "Clouds",
+        tags_snapshot: [{ id: "tag-met", name: "Met" }],
+        correct_option_ids: ["opt-b"],
+      }),
+    ];
+
+    const answers: ExamAttemptAnswer[] = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        id: `ans-a-${i}`,
+        attempt_id: "att-mix",
+        attempt_question_id: `aq-a-${i}`,
+        user_id: "u-1",
+        selected_option_ids: ["opt-b"],
+        typed_answer: null,
+        is_flagged: false,
+        is_correct: null,
+        updated_at: "2026-05-01T10:01:00.000Z",
+      })),
+      {
+        id: "ans-b-0",
+        attempt_id: "att-mix",
+        attempt_question_id: "aq-b-0",
+        user_id: "u-1",
+        selected_option_ids: ["opt-a"], // wrong
+        typed_answer: null,
+        is_flagged: false,
+        is_correct: null,
+        updated_at: "2026-05-01T10:02:00.000Z",
+      },
+    ];
+
+    const summary = scoreExamAttempt(questions, answers, 70);
+    expect(summary.scorePercent).toBe(90);
+    expect(summary.passed).toBe(true);
+    expect(summary.subjectBreakdown).toEqual([
+      {
+        studySetId: "set-a",
+        subjectTitle: "Principles of Flight",
+        total: 9,
+        correct: 9,
+        wrong: 0,
+        unanswered: 0,
+        accuracyPercent: 100,
+      },
+      {
+        studySetId: "set-b",
+        subjectTitle: "Meteorology",
+        total: 1,
+        correct: 0,
+        wrong: 1,
+        unanswered: 0,
+        accuracyPercent: 0,
+      },
+    ]);
+    expect(summary.tagBreakdown).toHaveLength(2);
+  });
+
+  it("rejects single_choice with multiple crafted option UUIDs and grades numeric 0/10/100 accurately", () => {
+    const sc = makeSnapshotQuestion({
+      id: "aq-sc",
+      question_type: "single_choice",
+      correct_option_ids: ["opt-b"],
+    });
+    expect(
+      gradeExamQuestion(sc, { selected_option_ids: ["opt-b", "opt-a"] }).isCorrect,
+    ).toBe(false);
+
+    const numZero = makeSnapshotQuestion({
+      id: "aq-num-0",
+      question_type: "short_answer",
+      options_snapshot: [],
+      correct_option_ids: [],
+      accepted_answers_snapshot: [
+        { answer_text: "0", normalized_answer: "0", match_mode: "numeric" },
+      ],
+    });
+    expect(gradeExamQuestion(numZero, { typed_answer: "0" }).isCorrect).toBe(true);
+    expect(gradeExamQuestion(numZero, { typed_answer: "0.00" }).isCorrect).toBe(true);
+
+    const numHundred = makeSnapshotQuestion({
+      id: "aq-num-100",
+      question_type: "short_answer",
+      options_snapshot: [],
+      correct_option_ids: [],
+      accepted_answers_snapshot: [
+        { answer_text: "100", normalized_answer: "100", match_mode: "numeric" },
+      ],
+    });
+    expect(gradeExamQuestion(numHundred, { typed_answer: "1" }).isCorrect).toBe(false);
+    expect(gradeExamQuestion(numHundred, { typed_answer: "100.0" }).isCorrect).toBe(
+      true,
+    );
+  });
 });

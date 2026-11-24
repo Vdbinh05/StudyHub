@@ -6,9 +6,9 @@ const contentSecurityPolicy = [
   "default-src 'self'",
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://*.supabase.co https://lh3.googleusercontent.com",
+  `img-src 'self' data: blob: https://*.supabase.co https://lh3.googleusercontent.com${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
   "font-src 'self' data: https://fonts.gstatic.com",
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co http://127.0.0.1:* http://localhost:*",
+  `connect-src 'self' https://*.supabase.co wss://*.supabase.co${isDev ? " http://127.0.0.1:* http://localhost:*" : ""}`,
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",
@@ -24,11 +24,23 @@ const securityHeaders = [
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=()",
   },
+  ...(!isDev
+    ? [
+        {
+          key: "Strict-Transport-Security",
+          value: "max-age=63072000; includeSubDomains",
+        },
+      ]
+    : []),
 ];
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  experimental: {
+    cpus: 4,
+    memoryBasedWorkersCount: true,
+  },
   images: {
     remotePatterns: [
       {

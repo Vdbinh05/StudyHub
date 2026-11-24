@@ -8,6 +8,7 @@ import {
   AlertCircle,
   BookOpen,
   Edit3,
+  FileCheck2,
   Folder as FolderIcon,
   FolderMinus,
   FolderPlus,
@@ -15,7 +16,12 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, formatRelativeTime } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  formatRelativeTime,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -43,6 +49,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   const vi = locale === "vi";
   const router = useRouter();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [subFolderOpen, setSubFolderOpen] = React.useState(false);
@@ -50,6 +57,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
 
   const foldersQuery = useQuery<Folder[]>({
     queryKey: ["folders"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<Folder[]>("/api/folders");
       return Array.isArray(res.data) ? res.data : [];
@@ -58,6 +66,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
 
   const setsQuery = useQuery<StudySet[]>({
     queryKey: ["folder-sets", folderId],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<StudySet[]>(
         `/api/sets?folderId=${encodeURIComponent(folderId)}&pageSize=100`,
@@ -76,7 +85,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       router.push("/library");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -95,13 +104,28 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       );
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
   const folder = (foldersQuery.data ?? []).find((f) => f.id === folderId) ?? null;
   const subFolders = (foldersQuery.data ?? []).filter((f) => f.parent_id === folderId);
   const sets = setsQuery.data ?? [];
+
+  if (!configured) {
+    return (
+      <EmptyState
+        icon={AlertCircle}
+        title={vi ? "Không thể tải thư mục" : "Folder unavailable"}
+        description={t("common.serviceUnavailableDesc")}
+        action={
+          <Button asChild variant="outline">
+            <Link href="/library">{t("library.title")}</Link>
+          </Button>
+        }
+      />
+    );
+  }
 
   if (foldersQuery.isLoading || setsQuery.isLoading) {
     return (
@@ -136,7 +160,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   }
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={folder.name}
         description={folder.description ?? undefined}
@@ -146,6 +170,14 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
         ]}
         actions={
           <>
+            {sets.length > 0 && (
+              <Button asChild size="sm">
+                <Link href={`/exams/new?folderId=${folder.id}`}>
+                  <FileCheck2 className="size-4" aria-hidden="true" />
+                  <span>{vi ? "Thi thử thư mục này" : "Exam this folder"}</span>
+                </Link>
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={() => setSubFolderOpen(true)}>
               <FolderPlus className="size-4" aria-hidden="true" />
               <span>{vi ? "Thư mục con" : "Subfolder"}</span>
@@ -163,7 +195,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
               <Trash2 className="size-4" aria-hidden="true" />
               <span>{t("common.delete")}</span>
             </Button>
-            <Button asChild size="sm">
+            <Button asChild size="sm" variant={sets.length > 0 ? "outline" : "default"}>
               <Link href={`/sets/new?folderId=${folder.id}`}>
                 <Plus className="size-4" aria-hidden="true" />
                 <span>{t("library.newSet")}</span>
@@ -237,7 +269,11 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={vi ? "Đưa ra khỏi thư mục" : "Remove from folder"}
+                      aria-label={
+                        vi
+                          ? `Đưa "${set.title}" ra khỏi thư mục`
+                          : `Remove "${set.title}" from folder`
+                      }
                       onClick={() => removeFromFolderMutation.mutate(set.id)}
                     >
                       <FolderMinus className="size-4" aria-hidden="true" />
@@ -283,7 +319,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => deleteFolderMutation.mutate()}

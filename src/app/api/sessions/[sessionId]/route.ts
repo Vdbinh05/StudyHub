@@ -100,11 +100,19 @@ export async function PATCH(
     if (error) throw error;
 
     if (input.status === "completed") {
-      await supabase
-        .from("study_sets")
-        .update({ last_studied_at: nowIso })
-        .eq("id", existing.study_set_id)
-        .eq("owner_id", user.id);
+      const targetSetIds = Array.from(
+        new Set([
+          ...(existing.study_set_id ? [existing.study_set_id] : []),
+          ...(existing.source_study_set_ids ?? []),
+        ]),
+      );
+      if (targetSetIds.length > 0) {
+        await supabase
+          .from("study_sets")
+          .update({ last_studied_at: nowIso })
+          .in("id", targetSetIds)
+          .eq("owner_id", user.id);
+      }
     }
 
     return apiSuccess(data);

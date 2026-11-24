@@ -63,14 +63,79 @@ export function normalizeWriteText(
 }
 
 function parseNumericStrict(input: string): number | null {
-  const trimmed = input.trim().replace(/\s+/g, "");
+  const trimmed = input.trim().replace(/\s+/g, "").replace(/,/g, ".");
   if (!trimmed) return null;
   // Support standard decimal numbers (with optional leading sign)
   if (!/^[+-]?(\d+(\.\d+)?|\.\d+)$/.test(trimmed)) {
     return null;
   }
   const value = Number(trimmed);
-  return Number.isFinite(value) ? value : null;
+  if (!Number.isFinite(value)) return null;
+  return Object.is(value, -0) ? 0 : value;
+}
+
+/**
+ * Exact canonical numeric formatting matching PostgreSQL 13+ `trim_scale(v_num)::text`:
+ * - "10" -> "10", "100.00" -> "100", "0" / "0.00" / "-0" -> "0", "1.50" -> "1.5", "3,5" -> "3.5"
+ * Avoids the V1.0 SQL bug that trimmed integer trailing zeros (`10` -> `'1'`, `0` -> `''`).
+ */
+export function normalizeNumericCanonical(input: string): string {
+  const cleaned = input.trim().replace(/\s+/g, "").replace(/,/g, ".");
+  if (!cleaned) return "";
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?$|^([+-]?)\.(\d+)$/.exec(cleaned);
+  if (!match) {
+    return cleaned.toLowerCase();
+  }
+
+  const sign = match[1] || match[4] || "";
+  const intPartRaw = match[2] ?? "0";
+  const fracPartRaw = match[3] ?? match[5] ?? "";
+
+  const intPart = intPartRaw.replace(/^0+(?=\d)/, "") || "0";
+  const fracPart = fracPartRaw.replace(/0+$/, "");
+
+  if (intPart === "0" && fracPart === "") {
+    return "0";
+  }
+
+  const normalizedSign = sign === "-" ? "-" : "";
+  return fracPart.length > 0
+    ? `${normalizedSign}${intPart}.${fracPart}`
+    : `${normalizedSign}${intPart}`;
+}
+
+/**
+ * Canonical short-answer normalizer aligned 1:1 with Migration 0005 `public.normalize_short_answer(p_input, p_mode)`.
+ */
+export function normalizeShortAnswerSqlCompatible(
+  input: string,
+  mode: AnswerMatchMode = "case_insensitive",
+): string {
+  const collapsed = input.normalize("NFC").trim().replace(/\s+/g, " ");
+
+  if (mode === "exact") {
+    return collapsed;
+  }
+
+  if (mode === "numeric") {
+    return normalizeNumericCanonical(collapsed);
+  }
+
+  if (mode === "ignore_diacritics") {
+    const stripped = stripDiacritics(collapsed.toLowerCase());
+    return stripped
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // case_insensitive: lowercased, trim leading/trailing punctuation, collapse spaces
+  const lowered = collapsed
+    .toLowerCase()
+    .replace(/^[.,;:!?'"()[\]{}]+|[.,;:!?'"()[\]{}]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return lowered;
 }
 
 /**
@@ -104,11 +169,16 @@ export function gradeWriteAnswer(
     if (mode === "numeric") {
       const userNum = parseNumericStrict(trimmedInput);
       const targetNum = parseNumericStrict(accepted.answer_text);
-      if (userNum !== null && targetNum !== null && userNum === targetNum) {
+      const userCanon = normalizeNumericCanonical(trimmedInput);
+      const targetCanon = normalizeNumericCanonical(accepted.answer_text);
+      if (
+        (userNum !== null && targetNum !== null && userNum === targetNum) ||
+        (userCanon.length > 0 && userCanon === targetCanon)
+      ) {
         return {
           isCorrect: true,
           matchedAnswer: accepted.answer_text,
-          normalizedUserAnswer: String(userNum),
+          normalizedUserAnswer: userCanon,
         };
       }
       continue;

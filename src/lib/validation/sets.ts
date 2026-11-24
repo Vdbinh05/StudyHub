@@ -16,8 +16,18 @@ export const listSetsQuerySchema = z.object({
     .union([z.literal("true"), z.literal("false")])
     .transform((v) => v === "true")
     .optional(),
+  favoritesOnly: z
+    .union([z.literal("true"), z.literal("false")])
+    .transform((v) => v === "true")
+    .optional(),
   sort: z
-    .enum(["updated_desc", "created_desc", "title_asc", "last_studied_desc"])
+    .enum([
+      "updated_desc",
+      "created_desc",
+      "title_asc",
+      "last_studied_desc",
+      "question_count_desc",
+    ])
     .default("updated_desc"),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(24),
@@ -52,6 +62,7 @@ export const createStudySetSchema = z.object({
 export const updateStudySetSchema = createStudySetSchema
   .extend({
     is_archived: z.boolean().optional(),
+    is_favorite: z.boolean().optional(),
   })
   .partial();
 
@@ -62,13 +73,15 @@ export const duplicateStudySetSchema = z
   })
   .optional();
 
-export const addStudySetMemberSchema = z.object({
-  user_id: uuidSchema.optional(),
-  identifier: z.string().trim().min(2).max(255).optional(),
-  role: sharePermissionSchema.default("viewer"),
-}).refine((val) => Boolean(val.user_id || val.identifier), {
-  message: "Either user_id or identifier (username/email) is required.",
-});
+export const addStudySetMemberSchema = z
+  .object({
+    user_id: uuidSchema.optional(),
+    identifier: z.string().trim().min(2).max(255).optional(),
+    role: sharePermissionSchema.default("viewer"),
+  })
+  .refine((val) => Boolean(val.user_id || val.identifier), {
+    message: "Either user_id or identifier (username/email) is required.",
+  });
 
 export const updateStudySetMemberSchema = z.object({
   role: sharePermissionSchema,

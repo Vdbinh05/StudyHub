@@ -2,6 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import type { MasteryLevel, SelfRating, UserQuestionProgress } from "@/types/domain";
 
+const MIN_EASE_FACTOR = 1.3;
+const MAX_EASE_FACTOR = 4.0;
+const DEFAULT_EASE_FACTOR = 2.5;
+const MAX_INTERVAL_DAYS = 3650;
+
 export interface Sm2UpdateInput {
   supabase: SupabaseClient<Database>;
   userId: string;
@@ -20,6 +25,7 @@ export interface Sm2UpdateInput {
 
 /**
  * Deterministic SM-2 spaced repetition state transition.
+ * Strictly unified 1:1 with `src/lib/learning/sm2.ts` and SQL `submit_exam_attempt()` (SH-029).
  * Quality mapping: again=1, hard=3, good=4, easy=5 (or 4 for correct, 1 for wrong).
  */
 export function computeDeterministicSm2(
@@ -46,7 +52,7 @@ export function computeDeterministicSm2(
   last_reviewed_at: string;
   next_review_at: string;
 } {
-  const prevEase = existing ? Number(existing.ease_factor) : 2.5;
+  const prevEase = existing ? Number(existing.ease_factor) : DEFAULT_EASE_FACTOR;
   const prevInterval = existing?.interval_days ?? 0;
   const prevReps = existing?.repetitions ?? 0;
   const prevCorrect = existing?.correct_count ?? 0;
@@ -67,12 +73,14 @@ export function computeDeterministicSm2(
     quality = isCorrect ? 4 : 1;
   }
 
-  const passed = quality >= 3 && isCorrect;
+  const passed = quality >= 3 && (selfRating ? true : isCorrect);
 
   // Classic SM-2 ease factor update clamped to [1.30, 4.00]
   const rawEase =
     prevEase + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-  const easeFactor = Math.round(Math.min(4.0, Math.max(1.3, rawEase)) * 100) / 100;
+  const easeFactor =
+    Math.round(Math.min(MAX_EASE_FACTOR, Math.max(MIN_EASE_FACTOR, rawEase)) * 100) /
+    100;
 
   let repetitions: number;
   let intervalDays: number;
@@ -83,23 +91,27 @@ export function computeDeterministicSm2(
     intervalDays = 1;
     consecutiveCorrect = 0;
   } else {
-    repetitions = prevReps + 1;
-    consecutiveCorrect = prevConsec + 1;
-    if (repetitions === 1) {
+    if (prevReps === 0) {
       intervalDays = 1;
-    } else if (repetitions === 2) {
+    } else if (prevReps === 1) {
       intervalDays = 6;
     } else {
-      const multiplier =
-        selfRating === "hard" ? 1.2 : selfRating === "easy" ? easeFactor * 1.3 : easeFactor;
-      intervalDays = Math.max(1, Math.min(365, Math.round(prevInterval * multiplier)));
+      intervalDays = Math.min(
+        MAX_INTERVAL_DAYS,
+        Math.max(1, Math.round(prevInterval * prevEase)),
+      );
     }
+    repetitions = prevReps + 1;
+    consecutiveCorrect = prevConsec + 1;
   }
 
+  const correctCount = prevCorrect + (passed ? 1 : 0);
+  const wrongCount = prevWrong + (passed ? 0 : 1);
+
   let masteryLevel: MasteryLevel;
-  if (!passed) {
-    masteryLevel = "learning";
-  } else if (consecutiveCorrect >= 4 && intervalDays >= 14) {
+  if (correctCount === 0 && wrongCount === 0) {
+    masteryLevel = "new";
+  } else if (consecutiveCorrect >= 3 && intervalDays >= 14) {
     masteryLevel = "mastered";
   } else if (consecutiveCorrect >= 2 || intervalDays >= 6) {
     masteryLevel = "familiar";
@@ -111,8 +123,8 @@ export function computeDeterministicSm2(
 
   return {
     mastery_level: masteryLevel,
-    correct_count: prevCorrect + (passed ? 1 : 0),
-    wrong_count: prevWrong + (passed ? 0 : 1),
+    correct_count: correctCount,
+    wrong_count: wrongCount,
     consecutive_correct: consecutiveCorrect,
     ease_factor: easeFactor,
     interval_days: intervalDays,

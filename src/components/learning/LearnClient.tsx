@@ -26,9 +26,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   isEditableEventTarget,
+  isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   recordStudySessionAnswer,
   updateStudySession,
@@ -47,6 +49,7 @@ import {
   createSeededRng,
   gradeChoiceSelection,
   shuffleOptions,
+  withOptionDisplayLabels,
   type DisplayedOption,
 } from "@/lib/learning/shuffle";
 import {
@@ -75,7 +78,8 @@ interface LearnClientProps {
 
 export function LearnClient({ setId }: LearnClientProps) {
   const { locale, t } = useI18n();
-  const prefersReducedMotion = useReducedMotion();
+  const { preferences, playFeedbackSound } = useUserPreferences();
+  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
     data: bundle,
     isLoading,
@@ -88,10 +92,9 @@ export function LearnClient({ setId }: LearnClientProps) {
 
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
   const [roundSize, setRoundSize] = React.useState<number>(7);
-  const [overrideQueue, setOverrideQueue] = React.useState<{
-    key: string;
-    state: LearnQueueState;
-  } | null>(null);
+  const [queueState, setQueueState] = React.useState<LearnQueueState | null>(
+    null,
+  );
   const [completedDurationSeconds, setCompletedDurationSeconds] =
     React.useState(1);
   const [selectedOptionIds, setSelectedOptionIds] = React.useState<string[]>([]);
@@ -104,30 +107,38 @@ export function LearnClient({ setId }: LearnClientProps) {
   const [turnCounter, setTurnCounter] = React.useState(0);
 
   const sessionIdRef = React.useRef<string | null>(null);
+  const initializedKeyRef = React.useRef<string | null>(null);
   const startedAtRef = React.useRef<number>(0);
   const cardStartRef = React.useRef<number>(0);
   const lastCompositionEndRef = React.useRef<number | null>(null);
+  const bundleRef = React.useRef(bundle);
+
+  React.useEffect(() => {
+    bundleRef.current = bundle;
+  }, [bundle]);
 
   React.useEffect(() => {
     startedAtRef.current = Date.now();
     cardStartRef.current = Date.now();
   }, []);
 
+  const bundleQuestions = bundle?.questions;
+
   const questionMap = React.useMemo(() => {
     const map = new Map<string, Question>();
-    for (const q of bundle?.questions ?? []) {
+    for (const q of bundleQuestions ?? []) {
       map.set(q.id, q);
     }
     return map;
-  }, [bundle?.questions]);
+  }, [bundleQuestions]);
 
   const filteredQuestions = React.useMemo(() => {
-    if (!bundle) return [];
-    if (selectedChapter === "all") return bundle.questions;
-    return bundle.questions.filter(
+    if (!bundleQuestions) return [];
+    if (selectedChapter === "all") return bundleQuestions;
+    return bundleQuestions.filter(
       (q) => (q.chapter?.trim() || "") === selectedChapter,
     );
-  }, [bundle, selectedChapter]);
+  }, [bundleQuestions, selectedChapter]);
 
   const masterySummary = React.useMemo(() => {
     if (!bundle) {
@@ -139,42 +150,12 @@ export function LearnClient({ setId }: LearnClientProps) {
     return summarizeMastery(items);
   }, [bundle, filteredQuestions]);
 
-  const queueKey = `${bundle?.studySet.id ?? ""}:${selectedChapter}:${roundSize}`;
-
-  const defaultQueueState = React.useMemo<LearnQueueState | null>(() => {
-    if (!bundle) return null;
-    const inputs: LearnItemInput[] = filteredQuestions.map((q) => {
-      const p = bundle.progressMap.get(q.id);
-      return {
-        questionId: q.id,
-        masteryLevel: p?.mastery_level ?? "new",
-        nextReviewAt: p?.next_review_at ?? null,
-        wrongCount: p?.wrong_count ?? 0,
-      };
-    });
-    return createLearnQueueState(inputs, {
-      roundSize,
-      reinsertGap: 4,
-    });
-  }, [bundle, filteredQuestions, roundSize]);
-
-  const queueState =
-    overrideQueue && overrideQueue.key === queueKey
-      ? overrideQueue.state
-      : defaultQueueState;
-
-  const setQueueState = React.useCallback(
-    (next: LearnQueueState) => {
-      setOverrideQueue({ key: queueKey, state: next });
-    },
-    [queueKey],
-  );
-
   const initQueue = React.useCallback(
-    (questions: Question[], size: number) => {
-      if (!bundle) return;
+    (questions: Question[], size: number, chapter: string) => {
+      const currentBundle = bundleRef.current;
+      if (!currentBundle) return;
       const inputs: LearnItemInput[] = questions.map((q) => {
-        const p = bundle.progressMap.get(q.id);
+        const p = currentBundle.progressMap.get(q.id);
         return {
           questionId: q.id,
           masteryLevel: p?.mastery_level ?? "new",
@@ -199,7 +180,7 @@ export function LearnClient({ setId }: LearnClientProps) {
         createStudySession({
           study_set_id: setId,
           mode: "learn",
-          config: { chapter: selectedChapter, roundSize: size },
+          config: { chapter, roundSize: size },
           total_items: questions.length,
         })
           .then((s) => {
@@ -208,30 +189,21 @@ export function LearnClient({ setId }: LearnClientProps) {
           .catch(() => {});
       }
     },
-    [bundle, selectedChapter, setId, setQueueState],
+    [setId],
   );
 
-  // Create backend study session when set/filter changes
+  // Initialize queue & study session STRICTLY ONCE per (studySetId, selectedChapter, roundSize).
+  // NEVER depends on mutable `bundle` object, preventing orphaned sessions & mid-feedback queue jumps (SH-008)!
+  const studySetIdLoaded = bundle?.studySet.id ?? null;
+  const sessionKey = studySetIdLoaded
+    ? `${studySetIdLoaded}:${selectedChapter}:${roundSize}`
+    : null;
+
   React.useEffect(() => {
-    if (!bundle || filteredQuestions.length === 0) return;
-    let active = true;
-    sessionIdRef.current = null;
-    startedAtRef.current = Date.now();
-    cardStartRef.current = Date.now();
-    createStudySession({
-      study_set_id: setId,
-      mode: "learn",
-      config: { chapter: selectedChapter, roundSize },
-      total_items: filteredQuestions.length,
-    })
-      .then((s) => {
-        if (active) sessionIdRef.current = s.id;
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, [bundle, filteredQuestions.length, roundSize, selectedChapter, setId]);
+    if (!sessionKey || initializedKeyRef.current === sessionKey) return;
+    initializedKeyRef.current = sessionKey;
+    initQueue(filteredQuestions, roundSize, selectedChapter);
+  }, [filteredQuestions, initQueue, roundSize, selectedChapter, sessionKey]);
 
   const currentCard = queueState ? getCurrentLearnCard(queueState) : null;
   const currentQuestion = currentCard
@@ -240,9 +212,12 @@ export function LearnClient({ setId }: LearnClientProps) {
 
   const displayedOptions = React.useMemo<Array<DisplayedOption<QuestionOption>>>(() => {
     if (!currentQuestion || !currentQuestion.options?.length) return [];
+    if (!preferences.default_shuffle_options) {
+      return withOptionDisplayLabels(currentQuestion.options);
+    }
     const rng = createSeededRng(`${currentQuestion.id}-turn-${turnCounter}`);
     return shuffleOptions(currentQuestion.options, rng);
-  }, [currentQuestion, turnCounter]);
+  }, [currentQuestion, preferences.default_shuffle_options, turnCounter]);
 
   const persistLearnOutcome = React.useCallback(
     (
@@ -317,9 +292,10 @@ export function LearnClient({ setId }: LearnClientProps) {
         isCorrect,
         expectedText: correctOpts.map((o) => o.content).join(", "),
       });
+      playFeedbackSound(isCorrect ? "correct" : "wrong");
       persistLearnOutcome(currentQuestion, isCorrect, optionIds, null);
     },
-    [currentQuestion, feedback?.submitted, persistLearnOutcome],
+    [currentQuestion, feedback?.submitted, persistLearnOutcome, playFeedbackSound],
   );
 
   const handleOptionSelect = React.useCallback(
@@ -353,9 +329,16 @@ export function LearnClient({ setId }: LearnClientProps) {
         isCorrect: graded.isCorrect,
         expectedText: expected.map((a) => a.answer_text).join(" / "),
       });
+      playFeedbackSound(graded.isCorrect ? "correct" : "wrong");
       persistLearnOutcome(currentQuestion, graded.isCorrect, [], trimmed);
     },
-    [currentQuestion, feedback?.submitted, persistLearnOutcome, typedAnswer],
+    [
+      currentQuestion,
+      feedback?.submitted,
+      persistLearnOutcome,
+      playFeedbackSound,
+      typedAnswer,
+    ],
   );
 
   const handleContinueAfterFeedback = React.useCallback(() => {
@@ -369,6 +352,7 @@ export function LearnClient({ setId }: LearnClientProps) {
     cardStartRef.current = Date.now();
 
     if (nextState.sessionCompleted) {
+      playFeedbackSound("complete");
       const durationSeconds = Math.max(
         1,
         Math.round((Date.now() - startedAtRef.current) / 1000),
@@ -383,7 +367,7 @@ export function LearnClient({ setId }: LearnClientProps) {
         }).catch(() => {});
       }
     }
-  }, [feedback, queueState, setQueueState]);
+  }, [feedback, playFeedbackSound, queueState]);
 
   const handleAdvanceRound = React.useCallback(() => {
     if (!queueState) return;
@@ -394,16 +378,16 @@ export function LearnClient({ setId }: LearnClientProps) {
     setFeedback(null);
     setTurnCounter((c) => c + 1);
     cardStartRef.current = Date.now();
-  }, [queueState, setQueueState]);
+  }, [queueState]);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (strictly guarding buttons/links on Enter/Space — LM-06!)
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableEventTarget(event.target)) return;
 
       if (queueState?.roundCompleted && !queueState.sessionCompleted) {
-        if (event.key === "Enter") {
+        if (event.key === "Enter" && !isInteractiveControlTarget(event.target)) {
           event.preventDefault();
           handleAdvanceRound();
         }
@@ -412,7 +396,11 @@ export function LearnClient({ setId }: LearnClientProps) {
 
       if (!currentQuestion) return;
 
-      if (feedback?.submitted && (event.key === "Enter" || event.code === "Space")) {
+      if (
+        feedback?.submitted &&
+        (event.key === "Enter" || event.code === "Space") &&
+        !isInteractiveControlTarget(event.target)
+      ) {
         event.preventDefault();
         handleContinueAfterFeedback();
         return;
@@ -613,7 +601,11 @@ export function LearnClient({ setId }: LearnClientProps) {
               </div>
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              <Button onClick={() => initQueue(filteredQuestions, roundSize)}>
+              <Button
+                onClick={() =>
+                  initQueue(filteredQuestions, roundSize, selectedChapter)
+                }
+              >
                 <RotateCcw className="size-4" aria-hidden="true" />
                 {t("study.studyAgain")}
               </Button>

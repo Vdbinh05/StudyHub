@@ -18,15 +18,24 @@ export interface RateLimitResult {
 
 export const RATE_LIMITS = {
   IMPORT_PARSE: { id: "import_parse", limit: 15, windowMs: 5 * 60 * 1000 },
-  IMPORT_COMMIT: { id: "import_commit", limit: 20, windowMs: 5 * 60 * 1000 },
+  IMPORT_COMMIT: { id: "import_commit", limit: 120, windowMs: 5 * 60 * 1000 },
   SHARE_REDEEM: { id: "share_redeem", limit: 20, windowMs: 15 * 60 * 1000 },
+  SHARE_CREATE: { id: "share_create", limit: 20, windowMs: 15 * 60 * 1000 },
   FRIEND_REQUEST: { id: "friend_request", limit: 20, windowMs: 15 * 60 * 1000 },
   EXAM_START: { id: "exam_start", limit: 30, windowMs: 15 * 60 * 1000 },
   SET_CLONE: { id: "set_clone", limit: 15, windowMs: 15 * 60 * 1000 },
+  EXPORT: { id: "export", limit: 15, windowMs: 15 * 60 * 1000 },
+  ACCOUNT_RESTORE: { id: "account_restore", limit: 5, windowMs: 15 * 60 * 1000 },
   AUTH_ACTION: { id: "auth_action", limit: 20, windowMs: 15 * 60 * 1000 },
   UPLOAD: { id: "upload", limit: 30, windowMs: 15 * 60 * 1000 },
 } as const satisfies Record<string, RateLimitConfig>;
 
+/**
+ * NOTE (SEC-021): This deterministic sliding-window store runs in-memory per Node.js process
+ * (ideal for single-node / self-hosted deployments with zero external dependencies).
+ * For multi-region horizontal serverless scale, back this interface with Upstash Redis or a
+ * Postgres rate-limit table.
+ */
 const MAX_STORE_ENTRIES = 10_000;
 const store = new Map<string, number[]>();
 

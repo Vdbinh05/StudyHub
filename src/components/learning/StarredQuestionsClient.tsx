@@ -45,7 +45,7 @@ export function StarredQuestionsClient() {
 
   const setsQuery = useQuery({
     queryKey: ["accessible-sets"],
-    queryFn: fetchAccessibleSets,
+    queryFn: () => fetchAccessibleSets(),
     staleTime: 60_000,
   });
 
@@ -109,13 +109,46 @@ export function StarredQuestionsClient() {
     [locale, queryClient, t],
   );
 
-  const launchSetId =
-    selectedSetId !== "all"
-      ? selectedSetId
-      : filtered[0]?.study_set_id ?? null;
+  // True multi-subject Practice & Exam launch across ALL affected sets (fixes SH-024!)
+  const affectedSetIds = React.useMemo(() => {
+    if (selectedSetId !== "all") return [selectedSetId];
+    return Array.from(
+      new Set(filtered.map((item) => item.study_set_id).filter(Boolean)),
+    );
+  }, [filtered, selectedSetId]);
+
+  const practiceStarredHref = React.useMemo(() => {
+    const qs = new URLSearchParams({ mode: "starred" });
+    if (selectedSetId !== "all") qs.set("setId", selectedSetId);
+    else if (affectedSetIds.length > 0) qs.set("setIds", affectedSetIds.join(","));
+    if (selectedChapter !== "all") qs.set("chapter", selectedChapter);
+    return `/practice?${qs.toString()}`;
+  }, [affectedSetIds, selectedChapter, selectedSetId]);
+
+  const testStarredHref = React.useMemo(() => {
+    const qs = new URLSearchParams({ mode: "starred" });
+    if (selectedSetId !== "all") qs.set("setId", selectedSetId);
+    else if (affectedSetIds.length > 0) qs.set("setIds", affectedSetIds.join(","));
+    return `/exams/new?${qs.toString()}`;
+  }, [affectedSetIds, selectedSetId]);
+
+  const formatMastery = (level: string): string => {
+    switch (level) {
+      case "new":
+        return t("study.masteryNew");
+      case "learning":
+        return t("study.masteryLearning");
+      case "familiar":
+        return t("study.masteryFamiliar");
+      case "mastered":
+        return t("study.masteryMastered");
+      default:
+        return level;
+    }
+  };
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
+    <div className="mx-auto w-full max-w-6xl space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -131,16 +164,24 @@ export function StarredQuestionsClient() {
           </p>
         </div>
 
-        {launchSetId && filtered.length > 0 ? (
+        {affectedSetIds.length > 0 && filtered.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
             <Button asChild className="min-h-10">
-              <Link href={`/sets/${launchSetId}/practice?filter=starred`}>
+              <Link href={practiceStarredHref}>
                 <Play className="size-4" aria-hidden="true" />
-                {lText(locale, "Luyện câu đánh dấu", "Practice Starred")}
+                {lText(
+                  locale,
+                  affectedSetIds.length > 1
+                    ? `Luyện câu gắn sao (${affectedSetIds.length} môn)`
+                    : "Luyện câu đánh dấu",
+                  affectedSetIds.length > 1
+                    ? `Practice Starred (${affectedSetIds.length} sets)`
+                    : "Practice Starred",
+                )}
               </Link>
             </Button>
             <Button variant="outline" asChild className="min-h-10">
-              <Link href={`/sets/${launchSetId}/test?onlyStarred=true`}>
+              <Link href={testStarredHref}>
                 <ClipboardList className="size-4" aria-hidden="true" />
                 {lText(locale, "Thi thử câu đánh dấu", "Test Starred")}
               </Link>
@@ -305,7 +346,7 @@ export function StarredQuestionsClient() {
                       ) : null}
                       {item.progress?.mastery_level ? (
                         <Badge variant="outline">
-                          {item.progress.mastery_level}
+                          {formatMastery(item.progress.mastery_level)}
                         </Badge>
                       ) : null}
                     </div>

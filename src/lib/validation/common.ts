@@ -71,12 +71,43 @@ export const sessionStatusSchema = z.enum([
   "completed",
   "abandoned",
 ]);
-export const examStatusSchema = z.enum(["in_progress", "submitted", "expired"]);
+export const examStatusSchema = z.enum([
+  "in_progress",
+  "submitted",
+  "expired",
+  "discarded",
+]);
 export const friendshipStatusSchema = z.enum([
   "pending",
   "accepted",
   "declined",
   "blocked",
+]);
+
+export const allocationStrategySchema = z.enum([
+  "global_random",
+  "equal",
+  "proportional",
+  "custom",
+  "weighted",
+]);
+
+export const selectionPolicySchema = z.enum([
+  "random",
+  "unseen_first",
+  "mistakes_first",
+  "weak_topics_first",
+  "due_for_review",
+  "starred_only",
+  "incorrect_only",
+  "anti_repeat",
+]);
+
+export const examSourceTypeSchema = z.enum(["study_set", "folder"]);
+export const coverageCycleStatusSchema = z.enum([
+  "active",
+  "completed",
+  "archived",
 ]);
 
 export const paginationQuerySchema = z.object({

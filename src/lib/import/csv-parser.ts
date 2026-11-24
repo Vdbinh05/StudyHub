@@ -6,6 +6,7 @@ import type {
   ParsedQuestion,
 } from "@/types/import";
 import {
+  deduplicateHeaders,
   mapTabularRowsToQuestions,
   suggestColumnMapping,
 } from "./tabular-mapper";
@@ -84,9 +85,8 @@ export function parseCsvText(
   let headers: string[];
   let dataRows: string[][];
   if (hasHeaderRow) {
-    headers = Array.from(
-      { length: maxCols },
-      (_, idx) => rawMatrix[0][idx] || `Column ${idx + 1}`,
+    headers = deduplicateHeaders(
+      Array.from({ length: maxCols }, (_, idx) => rawMatrix[0][idx] ?? ""),
     );
     dataRows = rawMatrix.slice(1);
   } else {

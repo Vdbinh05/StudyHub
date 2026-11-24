@@ -7,6 +7,11 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import {
+  fetchInChunks,
+  fetchQuestionRelationsChunked,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
+import {
   listStarredQuerySchema,
   toggleStarSchema,
 } from "@/lib/validation/learning";
@@ -48,32 +53,35 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const qIds = starRows.map((s) => s.question_id);
     const setIds = Array.from(new Set(starRows.map((s) => s.study_set_id)));
 
-    const [
-      { data: questions, error: qErr },
-      { data: options, error: optErr },
-      { data: sets, error: setErr },
-    ] = await Promise.all([
-      supabase.from("questions").select("*").in("id", qIds),
-      supabase
-        .from("question_options")
-        .select("*")
-        .in("question_id", qIds)
-        .order("position", { ascending: true }),
-      supabase.from("study_sets").select("id, title, subject").in("id", setIds),
+    // SH-005 & BUG-038: Chunk all lookups and include accepted_answers + progress + tags!
+    const [questions, relations, sets, progressRows] = await Promise.all([
+      fetchInChunks(
+        qIds,
+        async (chunk) => supabase.from("questions").select("*").in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      ),
+      fetchQuestionRelationsChunked(supabase, qIds),
+      fetchInChunks(
+        setIds,
+        async (chunk) =>
+          supabase.from("study_sets").select("id, title, subject").in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      ),
+      fetchInChunks(
+        qIds,
+        async (chunk) =>
+          supabase
+            .from("user_question_progress")
+            .select("*")
+            .eq("user_id", user.id)
+            .in("question_id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      ),
     ]);
 
-    if (qErr) throw qErr;
-    if (optErr) throw optErr;
-    if (setErr) throw setErr;
-
-    const qMap = new Map((questions ?? []).map((q) => [q.id, q]));
-    const setMap = new Map((sets ?? []).map((s) => [s.id, s]));
-    const optMap = new Map<string, typeof options>();
-    for (const o of options ?? []) {
-      const list = optMap.get(o.question_id) ?? [];
-      list.push(o);
-      optMap.set(o.question_id, list);
-    }
+    const qMap = new Map(questions.map((q) => [q.id, q]));
+    const setMap = new Map(sets.map((s) => [s.id, s]));
+    const progMap = new Map(progressRows.map((p) => [p.question_id, p]));
 
     const items = starRows
       .map((star) => {
@@ -82,9 +90,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         return {
           starred_at: star.created_at,
           study_set: setMap.get(star.study_set_id) ?? null,
+          progress: progMap.get(q.id) ?? null,
           question: {
             ...q,
-            options: optMap.get(q.id) ?? [],
+            options: relations.optionsByQ.get(q.id) ?? [],
+            accepted_answers: relations.answersByQ.get(q.id) ?? [],
+            tags: relations.tagsByQ.get(q.id) ?? [],
             is_starred: true,
           },
         };
@@ -109,20 +120,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const body = await parseJsonBody(request);
     const input = toggleStarSchema.parse(body);
 
-    let studySetId = input.study_set_id;
-    if (!studySetId) {
-      const { data: q, error: qErr } = await supabase
-        .from("questions")
-        .select("study_set_id")
-        .eq("id", input.question_id)
-        .maybeSingle();
-      if (qErr) throw qErr;
-      if (!q) {
-        throw new AppError("NOT_FOUND", "Question not found.", 404);
-      }
-      studySetId = q.study_set_id;
+    // SH-012 / SEC-003: Always resolve `questions.study_set_id` from DB (never trust caller alone!)
+    const { data: q, error: qErr } = await supabase
+      .from("questions")
+      .select("id, study_set_id")
+      .eq("id", input.question_id)
+      .maybeSingle();
+
+    if (qErr) throw qErr;
+    if (!q) {
+      throw new AppError("NOT_FOUND", "Question not found.", 404);
     }
 
+    if (input.study_set_id && input.study_set_id !== q.study_set_id) {
+      throw new AppError(
+        "INVALID_REFERENCE",
+        "Question does not belong to the specified study set.",
+        400,
+      );
+    }
+
+    const studySetId = q.study_set_id;
     await requireStudySetAccess(supabase, studySetId, user.id, "read");
 
     const { data: existing, error: exErr } = await supabase

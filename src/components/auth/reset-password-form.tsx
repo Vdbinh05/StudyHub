@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -12,7 +13,6 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,7 +32,10 @@ export function ResetPasswordForm() {
   const [done, setDone] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
 
+  const passwordRef = React.useRef<HTMLInputElement>(null);
+
   const configured = isSupabaseConfigured();
+  const controlsDisabled = !configured || loading;
   const passwordInvalid = (touched || submitted) && password.length < 8;
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -40,13 +43,14 @@ export function ResetPasswordForm() {
     setSubmitted(true);
     setFormError(null);
 
-    if (password.length < 8) return;
+    if (password.length < 8) {
+      passwordRef.current?.focus();
+      return;
+    }
 
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi ? "Supabase chưa được cấu hình." : "Supabase is not configured.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
 
@@ -54,7 +58,7 @@ export function ResetPasswordForm() {
     try {
       const { error } = await supabase.auth.updateUser({ password });
       if (error) {
-        setFormError(error.message);
+        setFormError(getFriendlyErrorMessage(error, locale));
         return;
       }
       setDone(true);
@@ -63,8 +67,8 @@ export function ResetPasswordForm() {
       );
       router.push("/dashboard");
       router.refresh();
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
     } finally {
       setLoading(false);
     }
@@ -77,9 +81,9 @@ export function ResetPasswordForm() {
           <div className="bg-success-subtle text-success-subtle-foreground mb-2 flex size-10 items-center justify-center rounded-lg">
             <CheckCircle2 className="size-5" aria-hidden="true" />
           </div>
-          <CardTitle className="text-xl">
+          <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
             {vi ? "Mật khẩu đã được cập nhật" : "Password updated"}
-          </CardTitle>
+          </h1>
           <CardDescription>
             {vi
               ? "Bạn có thể tiếp tục sử dụng StudyHub với mật khẩu mới."
@@ -98,9 +102,9 @@ export function ResetPasswordForm() {
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <CardTitle className="text-xl">
+        <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
           {vi ? "Đặt mật khẩu mới" : "Set a new password"}
-        </CardTitle>
+        </h1>
         <CardDescription>
           {vi
             ? "Chọn mật khẩu mới an toàn cho tài khoản StudyHub của bạn."
@@ -117,7 +121,7 @@ export function ResetPasswordForm() {
             <span>{formError}</span>
           </div>
         )}
-        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <form method="post" onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="reset-new-password">
               {vi ? "Mật khẩu mới" : "New password"}
@@ -127,6 +131,7 @@ export function ResetPasswordForm() {
             </p>
             <div className="relative">
               <Input
+                ref={passwordRef}
                 id="reset-new-password"
                 name="new-password"
                 type={showPassword ? "text" : "password"}
@@ -143,11 +148,12 @@ export function ResetPasswordForm() {
                     ? "reset-password-rules reset-password-error"
                     : "reset-password-rules"
                 }
-                disabled={!configured || loading}
-                className="pr-10"
+                disabled={controlsDisabled}
+                className="pr-12"
               />
               <button
                 type="button"
+                disabled={controlsDisabled}
                 onClick={() => setShowPassword((prev) => !prev)}
                 aria-pressed={showPassword}
                 aria-label={
@@ -159,7 +165,7 @@ export function ResetPasswordForm() {
                       ? "Hiện mật khẩu"
                       : "Show password"
                 }
-                className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2.5 -translate-y-1/2 rounded-md p-1 transition-colors"
+                className="text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50 absolute top-1/2 right-0.5 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md transition-colors sm:h-9 sm:w-9"
               >
                 {showPassword ? (
                   <EyeOff className="size-4" aria-hidden="true" />
@@ -171,6 +177,7 @@ export function ResetPasswordForm() {
             {passwordInvalid && (
               <p
                 id="reset-password-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -182,7 +189,11 @@ export function ResetPasswordForm() {
               </p>
             )}
           </div>
-          <Button type="submit" className="h-10 w-full" disabled={!configured || loading}>
+          <Button
+            type="submit"
+            className="min-h-11 w-full sm:min-h-10"
+            disabled={controlsDisabled}
+          >
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
             <span>{vi ? "Cập nhật mật khẩu" : "Update password"}</span>
           </Button>

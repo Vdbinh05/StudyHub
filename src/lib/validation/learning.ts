@@ -7,12 +7,22 @@ import {
   uuidSchema,
 } from "./common";
 
-export const createSessionSchema = z.object({
-  study_set_id: uuidSchema,
-  mode: studyModeSchema,
-  config: z.record(z.string(), z.unknown()).default({}),
-  total_items: z.number().int().min(0).max(50_000).default(0),
-});
+export const createSessionSchema = z
+  .object({
+    study_set_id: uuidSchema.nullable().optional(),
+    source_study_set_ids: z.array(uuidSchema).max(50).optional(),
+    mode: studyModeSchema,
+    config: z.record(z.string(), z.unknown()).default({}),
+    total_items: z.number().int().min(0).max(50_000).default(0),
+  })
+  .refine(
+    (v) =>
+      Boolean(v.study_set_id) ||
+      Boolean(v.source_study_set_ids && v.source_study_set_ids.length > 0),
+    {
+      message: "Provide study_set_id or at least one source_study_set_id.",
+    },
+  );
 
 export const updateSessionSchema = z.object({
   status: sessionStatusSchema.optional(),
@@ -33,7 +43,7 @@ export const recordSessionAnswerSchema = z.object({
 });
 
 export const upsertProgressSchema = z.object({
-  study_set_id: uuidSchema,
+  study_set_id: uuidSchema.optional(),
   question_id: uuidSchema,
   is_correct: z.boolean(),
   self_rating: selfRatingSchema.nullable().optional(),
@@ -63,7 +73,7 @@ export const listMistakesQuerySchema = z.object({
   includeResolved: z
     .union([z.literal("true"), z.literal("false")])
     .transform((v) => v === "true")
-    .default("false"),
+    .default(false),
   days: z.coerce.number().int().min(1).max(3650).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(50),
@@ -74,10 +84,11 @@ export const toggleStarSchema = z.object({
   study_set_id: uuidSchema.optional(),
 });
 
+// SH-009: Allow up to 500 per page cleanly while chunking DB relation fetches internally
 export const listStarredQuerySchema = z.object({
   studySetId: uuidSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(200).default(100),
+  pageSize: z.coerce.number().int().min(1).max(500).default(100),
 });
 
 export type CreateSessionInput = z.infer<typeof createSessionSchema>;

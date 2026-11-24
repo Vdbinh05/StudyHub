@@ -19,6 +19,11 @@ export interface FocusModeShellProps {
   headerRight?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  /**
+   * Set to `true` (default) on dedicated focus routes where AppShell omits `<main>`.
+   * Set to `false` if embedded inside a standard AppShell route to avoid nested `<main id="main-content">` (SH-027).
+   */
+  asMain?: boolean;
   onBeforeBack?: (event: React.MouseEvent<HTMLAnchorElement>) => void;
 }
 
@@ -32,6 +37,7 @@ export function FocusModeShell({
   headerRight,
   children,
   className,
+  asMain = true,
   onBeforeBack,
 }: FocusModeShellProps) {
   const { locale } = useI18n();
@@ -43,21 +49,26 @@ export function FocusModeShell({
     ? Math.min(100, Math.round((progressCurrent / progressTotal) * 100))
     : 0;
 
+  const BodyTag = asMain ? "main" : "div";
+
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col">
+    <div className="min-h-dvh bg-background text-foreground flex flex-col">
       <header className="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur-xs">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-4">
-          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 sm:gap-3 px-3 sm:px-4">
+          <div className="flex min-w-0 items-center gap-1.5 sm:gap-3">
             <Button
               variant="ghost"
               size="sm"
-              className="min-h-10 min-w-10 px-2 sm:px-3"
+              className="min-h-11 min-w-11 sm:min-h-10 sm:min-w-10 px-2 sm:px-3"
               asChild
             >
               <Link
                 href={backHref}
                 onClick={onBeforeBack}
-                aria-label={backLabel ?? lText(locale, "Quay lại học phần", "Back to study set")}
+                aria-label={
+                  backLabel ??
+                  lText(locale, "Quay lại học phần", "Back to study set")
+                }
               >
                 <ArrowLeft className="size-4" aria-hidden="true" />
                 <span className="hidden sm:inline">
@@ -70,14 +81,14 @@ export function FocusModeShell({
                 {title}
               </h1>
               {subtitle ? (
-                <p className="truncate text-xs text-muted-foreground">
+                <p className="hidden truncate text-xs text-muted-foreground sm:block">
                   {subtitle}
                 </p>
               ) : null}
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             {hasProgress ? (
               <span
                 className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground tabular-nums"
@@ -97,21 +108,21 @@ export function FocusModeShell({
         {hasProgress ? (
           <Progress
             value={percent}
-            className="h-1 rounded-none bg-secondary"
+            className="h-0.5 rounded-none bg-secondary"
             aria-label={lText(locale, "Thanh tiến độ phiên học", "Session progress")}
           />
         ) : null}
       </header>
 
-      <main
-        id="main-content"
+      <BodyTag
+        {...(asMain ? { id: "main-content" } : {})}
         className={cn(
-          "mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-6",
+          "mx-auto flex w-full max-w-6xl flex-1 flex-col px-3 sm:px-4 py-5 sm:py-6",
           className,
         )}
       >
         {children}
-      </main>
+      </BodyTag>
     </div>
   );
 }

@@ -23,6 +23,7 @@ export interface StudySetAccessResult {
   canRead: boolean;
   canEdit: boolean;
   isOwner: boolean;
+  canClone: boolean;
 }
 
 /**
@@ -79,7 +80,8 @@ export async function getOptionalAuth(): Promise<OptionalAuthContext> {
 
 /**
  * Defense-in-depth authorization check for a study set.
- * Verifies ownership, explicit `study_set_members` role, or public/unlisted visibility.
+ * Verifies ownership (`study_sets.owner_id` exclusively), explicit `study_set_members` role,
+ * or strictly `public` visibility (never blanket-exposing `'unlisted'`).
  * Avoids existence leaks by throwing 404 when the caller has no read access.
  */
 export async function requireStudySetAccess(
@@ -111,12 +113,13 @@ export async function requireStudySetAccess(
       canRead: true,
       canEdit: true,
       isOwner: true,
+      canClone: true,
     };
   }
 
   const { data: memberRow, error: memberError } = await supabase
     .from("study_set_members")
-    .select("role")
+    .select("role, allow_clone")
     .eq("study_set_id", studySetId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -126,18 +129,21 @@ export async function requireStudySetAccess(
   }
 
   const memberRole: MemberRole | null = memberRow?.role ?? null;
-  const isPublicReadable =
-    studySet.visibility === "public" || studySet.visibility === "unlisted";
+  // SH-015 / SEC-007: Only 'public' sets are globally readable without membership
+  const isPublicReadable = studySet.visibility === "public";
 
   const canRead = memberRole !== null || isPublicReadable;
   const canEdit = memberRole === "editor" || memberRole === "owner";
-  const isOwner = memberRole === "owner";
+  // SH-001 / SEC-001: Only true `study_sets.owner_id === userId` (handled above) is owner
+  const isOwner = false;
+  // SH-020 / SEC-012: Enforce share-link `allow_clone` on non-public member access
+  const canClone = isPublicReadable || Boolean(memberRow?.allow_clone);
 
   if (!canRead) {
     throw new AppError("NOT_FOUND", "Study set not found.", 404);
   }
 
-  if (required === "owner" && !isOwner) {
+  if (required === "owner") {
     throw new AppError(
       "FORBIDDEN",
       "Only the study set owner can perform this action.",
@@ -159,6 +165,7 @@ export async function requireStudySetAccess(
     canRead,
     canEdit,
     isOwner,
+    canClone,
   };
 }
 

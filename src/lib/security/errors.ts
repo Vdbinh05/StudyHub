@@ -17,6 +17,8 @@ export type ApiErrorCode =
   | "RATE_LIMITED"
   | "SUPABASE_NOT_CONFIGURED"
   | "EXAM_EXPIRED"
+  | "ACTIVE_ATTEMPT_EXISTS"
+  | "CYCLE_ALREADY_COMPLETED"
   | "INVALID_REFERENCE"
   | "INTERNAL_ERROR";
 
@@ -141,6 +143,7 @@ export function handleApiError(err: unknown): NextResponse<ApiErrorEnvelope> {
           400,
         );
       case "22P02":
+      case "22023":
         return apiError(
           "BAD_REQUEST",
           "Invalid identifier or parameter format.",
@@ -158,8 +161,37 @@ export function handleApiError(err: unknown): NextResponse<ApiErrorEnvelope> {
           "You do not have permission to perform this action.",
           403,
         );
+      case "P0002":
       case "PGRST116":
         return apiError("NOT_FOUND", "Requested resource was not found.", 404);
+      case "P0003":
+        return apiError(
+          "EXAM_EXPIRED",
+          "Exam time limit has expired. Submit the exam to view your results.",
+          409,
+        );
+      case "P0004":
+      case "P0007":
+        return apiError(
+          "CONFLICT",
+          "This operation cannot be completed in the current state.",
+          409,
+        );
+      case "P0005": {
+        const match = err.message?.match(/ACTIVE_ATTEMPT_EXISTS:([0-9a-f-]{36})/i);
+        return apiError(
+          "ACTIVE_ATTEMPT_EXISTS",
+          "An exam is already in progress for this coverage cycle. Resume or discard it before starting the next exam.",
+          409,
+          match ? { active_attempt_id: match[1] } : undefined,
+        );
+      }
+      case "P0006":
+        return apiError(
+          "CYCLE_ALREADY_COMPLETED",
+          "All questions in this coverage cycle have already been completed.",
+          409,
+        );
       default:
         return apiError(
           "INTERNAL_ERROR",
@@ -180,13 +212,110 @@ export function handleApiError(err: unknown): NextResponse<ApiErrorEnvelope> {
   );
 }
 
-/**
- * Safely parses JSON request body, throwing AppError(400) if malformed.
- */
-export async function parseJsonBody(request: Request): Promise<unknown> {
+const DEFAULT_MAX_JSON_BYTES = 1_048_576; // 1 MB default cap (SEC-021 / SH-043)
+
+async function readCappedBodyText(
+  request: Request,
+  maxBytes: number,
+): Promise<string> {
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const declared = Number(contentLengthHeader);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new AppError(
+        "PAYLOAD_TOO_LARGE",
+        `Request payload exceeds maximum allowed size (${Math.round(maxBytes / 1024)} KB).`,
+        413,
+      );
+    }
+  }
+
   try {
-    return await request.json();
+    if (request.body) {
+      const reader = request.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > maxBytes) {
+            await reader.cancel().catch(() => {});
+            throw new AppError(
+              "PAYLOAD_TOO_LARGE",
+              `Request payload exceeds maximum allowed size (${Math.round(maxBytes / 1024)} KB).`,
+              413,
+            );
+          }
+          chunks.push(value);
+        }
+      }
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder("utf-8").decode(merged);
+    }
+
+    const rawText = await request.text();
+    if (Buffer.byteLength(rawText, "utf8") > maxBytes) {
+      throw new AppError(
+        "PAYLOAD_TOO_LARGE",
+        `Request payload exceeds maximum allowed size (${Math.round(maxBytes / 1024)} KB).`,
+        413,
+      );
+    }
+    return rawText;
+  } catch (err) {
+    if (err instanceof AppError) {
+      throw err;
+    }
+    throw new AppError("BAD_REQUEST", "Invalid or unreadable JSON body.", 400);
+  }
+}
+
+/**
+ * Safely parses JSON request body with a pre-parse byte cap,
+ * throwing AppError(413) if oversized or AppError(400) if missing/malformed.
+ */
+export async function parseJsonBody(
+  request: Request,
+  maxBytes: number = DEFAULT_MAX_JSON_BYTES,
+): Promise<unknown> {
+  const rawText = await readCappedBodyText(request, maxBytes);
+
+  if (!rawText || rawText.trim().length === 0) {
+    throw new AppError("BAD_REQUEST", "Invalid or missing JSON body.", 400);
+  }
+
+  try {
+    return JSON.parse(rawText) as unknown;
   } catch {
     throw new AppError("BAD_REQUEST", "Invalid or missing JSON body.", 400);
+  }
+}
+
+/**
+ * Safely parses an optional JSON request body (supports HTTP/2 & chunked transfer encoding
+ * without `Content-Length`). Returns `undefined` when the request body is empty,
+ * throws AppError(413) if oversized, or AppError(400) if non-empty JSON is malformed.
+ */
+export async function parseOptionalJsonBody(
+  request: Request,
+  maxBytes: number = DEFAULT_MAX_JSON_BYTES,
+): Promise<unknown | undefined> {
+  const rawText = await readCappedBodyText(request, maxBytes);
+
+  if (!rawText || rawText.trim().length === 0) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(rawText) as unknown;
+  } catch {
+    throw new AppError("BAD_REQUEST", "Invalid JSON body.", 400);
   }
 }

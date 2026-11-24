@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -12,13 +13,18 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useI18n } from "@/lib/i18n";
 import { isSupabaseConfigured, tryCreateClient } from "@/lib/supabase/client";
+
+const GOOGLE_OAUTH_ENABLED =
+  process.env.NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH === "true";
+
+// Aligned strictly with `profiles` DB CHECK constraint and `usernameSchema`
+const USERNAME_PATTERN = /^[a-z0-9_]{3,30}$/i;
 
 export function RegisterForm() {
   const { locale, t } = useI18n();
@@ -49,13 +55,14 @@ export function RegisterForm() {
   const passwordRef = React.useRef<HTMLInputElement>(null);
 
   const configured = isSupabaseConfigured();
+  const controlsDisabled = !configured || loading;
 
   const displayNameInvalid = (touched.displayName || submitted) && displayName.trim().length < 2;
   const trimmedUsername = username.trim();
   const usernameInvalid =
     (touched.username || submitted) &&
     trimmedUsername.length > 0 &&
-    !/^[a-z0-9_]{3,30}$/i.test(trimmedUsername);
+    !USERNAME_PATTERN.test(trimmedUsername);
   const emailInvalid =
     (touched.email || submitted) &&
     (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()));
@@ -70,7 +77,7 @@ export function RegisterForm() {
       displayNameRef.current?.focus();
       return;
     }
-    if (trimmedUsername.length > 0 && !/^[a-z0-9_]{3,30}$/i.test(trimmedUsername)) {
+    if (trimmedUsername.length > 0 && !USERNAME_PATTERN.test(trimmedUsername)) {
       usernameRef.current?.focus();
       return;
     }
@@ -85,11 +92,7 @@ export function RegisterForm() {
 
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi
-          ? "Supabase chưa được cấu hình. Không thể tạo tài khoản."
-          : "Supabase is not configured. Unable to create account.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
 
@@ -109,7 +112,7 @@ export function RegisterForm() {
       });
 
       if (error) {
-        setFormError(error.message);
+        setFormError(getFriendlyErrorMessage(error, locale));
         return;
       }
 
@@ -122,8 +125,8 @@ export function RegisterForm() {
       } else {
         setVerificationSent(true);
       }
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
     } finally {
       setLoading(false);
     }
@@ -133,11 +136,7 @@ export function RegisterForm() {
     setFormError(null);
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi
-          ? "Supabase chưa được cấu hình."
-          : "Supabase is not configured.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
     setOauthLoading(true);
@@ -150,11 +149,11 @@ export function RegisterForm() {
         },
       });
       if (error) {
-        setFormError(error.message);
+        setFormError(getFriendlyErrorMessage(error, locale));
         setOauthLoading(false);
       }
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
       setOauthLoading(false);
     }
   };
@@ -166,9 +165,9 @@ export function RegisterForm() {
           <div className="bg-success-subtle text-success-subtle-foreground mb-2 flex size-10 items-center justify-center rounded-lg">
             <CheckCircle2 className="size-5" aria-hidden="true" />
           </div>
-          <CardTitle className="text-xl">
+          <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
             {vi ? "Kiểm tra email để xác nhận" : "Check your email to confirm"}
-          </CardTitle>
+          </h1>
           <CardDescription>
             {vi
               ? `Chúng tôi đã gửi liên kết xác nhận đến ${email.trim()}. Vui lòng mở email để hoàn tất đăng ký.`
@@ -187,7 +186,9 @@ export function RegisterForm() {
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <CardTitle className="text-xl">{t("auth.signupTitle")}</CardTitle>
+        <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
+          {t("auth.signupTitle")}
+        </h1>
         <CardDescription>{t("auth.signupSubtitle")}</CardDescription>
       </CardHeader>
 
@@ -202,7 +203,7 @@ export function RegisterForm() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <form method="post" onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="register-name">{t("auth.displayName")}</Label>
             <Input
@@ -219,11 +220,12 @@ export function RegisterForm() {
               onBlur={() => setTouched((prev) => ({ ...prev, displayName: true }))}
               aria-invalid={displayNameInvalid ? "true" : "false"}
               aria-describedby={displayNameInvalid ? "register-name-error" : undefined}
-              disabled={!configured || loading}
+              disabled={controlsDisabled}
             />
             {displayNameInvalid && (
               <p
                 id="register-name-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -245,8 +247,8 @@ export function RegisterForm() {
             </Label>
             <p id="register-username-hint" className="text-muted-foreground text-xs">
               {vi
-                ? "3–30 ký tự gồm chữ, số, dấu chấm, gạch ngang hoặc gạch dưới."
-                : "3–30 letters, numbers, dots, hyphens, or underscores."}
+                ? "3–30 ký tự gồm chữ thường không dấu, số và dấu gạch dưới (_)."
+                : "3–30 lowercase letters, numbers, or underscores (_)."}
             </p>
             <Input
               ref={usernameRef}
@@ -268,18 +270,19 @@ export function RegisterForm() {
                   ? "register-username-hint register-username-error"
                   : "register-username-hint"
               }
-              disabled={!configured || loading}
+              disabled={controlsDisabled}
             />
             {usernameInvalid && (
               <p
                 id="register-username-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
                 <span>
                   {vi
-                    ? "Username chỉ gồm chữ không dấu, số, ., _, - (3–30 ký tự)."
-                    : "Use 3–30 letters, numbers, '.', '_', or '-'."}
+                    ? "Username chỉ gồm chữ không dấu, số và dấu gạch dưới _ (3–30 ký tự)."
+                    : "Use 3–30 letters, numbers, or underscores (_)."}
                 </span>
               </p>
             )}
@@ -292,7 +295,9 @@ export function RegisterForm() {
               id="register-email"
               name="email"
               type="email"
+              inputMode="email"
               autoComplete="username"
+              autoCapitalize="none"
               spellCheck={false}
               enterKeyHint="next"
               required
@@ -302,11 +307,12 @@ export function RegisterForm() {
               onBlur={() => setTouched((prev) => ({ ...prev, email: true }))}
               aria-invalid={emailInvalid ? "true" : "false"}
               aria-describedby={emailInvalid ? "register-email-error" : undefined}
-              disabled={!configured || loading}
+              disabled={controlsDisabled}
             />
             {emailInvalid && (
               <p
                 id="register-email-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -321,7 +327,6 @@ export function RegisterForm() {
 
           <div className="space-y-1.5">
             <Label htmlFor="register-password">{t("auth.password")}</Label>
-            {/* Place password guidance above the input so mobile keyboards do not obscure it */}
             <p id="register-password-rules" className="text-muted-foreground text-xs">
               {vi
                 ? "Tối thiểu 8 ký tự. Khuyến nghị dùng trình quản lý mật khẩu."
@@ -346,11 +351,12 @@ export function RegisterForm() {
                     ? "register-password-rules register-password-error"
                     : "register-password-rules"
                 }
-                disabled={!configured || loading}
-                className="pr-10"
+                disabled={controlsDisabled}
+                className="pr-12"
               />
               <button
                 type="button"
+                disabled={controlsDisabled}
                 onClick={() => setShowPassword((prev) => !prev)}
                 aria-pressed={showPassword}
                 aria-label={
@@ -362,7 +368,7 @@ export function RegisterForm() {
                       ? "Hiện mật khẩu"
                       : "Show password"
                 }
-                className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2.5 -translate-y-1/2 rounded-md p-1 transition-colors"
+                className="text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50 absolute top-1/2 right-0.5 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md transition-colors sm:h-9 sm:w-9"
               >
                 {showPassword ? (
                   <EyeOff className="size-4" aria-hidden="true" />
@@ -374,6 +380,7 @@ export function RegisterForm() {
             {passwordInvalid && (
               <p
                 id="register-password-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -388,7 +395,7 @@ export function RegisterForm() {
 
           <Button
             type="submit"
-            className="h-10 w-full"
+            className="min-h-11 w-full sm:min-h-10"
             disabled={!configured || loading || oauthLoading}
           >
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
@@ -396,32 +403,36 @@ export function RegisterForm() {
           </Button>
         </form>
 
-        <div className="relative flex items-center justify-center py-1">
-          <Separator />
-          <span className="bg-card text-muted-foreground absolute px-2.5 text-xs">
-            {vi ? "hoặc" : "or"}
-          </span>
-        </div>
+        {GOOGLE_OAUTH_ENABLED && (
+          <>
+            <div className="relative flex items-center justify-center py-1">
+              <Separator />
+              <span className="bg-card text-muted-foreground absolute px-2.5 text-xs">
+                {vi ? "hoặc" : "or"}
+              </span>
+            </div>
 
-        <Button
-          type="button"
-          variant="outline"
-          className="h-10 w-full"
-          disabled={!configured || loading || oauthLoading}
-          onClick={() => void handleGoogleSignUp()}
-        >
-          {oauthLoading ? (
-            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <svg className="size-4" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M21.35 11.1H12v2.92h5.35c-.24 1.38-1.44 4.05-5.35 4.05-3.22 0-5.85-2.67-5.85-5.95s2.63-5.95 5.85-5.95c1.84 0 3.07.78 3.77 1.46l2.57-2.48C16.7 3.63 14.56 2.7 12 2.7 6.86 2.7 2.7 6.86 2.7 12s4.16 9.3 9.3 9.3c5.37 0 8.93-3.77 8.93-9.08 0-.61-.07-1.08-.15-1.12z"
-              />
-            </svg>
-          )}
-          <span>{t("auth.continueWithGoogle")}</span>
-        </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11 w-full sm:min-h-10"
+              disabled={!configured || loading || oauthLoading}
+              onClick={() => void handleGoogleSignUp()}
+            >
+              {oauthLoading ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <svg className="size-4" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M21.35 11.1H12v2.92h5.35c-.24 1.38-1.44 4.05-5.35 4.05-3.22 0-5.85-2.67-5.85-5.95s2.63-5.95 5.85-5.95c1.84 0 3.07.78 3.77 1.46l2.57-2.48C16.7 3.63 14.56 2.7 12 2.7 6.86 2.7 2.7 6.86 2.7 12s4.16 9.3 9.3 9.3c5.37 0 8.93-3.77 8.93-9.08 0-.61-.07-1.08-.15-1.12z"
+                  />
+                </svg>
+              )}
+              <span>{t("auth.continueWithGoogle")}</span>
+            </Button>
+          </>
+        )}
       </CardContent>
 
       <CardFooter className="justify-center border-t pt-4">

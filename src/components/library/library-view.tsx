@@ -21,11 +21,17 @@ import {
   Plus,
   Search,
   Share2,
+  Star,
   Trash2,
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, formatRelativeTime } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  formatRelativeTime,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -81,6 +87,7 @@ import type { Folder, StudySet, StudySetType } from "@/types/domain";
 import { FolderDialog, getFolderDotClass } from "./folder-dialog";
 
 type SortOption = "updated_desc" | "created_desc" | "title_asc" | "last_studied_desc";
+const PAGE_SIZE = 48;
 
 function LibraryViewInner() {
   const { locale, t } = useI18n();
@@ -88,6 +95,7 @@ function LibraryViewInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const urlSearch = searchParams.get("search") ?? "";
   const rawUrlType = searchParams.get("type");
@@ -100,6 +108,11 @@ function LibraryViewInner() {
   const urlAction = searchParams.get("action");
   const urlCreate = searchParams.get("create");
 
+  const [sortBy, setSortBy] = React.useState<SortOption>("updated_desc");
+  const [showArchived, setShowArchived] = React.useState(false);
+  const [favoritesOnly, setFavoritesOnly] = React.useState(false);
+  const [page, setPage] = React.useState(1);
+
   const [searchDraft, setSearchDraft] = React.useState<{
     baseUrl: string;
     value: string;
@@ -109,12 +122,16 @@ function LibraryViewInner() {
   const setSearchInput = (value: string) =>
     setSearchDraft({ baseUrl: urlSearch, value });
 
-  const [sortBy, setSortBy] = React.useState<SortOption>("updated_desc");
-  const [showArchived, setShowArchived] = React.useState(false);
+  const [debouncedSearch, setDebouncedSearch] = React.useState(urlSearch.trim());
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(searchInput.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
 
-  const [folderDialogOpen, setFolderDialogOpen] = React.useState(
-    urlCreate === "folder",
-  );
+  const [folderDialogOpen, setFolderDialogOpen] = React.useState(false);
   const [editingFolder, setEditingFolder] = React.useState<Folder | null>(null);
   const [deletingFolder, setDeletingFolder] = React.useState<Folder | null>(null);
 
@@ -123,26 +140,49 @@ function LibraryViewInner() {
   const [movingSet, setMovingSet] = React.useState<StudySet | null>(null);
   const [moveTargetFolderId, setMoveTargetFolderId] = React.useState<string>("none");
 
+  const effectiveFolderDialogOpen = folderDialogOpen || urlCreate === "folder";
+  const effectiveEditingFolder = urlCreate === "folder" ? null : editingFolder;
+
+  const handleFolderDialogChange = (open: boolean) => {
+    setFolderDialogOpen(open);
+    if (!open) {
+      setEditingFolder(null);
+      if (urlCreate === "folder") {
+        const next = new URLSearchParams(searchParams.toString());
+        next.delete("create");
+        router.replace(`/library${next.toString() ? `?${next}` : ""}`);
+      }
+    }
+  };
+
   const foldersQuery = useQuery<Folder[]>({
     queryKey: ["folders"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<Folder[]>("/api/folders");
       return Array.isArray(res.data) ? res.data : [];
     },
   });
 
-  const setsQuery = useQuery<StudySet[]>({
-    queryKey: ["study-sets", searchInput.trim(), typeFilter, sortBy, showArchived],
+  const setsQuery = useQuery<{ items: StudySet[]; total: number; hasMore: boolean }>({
+    queryKey: ["study-sets", debouncedSearch, typeFilter, sortBy, showArchived, page],
+    enabled: configured,
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("scope", "owned");
       params.set("sort", sortBy);
-      params.set("pageSize", "100");
-      if (searchInput.trim()) params.set("search", searchInput.trim());
+      params.set("page", String(page));
+      params.set("pageSize", String(PAGE_SIZE));
+      if (debouncedSearch) params.set("search", debouncedSearch);
       if (typeFilter !== "all") params.set("type", typeFilter);
       if (showArchived) params.set("includeArchived", "true");
       const res = await apiFetch<StudySet[]>(`/api/sets?${params.toString()}`);
-      return Array.isArray(res.data) ? res.data : [];
+      const items = Array.isArray(res.data) ? res.data : [];
+      return {
+        items,
+        total: Number(res.meta?.total ?? items.length),
+        hasMore: Boolean(res.meta?.hasMore),
+      };
     },
   });
 
@@ -157,7 +197,7 @@ function LibraryViewInner() {
       toast.success(vi ? "Đã xóa thư mục." : "Folder deleted.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -172,7 +212,7 @@ function LibraryViewInner() {
       toast.success(vi ? "Đã xóa học phần." : "Study set deleted.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -189,7 +229,7 @@ function LibraryViewInner() {
       toast.success(vi ? "Đã nhân bản học phần." : "Study set duplicated.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -206,7 +246,7 @@ function LibraryViewInner() {
       toast.success(vi ? "Đã di chuyển học phần." : "Study set moved.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -222,12 +262,77 @@ function LibraryViewInner() {
       toast.success(vi ? "Đã cập nhật trạng thái lưu trữ." : "Archive status updated.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
-  const folders = foldersQuery.data ?? [];
-  const sets = setsQuery.data ?? [];
+  const favoriteSetMutation = useMutation({
+    mutationFn: async ({ setId, favorite }: { setId: string; favorite: boolean }) => {
+      await apiFetch(`/api/sets/${setId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_favorite: favorite }),
+      });
+    },
+    onMutate: async ({ setId, favorite }) => {
+      const queryKey = [
+        "study-sets",
+        debouncedSearch,
+        typeFilter,
+        sortBy,
+        showArchived,
+        page,
+      ];
+      await queryClient.cancelQueries({ queryKey });
+      const prev = queryClient.getQueryData<{
+        items: StudySet[];
+        total: number;
+        hasMore: boolean;
+      }>(queryKey);
+      if (prev) {
+        queryClient.setQueryData(queryKey, {
+          ...prev,
+          items: prev.items.map((s) =>
+            s.id === setId ? { ...s, is_favorite: favorite } : s,
+          ),
+        });
+      }
+      return { prev, queryKey };
+    },
+    onError: (err, _, ctx) => {
+      if (ctx?.prev) {
+        queryClient.setQueryData(ctx.queryKey, ctx.prev);
+      }
+      toast.error(getFriendlyErrorMessage(err, locale));
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["study-sets"] });
+    },
+  });
+
+  const folders = React.useMemo(
+    () => foldersQuery.data ?? [],
+    [foldersQuery.data],
+  );
+  const rootFolders = React.useMemo(
+    () => folders.filter((f) => !f.parent_id),
+    [folders],
+  );
+  const rawSets = React.useMemo(
+    () => setsQuery.data?.items ?? [],
+    [setsQuery.data?.items],
+  );
+  const sets = React.useMemo(() => {
+    const filtered = favoritesOnly
+      ? rawSets.filter((s) => Boolean(s.is_favorite))
+      : rawSets;
+    return [...filtered].sort((a, b) => {
+      const favDiff = Number(Boolean(b.is_favorite)) - Number(Boolean(a.is_favorite));
+      return favDiff;
+    });
+  }, [rawSets, favoritesOnly]);
+
+  const totalSets = setsQuery.data?.total ?? sets.length;
+  const totalPages = Math.max(1, Math.ceil(totalSets / PAGE_SIZE));
 
   const getVisibilityLabel = (v: StudySet["visibility"]) => {
     switch (v) {
@@ -254,20 +359,24 @@ function LibraryViewInner() {
   };
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={
-          typeFilter === "multiple_choice"
+          urlAction === "import"
             ? vi
-              ? "Ngân hàng câu hỏi"
-              : "Question Bank"
-            : typeFilter === "flashcards"
-              ? "Flashcards"
-              : urlAction === "test"
+              ? "Chọn học phần để nhập từ file"
+              : "Choose Set to Import Into"
+            : urlAction === "test"
+              ? vi
+                ? "Chọn học phần thi thử"
+                : "Choose Set for Mock Exam"
+              : typeFilter === "multiple_choice"
                 ? vi
-                  ? "Chọn học phần thi thử"
-                  : "Mock Exams"
-                : t("library.title")
+                  ? "Ngân hàng câu hỏi"
+                  : "Question Bank"
+                : typeFilter === "flashcards"
+                  ? "Flashcards"
+                  : t("library.title")
         }
         description={t("library.subtitle")}
         actions={
@@ -293,7 +402,7 @@ function LibraryViewInner() {
         }
       />
 
-      {/* Contextual guidance when navigating from Import or Mock Exam shortcut */}
+      {/* Contextual guidance when navigating from ?action=import or ?action=test */}
       {(urlAction === "import" || urlAction === "test") && (
         <div className="border-primary/30 bg-accent text-accent-foreground flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm">
           <div className="flex items-center gap-2.5">
@@ -305,22 +414,28 @@ function LibraryViewInner() {
             <span>
               {urlAction === "import"
                 ? vi
-                  ? "Chọn một học phần bên dưới để nhập câu hỏi từ file, hoặc tạo học phần mới."
-                  : "Pick a study set below to bulk import questions into, or create a new set."
+                  ? "Chọn một học phần bên dưới để nhập câu hỏi từ Word/Excel/CSV/TXT, hoặc mở trang nhập nhanh."
+                  : "Pick a study set below to bulk import questions, or open the quick import hub."
                 : vi
-                  ? "Chọn học phần bạn muốn tạo đề thi thử bấm giờ."
-                  : "Pick any study set below to configure and launch a timed mock exam."}
+                  ? "Chọn một học phần bên dưới hoặc tạo đề thi tổng hợp nhiều môn ngay."
+                  : "Pick any study set below or launch the multi-subject Custom Exam Builder."}
             </span>
           </div>
           <Button size="sm" variant="outline" asChild>
-            <Link href="/sets/new">{t("library.newSet")}</Link>
+            <Link href={urlAction === "import" ? "/import" : "/exams/new"}>
+              {urlAction === "import"
+                ? vi
+                  ? "Mở trang nhập nhanh"
+                  : "Open Import Hub"
+                : t("library.customExamCta")}
+            </Link>
           </Button>
         </div>
       )}
 
-      {/* Search & Filter Controls */}
+      {/* Search & Filter Controls — single canonical search bar on /library */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative flex-1 sm:max-w-sm">
+        <search className="relative flex-1 sm:max-w-sm">
           <Search
             className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
             aria-hidden="true"
@@ -333,7 +448,7 @@ function LibraryViewInner() {
             aria-label={t("library.searchPlaceholder")}
             className="pl-9"
           />
-        </div>
+        </search>
 
         <div className="flex flex-wrap items-center gap-2">
           <Select
@@ -343,6 +458,7 @@ function LibraryViewInner() {
               const params = new URLSearchParams(searchParams.toString());
               if (next === "all") params.delete("type");
               else params.set("type", next);
+              setPage(1);
               router.replace(`/library${params.toString() ? `?${params}` : ""}`);
             }}
           >
@@ -357,7 +473,13 @@ function LibraryViewInner() {
             </SelectContent>
           </Select>
 
-          <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortOption)}>
+          <Select
+            value={sortBy}
+            onValueChange={(v) => {
+              setSortBy(v as SortOption);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-44" aria-label={t("common.sort")}>
               <SelectValue />
             </SelectTrigger>
@@ -378,9 +500,25 @@ function LibraryViewInner() {
           </Select>
 
           <Button
+            variant={favoritesOnly ? "secondary" : "outline"}
+            size="sm"
+            onClick={() => setFavoritesOnly((prev) => !prev)}
+            aria-pressed={favoritesOnly}
+          >
+            <Star
+              className={cn("size-4", favoritesOnly && "fill-warning text-warning")}
+              aria-hidden="true"
+            />
+            <span>{t("library.favorites")}</span>
+          </Button>
+
+          <Button
             variant={showArchived ? "secondary" : "outline"}
             size="sm"
-            onClick={() => setShowArchived((prev) => !prev)}
+            onClick={() => {
+              setShowArchived((prev) => !prev);
+              setPage(1);
+            }}
             aria-pressed={showArchived}
           >
             <Archive className="size-4" aria-hidden="true" />
@@ -390,88 +528,112 @@ function LibraryViewInner() {
       </div>
 
       {/* Folders Section */}
-      {folders.length > 0 && (
+      {rootFolders.length > 0 && (
         <section aria-labelledby="folders-heading" className="space-y-3">
-          <h2 id="folders-heading" className="text-foreground text-sm font-semibold">
-            {t("nav.folders")} ({folders.length})
-          </h2>
+          <div className="flex items-center justify-between gap-2">
+            <h2 id="folders-heading" className="text-foreground text-sm font-semibold">
+              {t("nav.folders")} ({rootFolders.length})
+            </h2>
+            <Link
+              href="/folders"
+              className="text-primary text-xs font-medium hover:underline"
+            >
+              {vi ? "Quản lý thư mục" : "Manage folders"}
+            </Link>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {folders
-              .filter((f) => !f.parent_id)
-              .map((folder) => (
-                <div
-                  key={folder.id}
-                  className="border-border bg-card hover:border-primary/40 flex items-center justify-between gap-2 rounded-xl border p-3.5 transition-colors"
+            {rootFolders.map((folder) => (
+              <div
+                key={folder.id}
+                className="border-border bg-card hover:border-primary/40 flex items-center justify-between gap-2 rounded-xl border p-3.5 transition-colors"
+              >
+                <Link
+                  href={`/folders/${folder.id}`}
+                  className="flex min-w-0 flex-1 items-center gap-3"
                 >
-                  <Link
-                    href={`/folders/${folder.id}`}
-                    className="flex min-w-0 flex-1 items-center gap-3"
+                  <span
+                    className={cn(
+                      "flex size-9 shrink-0 items-center justify-center rounded-lg text-white",
+                      getFolderDotClass(folder.color),
+                    )}
+                    aria-hidden="true"
                   >
-                    <span
-                      className={cn(
-                        "flex size-9 shrink-0 items-center justify-center rounded-lg text-white",
-                        getFolderDotClass(folder.color),
-                      )}
-                      aria-hidden="true"
-                    >
-                      <FolderIcon className="size-4" aria-hidden="true" />
-                    </span>
-                    <div className="min-w-0">
-                      <p className="text-foreground truncate text-sm font-semibold">
-                        {folder.name}
+                    <FolderIcon className="size-4" aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-foreground truncate text-sm font-semibold">
+                      {folder.name}
+                    </p>
+                    {folder.description && (
+                      <p className="text-muted-foreground truncate text-xs">
+                        {folder.description}
                       </p>
-                      {folder.description && (
-                        <p className="text-muted-foreground truncate text-xs">
-                          {folder.description}
-                        </p>
-                      )}
-                    </div>
-                  </Link>
+                    )}
+                  </div>
+                </Link>
 
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`${t("common.actions")} ${folder.name}`}
-                      >
-                        <MoreHorizontal className="size-4" aria-hidden="true" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() => {
-                          setEditingFolder(folder);
-                          setFolderDialogOpen(true);
-                        }}
-                      >
-                        <Edit3 className="size-4" aria-hidden="true" />
-                        <span>{t("common.edit")}</span>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => setDeletingFolder(folder)}
-                      >
-                        <Trash2 className="size-4" aria-hidden="true" />
-                        <span>{t("common.delete")}</span>
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              ))}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`${t("common.actions")} ${folder.name}`}
+                    >
+                      <MoreHorizontal className="size-4" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem asChild>
+                      <Link href={`/exams/new?folderId=${folder.id}`}>
+                        <FileCheck2 className="size-4" aria-hidden="true" />
+                        <span>{vi ? "Thi thử thư mục" : "Exam this folder"}</span>
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        setEditingFolder(folder);
+                        setFolderDialogOpen(true);
+                      }}
+                    >
+                      <Edit3 className="size-4" aria-hidden="true" />
+                      <span>{t("common.edit")}</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => setDeletingFolder(folder)}
+                    >
+                      <Trash2 className="size-4" aria-hidden="true" />
+                      <span>{t("common.delete")}</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            ))}
           </div>
         </section>
       )}
 
       {/* Study Sets Grid */}
       <section aria-labelledby="sets-heading" className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h2 id="sets-heading" className="text-foreground text-sm font-semibold">
-            {t("library.mySets")} ({sets.length})
+            {t("library.mySets")} ({favoritesOnly ? sets.length : totalSets})
           </h2>
+          <Button asChild size="sm" variant="outline">
+            <Link href="/exams/new">
+              <FileCheck2 className="size-4" aria-hidden="true" />
+              <span>{t("library.customExamCta")}</span>
+            </Link>
+          </Button>
         </div>
 
-        {setsQuery.isLoading ? (
+        {!configured ? (
+          <EmptyState
+            icon={BookOpen}
+            title={vi ? "Chưa thể tải thư viện học phần" : "Library unavailable"}
+            description={t("common.serviceUnavailableDesc")}
+          />
+        ) : setsQuery.isLoading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
               <Skeleton key={i} className="h-44 rounded-xl" />
@@ -481,11 +643,7 @@ function LibraryViewInner() {
           <EmptyState
             icon={AlertCircle}
             title={vi ? "Không thể tải thư viện" : "Unable to load library"}
-            description={
-              setsQuery.error instanceof Error
-                ? setsQuery.error.message
-                : t("common.errorGeneric")
-            }
+            description={getFriendlyErrorMessage(setsQuery.error, locale)}
             action={
               <Button onClick={() => void setsQuery.refetch()}>
                 {t("common.retry")}
@@ -495,200 +653,294 @@ function LibraryViewInner() {
         ) : sets.length === 0 ? (
           <EmptyState
             icon={BookOpen}
-            title={t("library.emptyTitle")}
-            description={t("library.emptyDescription")}
+            title={
+              favoritesOnly
+                ? vi
+                  ? "Chưa có học phần yêu thích"
+                  : "No favorite study sets yet"
+                : t("library.emptyTitle")
+            }
+            description={
+              favoritesOnly
+                ? vi
+                  ? "Bấm biểu tượng ngôi sao trên học phần bất kỳ để ghim lên đầu thư viện."
+                  : "Click the star icon on any study set to pin it to the top of your library."
+                : t("library.emptyDescription")
+            }
             action={
-              <Button asChild>
-                <Link href="/sets/new">
-                  <Plus className="size-4" aria-hidden="true" />
-                  <span>{t("library.newSet")}</span>
-                </Link>
-              </Button>
+              favoritesOnly ? (
+                <Button variant="outline" onClick={() => setFavoritesOnly(false)}>
+                  {t("library.allSets")}
+                </Button>
+              ) : (
+                <Button asChild>
+                  <Link href="/sets/new">
+                    <Plus className="size-4" aria-hidden="true" />
+                    <span>{t("library.newSet")}</span>
+                  </Link>
+                </Button>
+              )
+            }
+            secondaryAction={
+              !favoritesOnly ? (
+                <Button variant="outline" asChild>
+                  <Link href="/import">
+                    <Upload className="size-4" aria-hidden="true" />
+                    <span>{t("library.importSet")}</span>
+                  </Link>
+                </Button>
+              ) : undefined
             }
           />
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {sets.map((set) => {
-              const primaryHref =
-                urlAction === "import"
-                  ? `/sets/${set.id}/import`
-                  : urlAction === "test"
-                    ? `/sets/${set.id}/test`
-                    : `/sets/${set.id}`;
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {sets.map((set) => {
+                const isFav = Boolean(set.is_favorite);
+                const primaryHref =
+                  urlAction === "import"
+                    ? `/sets/${set.id}/import`
+                    : urlAction === "test"
+                      ? `/exams/new?setId=${set.id}`
+                      : `/sets/${set.id}`;
 
-              return (
-                <Card key={set.id} className="justify-between gap-3 py-4">
-                  <CardHeader className="gap-2 px-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant="secondary">{getTypeLabel(set.set_type)}</Badge>
-                        <Badge variant="outline">{getVisibilityLabel(set.visibility)}</Badge>
-                      </div>
+                return (
+                  <Card key={set.id} className="justify-between gap-3 py-4">
+                    <CardHeader className="gap-2 px-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge variant="secondary">{getTypeLabel(set.set_type)}</Badge>
+                          <Badge variant="outline">{getVisibilityLabel(set.visibility)}</Badge>
+                        </div>
 
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
+                        <div className="flex shrink-0 items-center gap-0.5">
                           <Button
                             variant="ghost"
                             size="icon-sm"
-                            aria-label={`${t("common.actions")} ${set.title}`}
-                          >
-                            <MoreHorizontal className="size-4" aria-hidden="true" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-48">
-                          <DropdownMenuItem asChild>
-                            <Link href={`/sets/${set.id}/edit`}>
-                              <Edit3 className="size-4" aria-hidden="true" />
-                              <span>{t("common.edit")}</span>
-                            </Link>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem asChild>
-                            <Link href={`/sets/${set.id}/import`}>
-                              <Upload className="size-4" aria-hidden="true" />
-                              <span>{t("library.importSet")}</span>
-                            </Link>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setSharingSet(set)}>
-                            <Share2 className="size-4" aria-hidden="true" />
-                            <span>{t("friends.shareSet")}</span>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => duplicateSetMutation.mutate(set.id)}
-                          >
-                            <Copy className="size-4" aria-hidden="true" />
-                            <span>{t("library.duplicateSet")}</span>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => {
-                              setMovingSet(set);
-                              setMoveTargetFolderId(set.folder_id ?? "none");
-                            }}
-                          >
-                            <FolderInput className="size-4" aria-hidden="true" />
-                            <span>{vi ? "Chuyển thư mục" : "Move to folder"}</span>
-                          </DropdownMenuItem>
-
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <Download className="mr-2 size-4" aria-hidden="true" />
-                              <span>{t("library.exportSet")}</span>
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent>
-                              {(["json", "xlsx", "csv", "txt"] as const).map((fmt) => (
-                                <DropdownMenuItem key={fmt} asChild>
-                                  <a
-                                    href={`/api/sets/${set.id}/export?format=${fmt}`}
-                                    download
-                                  >
-                                    {fmt.toUpperCase()}
-                                  </a>
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
-
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
+                            aria-pressed={isFav}
+                            aria-label={
+                              isFav
+                                ? `${t("library.unfavoriteSet")}: ${set.title}`
+                                : `${t("library.favoriteSet")}: ${set.title}`
+                            }
                             onClick={() =>
-                              archiveSetMutation.mutate({
+                              favoriteSetMutation.mutate({
                                 setId: set.id,
-                                archived: !set.is_archived,
+                                favorite: !isFav,
                               })
                             }
                           >
-                            <Archive className="size-4" aria-hidden="true" />
-                            <span>
-                              {set.is_archived
-                                ? vi
-                                  ? "Khôi phục"
-                                  : "Unarchive"
-                                : vi
-                                  ? "Lưu trữ"
-                                  : "Archive"}
-                            </span>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onClick={() => setDeletingSet(set)}
-                          >
-                            <Trash2 className="size-4" aria-hidden="true" />
-                            <span>{t("common.delete")}</span>
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
+                            <Star
+                              className={cn(
+                                "size-4",
+                                isFav
+                                  ? "fill-warning text-warning"
+                                  : "text-muted-foreground",
+                              )}
+                              aria-hidden="true"
+                            />
+                          </Button>
 
-                    <CardTitle className="text-base">
-                      <Link
-                        href={primaryHref}
-                        className="hover:text-primary line-clamp-2 transition-colors"
-                      >
-                        {set.title}
-                      </Link>
-                    </CardTitle>
-                  </CardHeader>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={`${t("common.actions")} ${set.title}`}
+                              >
+                                <MoreHorizontal className="size-4" aria-hidden="true" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-52">
+                              <DropdownMenuItem asChild>
+                                <Link href={`/exams/new?setId=${set.id}`}>
+                                  <FileCheck2 className="size-4" aria-hidden="true" />
+                                  <span>{t("library.customExamCta")}</span>
+                                </Link>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem asChild>
+                                <Link href={`/sets/${set.id}/edit`}>
+                                  <Edit3 className="size-4" aria-hidden="true" />
+                                  <span>{t("common.edit")}</span>
+                                </Link>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem asChild>
+                                <Link href={`/sets/${set.id}/import`}>
+                                  <Upload className="size-4" aria-hidden="true" />
+                                  <span>{t("library.importSet")}</span>
+                                </Link>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => setSharingSet(set)}>
+                                <Share2 className="size-4" aria-hidden="true" />
+                                <span>{t("friends.shareSet")}</span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => duplicateSetMutation.mutate(set.id)}
+                              >
+                                <Copy className="size-4" aria-hidden="true" />
+                                <span>{t("library.duplicateSet")}</span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  setMovingSet(set);
+                                  setMoveTargetFolderId(set.folder_id ?? "none");
+                                }}
+                              >
+                                <FolderInput className="size-4" aria-hidden="true" />
+                                <span>{vi ? "Chuyển thư mục" : "Move to folder"}</span>
+                              </DropdownMenuItem>
 
-                  <CardContent className="space-y-2 px-4">
-                    {set.description && (
-                      <p className="text-muted-foreground line-clamp-2 text-xs leading-relaxed">
-                        {set.description}
-                      </p>
-                    )}
-                    <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      <span className="font-mono font-medium tabular-nums">
-                        {set.question_count} {vi ? "câu hỏi" : "questions"}
-                      </span>
-                      {set.subject && <span className="truncate">{set.subject}</span>}
-                      <span>{formatRelativeTime(set.updated_at, locale)}</span>
-                    </div>
-                  </CardContent>
+                              <DropdownMenuSub>
+                                <DropdownMenuSubTrigger>
+                                  <Download className="mr-2 size-4" aria-hidden="true" />
+                                  <span>{t("library.exportSet")}</span>
+                                </DropdownMenuSubTrigger>
+                                <DropdownMenuSubContent>
+                                  {(["json", "xlsx", "csv", "txt"] as const).map((fmt) => (
+                                    <DropdownMenuItem key={fmt} asChild>
+                                      <a
+                                        href={`/api/sets/${set.id}/export?format=${fmt}`}
+                                        download
+                                      >
+                                        {fmt.toUpperCase()}
+                                      </a>
+                                    </DropdownMenuItem>
+                                  ))}
+                                </DropdownMenuSubContent>
+                              </DropdownMenuSub>
 
-                  <CardFooter className="gap-2 border-t px-4 pt-3">
-                    {urlAction === "import" ? (
-                      <Button size="sm" asChild className="w-full">
-                        <Link href={`/sets/${set.id}/import`}>
-                          <Upload className="size-3.5" aria-hidden="true" />
-                          <span>{t("library.importSet")}</span>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  archiveSetMutation.mutate({
+                                    setId: set.id,
+                                    archived: !set.is_archived,
+                                  })
+                                }
+                              >
+                                <Archive className="size-4" aria-hidden="true" />
+                                <span>
+                                  {set.is_archived
+                                    ? vi
+                                      ? "Khôi phục"
+                                      : "Unarchive"
+                                    : vi
+                                      ? "Lưu trữ"
+                                      : "Archive"}
+                                </span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onClick={() => setDeletingSet(set)}
+                              >
+                                <Trash2 className="size-4" aria-hidden="true" />
+                                <span>{t("common.delete")}</span>
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </div>
+
+                      <CardTitle className="text-base">
+                        <Link
+                          href={primaryHref}
+                          className="hover:text-primary line-clamp-2 transition-colors"
+                        >
+                          {set.title}
                         </Link>
-                      </Button>
-                    ) : urlAction === "test" ? (
-                      <Button size="sm" asChild className="w-full">
-                        <Link href={`/sets/${set.id}/test`}>
-                          <FileCheck2 className="size-3.5" aria-hidden="true" />
-                          <span>{t("exam.startExam")}</span>
-                        </Link>
-                      </Button>
-                    ) : (
-                      <>
-                        <Button size="sm" variant="default" asChild className="flex-1">
-                          <Link href={`/sets/${set.id}`}>
-                            <Play className="size-3.5" aria-hidden="true" />
-                            <span>{vi ? "Mở học phần" : "Open"}</span>
+                      </CardTitle>
+                    </CardHeader>
+
+                    <CardContent className="space-y-2 px-4">
+                      {set.description && (
+                        <p className="text-muted-foreground line-clamp-2 text-xs leading-relaxed">
+                          {set.description}
+                        </p>
+                      )}
+                      <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                        <span className="font-mono font-medium tabular-nums">
+                          {set.question_count} {vi ? "câu hỏi" : "questions"}
+                        </span>
+                        {set.subject && <span className="truncate">{set.subject}</span>}
+                        <span>{formatRelativeTime(set.updated_at, locale)}</span>
+                      </div>
+                    </CardContent>
+
+                    <CardFooter className="gap-2 border-t px-4 pt-3">
+                      {urlAction === "import" ? (
+                        <Button size="sm" asChild className="w-full">
+                          <Link href={`/sets/${set.id}/import`}>
+                            <Upload className="size-3.5" aria-hidden="true" />
+                            <span>{t("library.importSet")}</span>
                           </Link>
                         </Button>
-                        <Button size="sm" variant="outline" asChild>
-                          <Link
-                            href={`/sets/${set.id}/${set.set_type === "flashcards" ? "flashcards" : "practice"}`}
-                            aria-label={t("study.startStudy")}
-                          >
-                            <Layers className="size-3.5" aria-hidden="true" />
+                      ) : urlAction === "test" ? (
+                        <Button size="sm" asChild className="w-full">
+                          <Link href={`/exams/new?setId=${set.id}`}>
+                            <FileCheck2 className="size-3.5" aria-hidden="true" />
+                            <span>{t("exam.startExam")}</span>
                           </Link>
                         </Button>
-                      </>
-                    )}
-                  </CardFooter>
-                </Card>
-              );
-            })}
-          </div>
+                      ) : (
+                        <>
+                          <Button size="sm" variant="default" asChild className="flex-1">
+                            <Link href={`/sets/${set.id}`}>
+                              <Play className="size-3.5" aria-hidden="true" />
+                              <span>{vi ? "Mở học phần" : "Open"}</span>
+                            </Link>
+                          </Button>
+                          <Button size="sm" variant="outline" asChild>
+                            <Link
+                              href={`/sets/${set.id}/${set.set_type === "flashcards" ? "flashcards" : "practice"}`}
+                              aria-label={`${t("study.startStudy")} ${set.title}`}
+                            >
+                              <Layers className="size-3.5" aria-hidden="true" />
+                            </Link>
+                          </Button>
+                        </>
+                      )}
+                    </CardFooter>
+                  </Card>
+                );
+              })}
+            </div>
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between pt-2 text-xs">
+                <span className="text-muted-foreground font-mono tabular-nums">
+                  {vi
+                    ? `Trang ${page} / ${totalPages}`
+                    : `Page ${page} of ${totalPages}`}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  >
+                    {t("common.previous")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={page >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  >
+                    {t("common.next")}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </section>
 
       {/* Dialogs */}
       <FolderDialog
-        open={folderDialogOpen}
-        onOpenChange={setFolderDialogOpen}
-        folder={editingFolder}
+        open={effectiveFolderDialogOpen}
+        onOpenChange={handleFolderDialogChange}
+        folder={effectiveEditingFolder}
       />
 
       {sharingSet && (
@@ -757,7 +1009,7 @@ function LibraryViewInner() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => deletingFolder && deleteFolderMutation.mutate(deletingFolder.id)}
@@ -783,7 +1035,7 @@ function LibraryViewInner() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => deletingSet && deleteSetMutation.mutate(deletingSet.id)}

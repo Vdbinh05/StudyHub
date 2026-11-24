@@ -1,7 +1,24 @@
 import type { AnswerMatchMode } from "@/types/domain";
 
+const STRICT_UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const STORAGE_PATH_REGEX =
-  /^(?:avatars\/[0-9a-f-]{36}\/[a-zA-Z0-9._-]+|[0-9a-f-]{36}\/[0-9a-f-]{36}\/[a-zA-Z0-9._-]+)$/i;
+  /^(?:avatars\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[a-zA-Z0-9._-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[a-zA-Z0-9._-]+)$/i;
+
+export function isStrictUuid(value: string | null | undefined): boolean {
+  return Boolean(value && STRICT_UUID_REGEX.test(value.trim()));
+}
+
+/**
+ * Validates whether a string is a canonical private `study-media` Storage object path.
+ */
+export function isValidStudyMediaPath(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const trimmed = path.trim();
+  if (trimmed.includes("..") || trimmed.includes("\\")) return false;
+  return STORAGE_PATH_REGEX.test(trimmed);
+}
 
 /**
  * Validates that a URL is safe for storage or rendering (`https://`, local relative `/`,
@@ -57,6 +74,19 @@ export function isSafeHttpOrStorageUrl(url: string | null | undefined): boolean 
 }
 
 /**
+ * Strips PostgREST filter syntax metacharacters (`%`, `_`, `,`, `(`, `)`, `"`, `\`, `.`, `*`)
+ * before embedding a search query inside `.or()` `ilike` expressions (fixes SH-043 / SEC-018).
+ */
+export function sanitizePostgrestSearch(input: string, maxLength = 200): string {
+  return input
+    .replace(/[\x00-\x1F\x7F]/g, "")
+    .replace(/[%_,()."\\*]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+/**
  * Strips path traversal sequences, directory separators, null bytes, and control characters
  * from an uploaded filename before persisting it to `import_jobs.file_name`.
  */
@@ -105,6 +135,7 @@ export function stripDiacritics(input: string): string {
 
 /**
  * Deterministic text normalization for short-answer / Write mode comparison.
+ * Strictly aligned 1:1 with PostgreSQL `public.normalize_short_answer()` (Migration 0005).
  */
 export function normalizeAnswerText(
   text: string,
@@ -116,18 +147,22 @@ export function normalizeAnswerText(
     case "exact":
       return collapsed;
     case "case_insensitive":
-      return collapsed.toLowerCase();
+      return collapsed
+        .toLowerCase()
+        .replace(/^[.,;:!?'"()\[\]{}]+|[.,;:!?'"()\[\]{}]+$/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
     case "ignore_diacritics":
       return stripDiacritics(collapsed)
         .toLowerCase()
-        .replace(/^[.,;:!?'"()\[\]{}]+|[.,;:!?'"()\[\]{}]+$/g, "")
+        .replace(/[.,;:!?'"()\[\]{}]+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
     case "numeric": {
       const compact = collapsed.replace(/\s+/g, "").replace(/,/g, ".");
       const num = Number(compact);
       if (Number.isFinite(num) && compact.length > 0) {
-        return String(num);
+        return Object.is(num, -0) || num === 0 ? "0" : String(num);
       }
       return collapsed.toLowerCase();
     }

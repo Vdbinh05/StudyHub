@@ -18,6 +18,8 @@ import {
   apiFetch,
   formatDateTime,
   formatMinutes,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
@@ -26,10 +28,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
+  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
@@ -37,7 +47,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/lib/i18n";
-import type { ExamAttempt, StudySession } from "@/types/domain";
+import type { ExamAttempt, ExamStatus, StudyMode, StudySession } from "@/types/domain";
 
 interface SessionWithTitle extends StudySession {
   study_set_title?: string | null;
@@ -47,10 +57,15 @@ interface SessionWithTitle extends StudySession {
 export function HistoryView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
+  const configured = isSupabaseConfiguredClient();
+
   const [search, setSearch] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState<"all" | ExamStatus>("all");
+  const [modeFilter, setModeFilter] = React.useState<"all" | StudyMode>("all");
 
   const examsQuery = useQuery<ExamAttempt[]>({
     queryKey: ["history-exams"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<ExamAttempt[]>("/api/exams?pageSize=100");
       return Array.isArray(res.data) ? res.data : [];
@@ -59,6 +74,7 @@ export function HistoryView() {
 
   const sessionsQuery = useQuery<SessionWithTitle[]>({
     queryKey: ["history-sessions"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<SessionWithTitle[]>("/api/sessions?pageSize=100");
       return Array.isArray(res.data) ? res.data : [];
@@ -69,28 +85,35 @@ export function HistoryView() {
 
   const filteredExams = React.useMemo(() => {
     const items = examsQuery.data ?? [];
-    if (!normalizedSearch) return items;
-    return items.filter((item) =>
-      item.study_set_title_snapshot.toLowerCase().includes(normalizedSearch),
-    );
-  }, [examsQuery.data, normalizedSearch]);
+    return items.filter((item) => {
+      if (statusFilter !== "all" && item.status !== statusFilter) return false;
+      if (
+        normalizedSearch &&
+        !item.study_set_title_snapshot.toLowerCase().includes(normalizedSearch)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [examsQuery.data, normalizedSearch, statusFilter]);
 
   const filteredSessions = React.useMemo(() => {
     const items = sessionsQuery.data ?? [];
-    if (!normalizedSearch) return items;
     return items.filter((item) => {
+      if (modeFilter !== "all" && item.mode !== modeFilter) return false;
+      if (!normalizedSearch) return true;
       const title = item.study_set_title ?? item.study_set?.title ?? "";
       return (
         title.toLowerCase().includes(normalizedSearch) ||
         item.mode.toLowerCase().includes(normalizedSearch)
       );
     });
-  }, [sessionsQuery.data, normalizedSearch]);
+  }, [sessionsQuery.data, normalizedSearch, modeFilter]);
 
   const modeLabel = (mode: string) => {
     const labels: Record<string, { vi: string; en: string }> = {
       flashcards: { vi: "Flashcards", en: "Flashcards" },
-      learn: { vi: "Học tập", en: "Learn" },
+      learn: { vi: "Học sâu", en: "Learn" },
       practice: { vi: "Luyện trắc nghiệm", en: "Practice" },
       write: { vi: "Gõ đáp án", en: "Write" },
       match: { vi: "Ghép thẻ", en: "Match" },
@@ -100,16 +123,16 @@ export function HistoryView() {
   };
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={vi ? "Lịch sử học tập & Thi thử" : "Study & Exam History"}
         description={
           vi
-            ? "Xem lại tất cả lượt thi thử (đã chấm bất biến) và phiên ôn tập gần đây."
-            : "Review all immutable exam attempts and completed study sessions."
+            ? "Xem lại tất cả lượt thi thử (đơn môn và đa môn) và phiên ôn tập gần đây."
+            : "Review all single- and multi-subject exam attempts and completed study sessions."
         }
         actions={
-          <div className="relative w-full sm:w-64">
+          <search className="relative w-full sm:w-64">
             <Search
               className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
               aria-hidden="true"
@@ -118,42 +141,81 @@ export function HistoryView() {
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={vi ? "Tìm theo tên học phần..." : "Filter by set title..."}
+              placeholder={vi ? "Tìm theo tên đề thi / học phần..." : "Filter by title..."}
               aria-label={vi ? "Tìm trong lịch sử" : "Filter history"}
               className="pl-9"
             />
-          </div>
+          </search>
         }
       />
 
       <Tabs defaultValue="exams">
-        <TabsList>
-          <TabsTrigger value="exams">
-            <FileCheck2 className="size-4" aria-hidden="true" />
-            <span>
-              {t("exam.historyTitle")} ({filteredExams.length})
-            </span>
-          </TabsTrigger>
-          <TabsTrigger value="sessions">
-            <History className="size-4" aria-hidden="true" />
-            <span>
-              {t("stats.recentSessions")} ({filteredSessions.length})
-            </span>
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <TabsList>
+            <TabsTrigger value="exams">
+              <FileCheck2 className="size-4" aria-hidden="true" />
+              <span>
+                {t("exam.historyTitle")} ({filteredExams.length})
+              </span>
+            </TabsTrigger>
+            <TabsTrigger value="sessions">
+              <History className="size-4" aria-hidden="true" />
+              <span>
+                {t("stats.recentSessions")} ({filteredSessions.length})
+              </span>
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
-        <TabsContent value="exams" className="mt-4">
-          {examsQuery.isLoading ? (
+        <TabsContent value="exams" className="mt-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Select
+              value={statusFilter}
+              onValueChange={(v) => setStatusFilter(v as "all" | ExamStatus)}
+            >
+              <SelectTrigger
+                className="w-44"
+                aria-label={vi ? "Lọc theo trạng thái bài thi" : "Filter exam status"}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {vi ? "Tất cả trạng thái" : "All statuses"}
+                </SelectItem>
+                <SelectItem value="submitted">
+                  {vi ? "Đã nộp bài" : "Submitted"}
+                </SelectItem>
+                <SelectItem value="in_progress">
+                  {vi ? "Đang làm dở" : "In progress"}
+                </SelectItem>
+                <SelectItem value="expired">
+                  {vi ? "Hết giờ" : "Timed out"}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+
+            <Button asChild size="sm" variant="outline">
+              <Link href="/exams/new">
+                <FileCheck2 className="size-4" aria-hidden="true" />
+                <span>{t("nav.customExam")}</span>
+              </Link>
+            </Button>
+          </div>
+
+          {!configured ? (
+            <EmptyState
+              icon={FileCheck2}
+              title={vi ? "Chưa thể tải lịch sử thi" : "Exam history unavailable"}
+              description={t("common.serviceUnavailableDesc")}
+            />
+          ) : examsQuery.isLoading ? (
             <Skeleton className="h-64 w-full rounded-xl" />
           ) : examsQuery.error ? (
             <EmptyState
               icon={AlertCircle}
               title={vi ? "Không thể tải lịch sử thi" : "Failed to load exam history"}
-              description={
-                examsQuery.error instanceof Error
-                  ? examsQuery.error.message
-                  : t("common.errorGeneric")
-              }
+              description={getFriendlyErrorMessage(examsQuery.error, locale)}
               action={
                 <Button onClick={() => void examsQuery.refetch()}>
                   {t("common.retry")}
@@ -166,13 +228,13 @@ export function HistoryView() {
               title={t("exam.noAttempts")}
               description={
                 vi
-                  ? "Hãy chọn một học phần trong thư viện và bắt đầu bài thi thử bấm giờ đầu tiên."
-                  : "Pick any study set from your library to launch your first timed mock exam."
+                  ? "Tạo đề thi thử tùy chỉnh cho một hoặc nhiều môn học để theo dõi điểm số tại đây."
+                  : "Launch a single- or multi-subject custom mock exam to track your scores here."
               }
               action={
                 <Button asChild>
-                  <Link href="/library?action=test">
-                    <span>{vi ? "Chọn đề thi thử" : "Choose a set to test"}</span>
+                  <Link href="/exams/new">
+                    <span>{vi ? "Tạo đề thi thử đầu tiên" : "Create your first exam"}</span>
                   </Link>
                 </Button>
               }
@@ -184,12 +246,15 @@ export function HistoryView() {
                   tabIndex={0}
                   role="region"
                   aria-label={t("exam.historyTitle")}
-                  className="overflow-x-auto"
+                  className="responsive-table-region"
                 >
                   <Table>
+                    <TableCaption className="sr-only">
+                      {t("exam.historyTitle")}
+                    </TableCaption>
                     <TableHeader>
                       <TableRow>
-                        <TableHead scope="col">{vi ? "Học phần" : "Study Set"}</TableHead>
+                        <TableHead scope="col">{vi ? "Đề thi / Học phần" : "Exam / Set"}</TableHead>
                         <TableHead scope="col">{t("exam.score")}</TableHead>
                         <TableHead scope="col">{vi ? "Đúng / Tổng" : "Correct"}</TableHead>
                         <TableHead scope="col">{vi ? "Trạng thái" : "Status"}</TableHead>
@@ -203,17 +268,26 @@ export function HistoryView() {
                     <TableBody>
                       {filteredExams.map((attempt) => {
                         const isInProgress = attempt.status === "in_progress";
-                        const targetUrl = attempt.study_set_id
-                          ? isInProgress
-                            ? `/sets/${attempt.study_set_id}/test?attemptId=${attempt.id}`
-                            : `/sets/${attempt.study_set_id}/results/${attempt.id}`
-                          : null;
+                        const isMultiSubject = attempt.study_set_id === null;
+                        // Support both single-set AND multi-subject exams (fixes SH-036 / AN-01)
+                        const targetUrl = isInProgress
+                          ? `/exams/${attempt.id}`
+                          : attempt.study_set_id
+                            ? `/sets/${attempt.study_set_id}/results/${attempt.id}`
+                            : `/exams/${attempt.id}/results`;
                         return (
                           <TableRow key={attempt.id}>
                             <TableCell className="max-w-xs font-medium">
-                              <span className="line-clamp-1">
-                                {attempt.study_set_title_snapshot}
-                              </span>
+                              <div className="space-y-1">
+                                <span className="line-clamp-1">
+                                  {attempt.study_set_title_snapshot}
+                                </span>
+                                {isMultiSubject && (
+                                  <Badge variant="outline" className="text-[10px]">
+                                    {t("exam.multiSubjectBadge")}
+                                  </Badge>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell className="font-mono font-semibold tabular-nums">
                               {isInProgress ? "—" : `${Math.round(attempt.score_percent)}%`}
@@ -248,25 +322,28 @@ export function HistoryView() {
                               {formatDateTime(attempt.submitted_at ?? attempt.started_at, locale)}
                             </TableCell>
                             <TableCell className="text-right">
-                              {targetUrl ? (
-                                <Button variant="ghost" size="sm" asChild>
-                                  <Link href={targetUrl}>
-                                    {isInProgress ? (
-                                      <>
-                                        <Play className="size-3.5" aria-hidden="true" />
-                                        <span>{vi ? "Tiếp tục" : "Resume"}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <ExternalLink className="size-3.5" aria-hidden="true" />
-                                        <span>{vi ? "Chi tiết" : "Review"}</span>
-                                      </>
-                                    )}
-                                  </Link>
-                                </Button>
-                              ) : (
-                                <span className="text-muted-foreground text-xs">—</span>
-                              )}
+                              <Button variant="ghost" size="sm" asChild>
+                                <Link
+                                  href={targetUrl}
+                                  aria-label={
+                                    isInProgress
+                                      ? `${vi ? "Tiếp tục" : "Resume"} ${attempt.study_set_title_snapshot}`
+                                      : `${vi ? "Xem kết quả" : "Review"} ${attempt.study_set_title_snapshot}`
+                                  }
+                                >
+                                  {isInProgress ? (
+                                    <>
+                                      <Play className="size-3.5" aria-hidden="true" />
+                                      <span>{vi ? "Tiếp tục" : "Resume"}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ExternalLink className="size-3.5" aria-hidden="true" />
+                                      <span>{vi ? "Chi tiết" : "Review"}</span>
+                                    </>
+                                  )}
+                                </Link>
+                              </Button>
                             </TableCell>
                           </TableRow>
                         );
@@ -279,18 +356,45 @@ export function HistoryView() {
           )}
         </TabsContent>
 
-        <TabsContent value="sessions" className="mt-4">
-          {sessionsQuery.isLoading ? (
+        <TabsContent value="sessions" className="mt-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={modeFilter}
+              onValueChange={(v) => setModeFilter(v as "all" | StudyMode)}
+            >
+              <SelectTrigger
+                className="w-44"
+                aria-label={vi ? "Lọc theo chế độ học" : "Filter study mode"}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {vi ? "Tất cả chế độ" : "All modes"}
+                </SelectItem>
+                <SelectItem value="flashcards">Flashcards</SelectItem>
+                <SelectItem value="practice">{t("study.practice")}</SelectItem>
+                <SelectItem value="learn">{t("study.learn")}</SelectItem>
+                <SelectItem value="write">{t("study.write")}</SelectItem>
+                <SelectItem value="match">{t("study.match")}</SelectItem>
+                <SelectItem value="review">{vi ? "Ôn tập SM-2" : "SM-2 Review"}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {!configured ? (
+            <EmptyState
+              icon={History}
+              title={vi ? "Chưa thể tải phiên học" : "Sessions unavailable"}
+              description={t("common.serviceUnavailableDesc")}
+            />
+          ) : sessionsQuery.isLoading ? (
             <Skeleton className="h-64 w-full rounded-xl" />
           ) : sessionsQuery.error ? (
             <EmptyState
               icon={AlertCircle}
               title={vi ? "Không thể tải phiên học" : "Failed to load study sessions"}
-              description={
-                sessionsQuery.error instanceof Error
-                  ? sessionsQuery.error.message
-                  : t("common.errorGeneric")
-              }
+              description={getFriendlyErrorMessage(sessionsQuery.error, locale)}
               action={
                 <Button onClick={() => void sessionsQuery.refetch()}>
                   {t("common.retry")}
@@ -319,9 +423,12 @@ export function HistoryView() {
                   tabIndex={0}
                   role="region"
                   aria-label={t("stats.recentSessions")}
-                  className="overflow-x-auto"
+                  className="responsive-table-region"
                 >
                   <Table>
+                    <TableCaption className="sr-only">
+                      {t("stats.recentSessions")}
+                    </TableCaption>
                     <TableHeader>
                       <TableRow>
                         <TableHead scope="col">{vi ? "Học phần" : "Study Set"}</TableHead>
@@ -343,16 +450,26 @@ export function HistoryView() {
                         const setTitle =
                           session.study_set_title ??
                           session.study_set?.title ??
-                          (vi ? "Học phần" : "Study Set");
+                          (session.study_set_id
+                            ? vi
+                              ? "Học phần"
+                              : "Study Set"
+                            : vi
+                              ? "Luyện tập nhiều môn"
+                              : "Multi-subject practice");
                         return (
                           <TableRow key={session.id}>
                             <TableCell className="max-w-xs font-medium">
-                              <Link
-                                href={`/sets/${session.study_set_id}`}
-                                className="hover:text-primary line-clamp-1 transition-colors"
-                              >
-                                {setTitle}
-                              </Link>
+                              {session.study_set_id ? (
+                                <Link
+                                  href={`/sets/${session.study_set_id}`}
+                                  className="hover:text-primary line-clamp-1 transition-colors"
+                                >
+                                  {setTitle}
+                                </Link>
+                              ) : (
+                                <span className="line-clamp-1">{setTitle}</span>
+                              )}
                             </TableCell>
                             <TableCell>
                               <Badge variant="secondary">{modeLabel(session.mode)}</Badge>

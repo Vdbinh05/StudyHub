@@ -33,8 +33,10 @@ export interface ParseImportInput {
   rawText?: string;
   /** Parsing options (format override, answer rule, column mapping, delimiters, defaults) */
   options?: ImportOptions;
-  /** Existing prompts in the target study set for duplicate detection */
+  /** Legacy existing prompts in the target study set for duplicate detection */
   existingPrompts?: readonly string[];
+  /** Existing full duplicate fingerprints (`computeQuestionDuplicateFingerprint`) in the target study set */
+  existingFingerprints?: readonly string[];
 }
 
 export interface ExtendedImportPreviewResult extends ImportPreviewResult {
@@ -99,6 +101,7 @@ export async function parseImportInput(
   let finalFormat: ImportFormat = detectedFormat;
   let sheetNames: string[] | undefined;
   let selectedSheet: string | undefined;
+  let headerRowCount: 1 | 2 | undefined;
   let detectedColumns: string[] | undefined;
   let sampleRows: string[][] | undefined;
   let suggestedMapping: ImportPreviewResult["suggestedMapping"];
@@ -116,6 +119,7 @@ export async function parseImportInput(
       answerRule: ruleUsed,
       defaultChapter: opts.defaultChapter,
       defaultTags: opts.defaultTags,
+      stripUnuploadedMedia: true,
     });
     finalFormat = "docx_ooxml";
     rawQuestions = docxOut.questions;
@@ -143,6 +147,7 @@ export async function parseImportInput(
     const xlsxOut = await parseXlsxBuffer(input.fileBytes, {
       sheetName: opts.sheetName,
       hasHeaderRow: opts.hasHeaderRow,
+      headerRowCount: opts.headerRowCount,
       columnMapping: opts.columnMapping,
       defaultChapter: opts.defaultChapter,
       defaultTags: opts.defaultTags,
@@ -151,6 +156,7 @@ export async function parseImportInput(
     finalFormat = opts.formatOverride ?? xlsxOut.detectedFormat;
     sheetNames = xlsxOut.sheetNames;
     selectedSheet = xlsxOut.selectedSheet;
+    headerRowCount = xlsxOut.headerRowCount;
     detectedColumns = xlsxOut.detectedColumns;
     sampleRows = xlsxOut.sampleRows;
     suggestedMapping = xlsxOut.suggestedMapping;
@@ -241,6 +247,7 @@ export async function parseImportInput(
 
   const validated = validateImportBatch(rawQuestions, {
     existingPrompts: input.existingPrompts,
+    existingFingerprints: input.existingFingerprints,
     globalIssues: parserIssues,
   });
 
@@ -250,6 +257,7 @@ export async function parseImportInput(
     fileSizeBytes,
     sheetNames,
     selectedSheet,
+    headerRowCount,
     detectedColumns,
     sampleRows,
     suggestedMapping,
@@ -259,6 +267,30 @@ export async function parseImportInput(
     ruleUsed,
     detectedChapters: validated.detectedChapters,
     extractedMedia,
+  };
+}
+
+/**
+ * Strip unused heavy parser fields (`rawSource` and per-option `formatting`) before
+ * serializing preview payloads over HTTP (cuts ~38% payload bloat on large DOCX files).
+ */
+export function compactPreviewForTransport(
+  preview: ExtendedImportPreviewResult,
+): ExtendedImportPreviewResult {
+  return {
+    ...preview,
+    questions: preview.questions.map((q) => {
+      const { rawSource: _unusedRaw, ...restQ } = q;
+      void _unusedRaw;
+      return {
+        ...restQ,
+        options: q.options.map((o) => {
+          const { formatting: _unusedFmt, ...restO } = o;
+          void _unusedFmt;
+          return restO;
+        }),
+      };
+    }),
   };
 }
 
@@ -272,12 +304,15 @@ export {
 export {
   ImportSecurityError,
   MAX_IMPORT_FILE_BYTES,
+  MAX_RAW_TEXT_BYTES,
   MAX_PARSED_QUESTIONS,
   MAX_UNCOMPRESSED_BYTES,
   MAX_ZIP_ENTRIES,
   MAX_COMPRESSION_RATIO,
   inspectAndLoadZip,
   inspectRasterImageBytes,
+  readSafeZipEntryBytes,
+  readSafeZipTextEntry,
   validateAndDecodeTextBytes,
   validateFileExtension,
   validateFileSize,
@@ -291,9 +326,17 @@ export { parseCsvText } from "./csv-parser";
 export { parseQuizletText } from "./quizlet-parser";
 export { parseStudyHubJson } from "./json-parser";
 export {
+  cleanHeaderLabel,
+  deduplicateHeaders,
+  mapTabularRowsToQuestions,
+  parseQuestionTypeValue,
+  suggestColumnMapping,
+} from "./tabular-mapper";
+export {
   validateImportBatch,
   validateParsedQuestion,
   computeImportSummary,
+  computeQuestionDuplicateFingerprint,
 } from "./validator";
 export {
   generateImportTemplate,

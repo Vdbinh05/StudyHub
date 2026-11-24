@@ -43,24 +43,50 @@ export async function PATCH(
       throw new AppError("NOT_FOUND", "Friendship record not found.", 404);
     }
 
-    if ((action === "accept" || action === "decline") && !isAddressee) {
+    // SH-002 / SEC-006: Prevent blocked users from modifying a block created by the other user
+    if (existing.status === "blocked" && existing.blocked_by !== user.id) {
       throw new AppError(
         "FORBIDDEN",
-        "Only the recipient of a friend request can accept or decline it.",
+        "You do not have permission to modify this block.",
         403,
       );
     }
 
-    const nextStatus =
+    if (action === "accept" || action === "decline") {
+      if (!isAddressee) {
+        throw new AppError(
+          "FORBIDDEN",
+          "Only the recipient of a friend request can accept or decline it.",
+          403,
+        );
+      }
+      if (existing.status !== "pending") {
+        throw new AppError(
+          "CONFLICT",
+          "Only pending friend requests can be accepted or declined.",
+          409,
+        );
+      }
+    }
+
+    const nextStatus: "accepted" | "declined" | "blocked" =
       action === "accept"
         ? "accepted"
         : action === "decline"
           ? "declined"
           : "blocked";
 
+    const updatePayload: {
+      status: "accepted" | "declined" | "blocked";
+      blocked_by: string | null;
+    } =
+      nextStatus === "blocked"
+        ? { status: "blocked", blocked_by: user.id }
+        : { status: nextStatus, blocked_by: null };
+
     const { data, error } = await supabase
       .from("friendships")
-      .update({ status: nextStatus })
+      .update(updatePayload)
       .eq("id", friendshipId)
       .select("*")
       .single();
@@ -82,11 +108,33 @@ export async function DELETE(
     const { id } = await context.params;
     const friendshipId = uuidSchema.parse(id);
 
+    const { data: existing, error: fetchErr } = await supabase
+      .from("friendships")
+      .select("id, requester_id, addressee_id, status, blocked_by")
+      .eq("id", friendshipId)
+      .maybeSingle();
+
+    if (fetchErr) throw fetchErr;
+    if (
+      !existing ||
+      (existing.requester_id !== user.id && existing.addressee_id !== user.id)
+    ) {
+      throw new AppError("NOT_FOUND", "Friendship record not found.", 404);
+    }
+
+    // SH-002 / SEC-006: Blocked user CANNOT delete a block created by someone else
+    if (existing.status === "blocked" && existing.blocked_by !== user.id) {
+      throw new AppError(
+        "FORBIDDEN",
+        "Only the user who created this block can remove it.",
+        403,
+      );
+    }
+
     const { data, error } = await supabase
       .from("friendships")
       .delete()
       .eq("id", friendshipId)
-      .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
       .select("id")
       .maybeSingle();
 

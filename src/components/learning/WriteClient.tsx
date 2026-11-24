@@ -31,6 +31,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   isSafeDisplayImageUrl,
@@ -38,6 +39,7 @@ import {
   updateStudySession,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import { createSeededRng, fisherYatesShuffle } from "@/lib/learning/shuffle";
 import { calculateNextReview } from "@/lib/learning/sm2";
 import {
   getExpectedWriteAnswers,
@@ -61,7 +63,8 @@ interface WriteClientProps {
 
 export function WriteClient({ setId }: WriteClientProps) {
   const { locale, t } = useI18n();
-  const prefersReducedMotion = useReducedMotion();
+  const { preferences, playFeedbackSound } = useUserPreferences();
+  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
     data: bundle,
     isLoading,
@@ -86,6 +89,7 @@ export function WriteClient({ setId }: WriteClientProps) {
     checked: boolean;
     isCorrect: boolean;
     awaitingSelfAssess: boolean;
+    pendingPersist: boolean;
     userAnswer: string;
     acceptedTexts: string[];
   } | null>(null);
@@ -102,9 +106,10 @@ export function WriteClient({ setId }: WriteClientProps) {
   const startedAtRef = React.useRef<number>(0);
   const cardStartRef = React.useRef<number>(0);
 
+  const bundleQuestions = bundle?.questions;
   const questions = React.useMemo(() => {
-    if (!bundle) return [];
-    let list = bundle.questions.filter(
+    if (!bundleQuestions) return [];
+    let list = bundleQuestions.filter(
       (q) => getExpectedWriteAnswers(q).length > 0,
     );
     if (subsetIds) {
@@ -113,16 +118,29 @@ export function WriteClient({ setId }: WriteClientProps) {
     } else if (selectedChapter !== "all") {
       list = list.filter((q) => (q.chapter?.trim() || "") === selectedChapter);
     }
+    if (preferences.default_shuffle_questions) {
+      return fisherYatesShuffle(
+        list,
+        createSeededRng(`write:${setId}:${selectedChapter}:${subsetIds?.length ?? 0}`),
+      );
+    }
     return list;
-  }, [bundle, selectedChapter, subsetIds]);
+  }, [
+    bundleQuestions,
+    preferences.default_shuffle_questions,
+    selectedChapter,
+    setId,
+    subsetIds,
+  ]);
 
   React.useEffect(() => {
     startedAtRef.current = Date.now();
     cardStartRef.current = Date.now();
   }, []);
 
+  const studySetIdLoaded = bundle?.studySet.id ?? null;
   React.useEffect(() => {
-    if (!bundle || questions.length === 0 || sessionIdRef.current) return;
+    if (!studySetIdLoaded || questions.length === 0 || sessionIdRef.current) return;
     let active = true;
     createStudySession({
       study_set_id: setId,
@@ -138,13 +156,13 @@ export function WriteClient({ setId }: WriteClientProps) {
       active = false;
     };
   }, [
-    bundle,
     ignoreCase,
     ignoreDiacritics,
     ignorePunctuation,
     questions.length,
     setId,
     strictMode,
+    studySetIdLoaded,
   ]);
 
   const currentQuestion: Question | null = questions[currentIndex] ?? null;
@@ -157,11 +175,15 @@ export function WriteClient({ setId }: WriteClientProps) {
     [expectedAnswers],
   );
 
+  // Persists a question outcome ONCE and returns exact updated counts synchronously (fixes SH-022!).
   const persistWriteResult = React.useCallback(
-    (question: Question, isCorrect: boolean, typed: string) => {
-      if (!bundle) return;
+    (
+      question: Question,
+      isCorrect: boolean,
+      typed: string,
+    ): { correctCount: number; missedCount: number } => {
       const responseTimeMs = Math.max(0, Date.now() - cardStartRef.current);
-      const prevProgress = bundle.progressMap.get(question.id);
+      const prevProgress = bundle?.progressMap.get(question.id);
       const nextSm2 = calculateNextReview(prevProgress, isCorrect);
 
       const nextCorrect = new Set(correctIds);
@@ -215,8 +237,51 @@ export function WriteClient({ setId }: WriteClientProps) {
           .then(updateLocalProgress)
           .catch(() => {});
       }
+
+      return {
+        correctCount: nextCorrect.size,
+        missedCount: nextMissed.size,
+      };
     },
-    [bundle, correctIds, missedIds, setId, updateLocalProgress],
+    [bundle?.progressMap, correctIds, missedIds, setId, updateLocalProgress],
+  );
+
+  const finalizeOrMoveNext = React.useCallback(
+    (countsOverride?: { correctCount: number; missedCount: number }) => {
+      const finalCorrect = countsOverride?.correctCount ?? correctIds.size;
+      const finalMissed = countsOverride?.missedCount ?? missedIds.size;
+
+      if (currentIndex + 1 >= questions.length) {
+        playFeedbackSound("complete");
+        const durationSeconds = Math.max(
+          1,
+          Math.round((Date.now() - startedAtRef.current) / 1000),
+        );
+        setCompletedDurationSeconds(durationSeconds);
+        setIsCompleted(true);
+        if (sessionIdRef.current) {
+          updateStudySession(sessionIdRef.current, {
+            status: "completed",
+            completed_items: finalCorrect + finalMissed,
+            correct_items: finalCorrect,
+            duration_seconds: durationSeconds,
+          }).catch(() => {});
+        }
+      } else {
+        setCurrentIndex((i) => i + 1);
+        setInputValue("");
+        setResult(null);
+        cardStartRef.current = Date.now();
+        setTimeout(() => inputRef.current?.focus(), 40);
+      }
+    },
+    [
+      correctIds.size,
+      currentIndex,
+      missedIds.size,
+      playFeedbackSound,
+      questions.length,
+    ],
   );
 
   const handleCheck = React.useCallback(
@@ -236,27 +301,45 @@ export function WriteClient({ setId }: WriteClientProps) {
 
       const acceptedTexts = expectedAnswers.map((a) => a.answer_text);
 
-      // If it's a long open-ended answer and exact deterministic check didn't match,
-      // offer explicit self-assessment ("Tôi trả lời đúng" / "Cần ôn lại")
+      // Long open-ended answer: await explicit self-assessment before persisting
       if (!graded.isCorrect && isLongAnswer) {
         setResult({
           checked: true,
           isCorrect: false,
           awaitingSelfAssess: true,
+          pendingPersist: true,
           userAnswer: trimmed,
           acceptedTexts,
         });
         return;
       }
 
+      // If graded wrong with a non-empty typed answer, defer DB persistence until user either
+      // clicks Next (commits false once) OR clicks "Override: I was right" (commits true once).
+      // Eliminates double-recording wrong+right and SM-2 corruption (SH-022)!
+      if (!graded.isCorrect) {
+        playFeedbackSound("wrong");
+        setResult({
+          checked: true,
+          isCorrect: false,
+          awaitingSelfAssess: false,
+          pendingPersist: true,
+          userAnswer: trimmed,
+          acceptedTexts,
+        });
+        return;
+      }
+
+      playFeedbackSound("correct");
       setResult({
         checked: true,
-        isCorrect: graded.isCorrect,
+        isCorrect: true,
         awaitingSelfAssess: false,
+        pendingPersist: false,
         userAnswer: trimmed,
         acceptedTexts,
       });
-      persistWriteResult(currentQuestion, graded.isCorrect, trimmed);
+      persistWriteResult(currentQuestion, true, trimmed);
     },
     [
       collapseWhitespace,
@@ -268,48 +351,48 @@ export function WriteClient({ setId }: WriteClientProps) {
       inputValue,
       isLongAnswer,
       persistWriteResult,
+      playFeedbackSound,
       result?.checked,
       strictMode,
     ],
   );
 
   const handleAdvance = React.useCallback(() => {
-    if (currentIndex + 1 >= questions.length) {
-      const durationSeconds = Math.max(
-        1,
-        Math.round((Date.now() - startedAtRef.current) / 1000),
+    let counts: { correctCount: number; missedCount: number } | undefined;
+    if (currentQuestion && result?.pendingPersist) {
+      counts = persistWriteResult(
+        currentQuestion,
+        result.isCorrect,
+        result.userAnswer,
       );
-      setCompletedDurationSeconds(durationSeconds);
-      setIsCompleted(true);
-      if (sessionIdRef.current) {
-        updateStudySession(sessionIdRef.current, {
-          status: "completed",
-          completed_items: correctIds.size + missedIds.size,
-          correct_items: correctIds.size,
-          duration_seconds: durationSeconds,
-        }).catch(() => {});
-      }
-    } else {
-      setCurrentIndex((i) => i + 1);
-      setInputValue("");
-      setResult(null);
-      cardStartRef.current = Date.now();
-      setTimeout(() => inputRef.current?.focus(), 40);
     }
-  }, [correctIds.size, currentIndex, missedIds.size, questions.length]);
+    finalizeOrMoveNext(counts);
+  }, [currentQuestion, finalizeOrMoveNext, persistWriteResult, result]);
 
   const handleSelfAssess = React.useCallback(
     (isRight: boolean) => {
       if (!currentQuestion || !result) return;
-      persistWriteResult(currentQuestion, isRight, result.userAnswer);
+      playFeedbackSound(isRight ? "correct" : "wrong");
+      const counts = persistWriteResult(
+        currentQuestion,
+        isRight,
+        result.userAnswer,
+      );
       setResult({
         ...result,
         isCorrect: isRight,
         awaitingSelfAssess: false,
+        pendingPersist: false,
       });
-      handleAdvance();
+      finalizeOrMoveNext(counts);
     },
-    [currentQuestion, handleAdvance, persistWriteResult, result],
+    [
+      currentQuestion,
+      finalizeOrMoveNext,
+      persistWriteResult,
+      playFeedbackSound,
+      result,
+    ],
   );
 
   const restartWrite = React.useCallback((nextSubset: string[] | null = null) => {
@@ -622,17 +705,24 @@ export function WriteClient({ setId }: WriteClientProps) {
                         id="write-mode-input"
                         aria-describedby="write-mode-hint"
                         rows={isLongAnswer ? 3 : 2}
-                        disabled={Boolean(result?.checked)}
+                        readOnly={Boolean(result?.checked)}
                         value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
+                        onChange={(e) => {
+                          if (!result?.checked) setInputValue(e.target.value);
+                        }}
                         onCompositionEnd={(e) => {
                           lastCompositionEndRef.current = e.timeStamp;
                         }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
-                            // IME-safe Enter check (Vietnamese Telex/VNI & Safari WebKit bug 165004 safe)
-                            if (e.nativeEvent.isComposing) return;
+                            // IME-safe Enter check (Vietnamese Telex/VNI + Safari WebKit bug 165004)
+                            if (
+                              e.nativeEvent.isComposing ||
+                              e.nativeEvent.keyCode === 229
+                            ) {
+                              return;
+                            }
                             if (
                               lastCompositionEndRef.current !== null &&
                               Math.abs(e.timeStamp - lastCompositionEndRef.current) < 50
@@ -664,10 +754,12 @@ export function WriteClient({ setId }: WriteClientProps) {
                             const acceptedTexts = expectedAnswers.map(
                               (a) => a.answer_text,
                             );
+                            playFeedbackSound("wrong");
                             setResult({
                               checked: true,
                               isCorrect: false,
                               awaitingSelfAssess: false,
+                              pendingPersist: false,
                               userAnswer: "",
                               acceptedTexts,
                             });

@@ -22,6 +22,7 @@ import {
   normalizeText,
   optionLabelToIndex,
   sanitizeFileName,
+  stripUtf8Bom,
 } from "./text-utils";
 import {
   applyEndAnswerKeyToQuestions,
@@ -34,6 +35,7 @@ import {
   inspectAndLoadZip,
   inspectRasterImageBytes,
   MAX_UNCOMPRESSED_BYTES,
+  readSafeZipEntryBytes,
   readSafeZipTextEntry,
 } from "./zip-guard";
 
@@ -53,6 +55,12 @@ export interface DocxParserConfig {
   answerRule?: AnswerRule;
   defaultChapter?: string;
   defaultTags?: string[];
+  /**
+   * When true (default in parseImportInput / /api/import/parse where raw media bytes
+   * are not uploaded to Storage), strips temporary `/docx-media/*` URLs to `null` and
+   * emits a non-fatal `EMBEDDED_IMAGE_SKIPPED` warning instead of saving broken 404 URLs.
+   */
+  stripUnuploadedMedia?: boolean;
 }
 
 export interface DocxParseOutput {
@@ -495,7 +503,10 @@ function extractParagraphRuns(
       }
 
       if (runText.length > 0) {
-        runs.push({ text: runText.normalize("NFC"), format: runFmt });
+        runs.push({
+          text: stripUtf8Bom(runText).normalize("NFC"),
+          format: runFmt,
+        });
       }
     } else if (
       tag === "w:hyperlink" ||
@@ -530,7 +541,6 @@ function parseParagraphNode(
   let pShading: string | null = null;
   let numId: string | null = null;
   let ilvl = 0;
-  let pPrRunOverride: Partial<RunFormat> = {};
 
   if (pPrNode) {
     const pPrChildren = getChildren(pPrNode, "w:pPr");
@@ -548,15 +558,12 @@ function parseParagraphNode(
       if (ilvlNode) ilvl = Number.parseInt(getAttrs(ilvlNode)["@_w:val"] ?? "0", 10) || 0;
       if (numIdNode) numId = getAttrs(numIdNode)["@_w:val"] ?? null;
     }
-
-    const pRPrNode = findFirstChild(pPrChildren, "w:rPr");
-    if (pRPrNode) {
-      pPrRunOverride = parseRunProperties(pRPrNode);
-    }
   }
 
+  // Per ECMA-376 §17.3.1.29, <w:pPr><w:rPr> formats only the paragraph mark glyph,
+  // NOT child <w:r> runs. Child runs inherit strictly from docDefaults -> pStyle -> rStyle -> w:r/w:rPr.
   const resolvedStyle = resolveStyleFormat(pStyleId, styles, docDefaults);
-  const paragraphBaseFmt = mergeFormat(resolvedStyle.format, pPrRunOverride);
+  const paragraphBaseFmt = resolvedStyle.format;
   const finalPShading = pShading ?? resolvedStyle.pShading;
 
   const runs: DocxRun[] = [];
@@ -920,6 +927,18 @@ function finalizeDocxQuestion(
     }
   }
 
+  const skippedMediaFiles: string[] = [];
+  const resolveOutputMediaUrl = (url: string | null): string | null => {
+    if (!url) return null;
+    if (config.stripUnuploadedMedia && url.startsWith("/docx-media/")) {
+      skippedMediaFiles.push(url.replace(/^\/docx-media\//, ""));
+      return null;
+    }
+    return url;
+  };
+
+  const promptImageUrl = resolveOutputMediaUrl(draft.promptImageUrl);
+
   const options: ParsedOption[] = draft.options.map((opt, idx) => {
     const label = opt.label || indexToOptionLabel(idx);
     const isCorrect = finalLabels.has(label);
@@ -936,11 +955,22 @@ function finalizeDocxQuestion(
       label,
       content: opt.contentLines.join("\n").trim(),
       isCorrect,
-      imageUrl: opt.imageUrl,
+      imageUrl: resolveOutputMediaUrl(opt.imageUrl),
       detectedBy: optSources,
       formatting: analyses[idx]?.meta,
     };
   });
+
+  if (skippedMediaFiles.length > 0) {
+    const uniqueNames = Array.from(new Set(skippedMediaFiles));
+    issues.push({
+      id: generateStableId(),
+      code: "EMBEDDED_IMAGE_SKIPPED",
+      severity: "warning",
+      questionIndex: globalIndex,
+      message: `Embedded Word image (${uniqueNames.join(", ")}) was not attached automatically. Upload it in the Question Editor after import if needed.`,
+    });
+  }
 
   const correctCount = options.filter((o) => o.isCorrect).length;
   const questionType = correctCount > 1 ? "multiple_choice" : "single_choice";
@@ -953,7 +983,7 @@ function finalizeDocxQuestion(
     localQuestionNumber: draft.localQuestionNumber,
     questionType,
     prompt,
-    promptImageUrl: draft.promptImageUrl,
+    promptImageUrl,
     explanation:
       draft.explanationLines.length > 0
         ? draft.explanationLines.join("\n").trim()
@@ -1017,27 +1047,39 @@ export async function parseDocxBuffer(
   config: DocxParserConfig = {},
 ): Promise<DocxParseOutput> {
   const ruleUsed: AnswerRule = config.answerRule ?? { mode: "auto" };
-  const { zip } = await inspectAndLoadZip(bytes, "docx");
+  const { zip, compressedSizes } = await inspectAndLoadZip(bytes, "docx");
 
   const budget = { remainingBytes: MAX_UNCOMPRESSED_BYTES };
 
   const docEntry = zip.file("word/document.xml")!;
-  const documentXml = await readSafeZipTextEntry(docEntry, budget);
+  const documentXml = await readSafeZipTextEntry(docEntry, budget, {
+    compressedSize: compressedSizes.get("word/document.xml"),
+    entryName: "word/document.xml",
+  });
   assertNoXxeDeclarations(documentXml);
 
   const stylesEntry = zip.file("word/styles.xml");
   const stylesXml = stylesEntry
-    ? await readSafeZipTextEntry(stylesEntry, budget)
+    ? await readSafeZipTextEntry(stylesEntry, budget, {
+        compressedSize: compressedSizes.get("word/styles.xml"),
+        entryName: "word/styles.xml",
+      })
     : null;
 
   const numberingEntry = zip.file("word/numbering.xml");
   const numberingXml = numberingEntry
-    ? await readSafeZipTextEntry(numberingEntry, budget)
+    ? await readSafeZipTextEntry(numberingEntry, budget, {
+        compressedSize: compressedSizes.get("word/numbering.xml"),
+        entryName: "word/numbering.xml",
+      })
     : null;
 
   const relsEntry = zip.file("word/_rels/document.xml.rels");
   const relsXml = relsEntry
-    ? await readSafeZipTextEntry(relsEntry, budget)
+    ? await readSafeZipTextEntry(relsEntry, budget, {
+        compressedSize: compressedSizes.get("word/_rels/document.xml.rels"),
+        entryName: "word/_rels/document.xml.rels",
+      })
     : null;
 
   const { docDefaults, styles } = parseStylesXml(stylesXml);
@@ -1059,14 +1101,18 @@ export async function parseDocxBuffer(
     const mediaEntry = zip.file(zipPath);
     if (!mediaEntry) continue;
 
-    const mediaBytes = await mediaEntry.async("uint8array");
-    budget.remainingBytes -= mediaBytes.byteLength;
-    if (budget.remainingBytes < 0) {
+    let mediaBytes: Uint8Array;
+    try {
+      mediaBytes = await readSafeZipEntryBytes(mediaEntry, budget, {
+        compressedSize: compressedSizes.get(zipPath),
+        entryName: zipPath,
+      });
+    } catch {
       globalIssues.push({
         id: generateStableId(),
         code: "INVALID_FORMAT",
         severity: "warning",
-        message: "Embedded media exceeded 50 MB budget; remaining media skipped.",
+        message: "Embedded media exceeded 50 MB or safety budget; remaining media skipped.",
       });
       break;
     }
@@ -1145,9 +1191,44 @@ export async function parseDocxBuffer(
     state = "idle";
   };
 
-  const processParagraph = (para: DocxParagraph): void => {
-    // Handle paragraphs that contain internal line breaks (<w:br/>)
-    // If a paragraph has no internal newlines, process directly preserving run formatting.
+  const splitParagraphOnLineBreaks = (para: DocxParagraph): DocxParagraph[] => {
+    if (!para.runs.some((r) => r.text.includes("\n") || r.text.includes("\r"))) {
+      return [para];
+    }
+
+    const linesRuns: DocxRun[][] = [[]];
+    for (const run of para.runs) {
+      const normalizedRunText = run.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const parts = normalizedRunText.split("\n");
+      for (let i = 0; i < parts.length; i += 1) {
+        if (i > 0) {
+          linesRuns.push([]);
+        }
+        if (parts[i].length > 0) {
+          linesRuns[linesRuns.length - 1].push({
+            text: parts[i],
+            format: run.format,
+          });
+        }
+      }
+    }
+
+    const firstNonEmptyIdx = linesRuns.findIndex((runs) =>
+      runs.some((r) => r.text.trim().length > 0),
+    );
+    const mediaTargetIdx = firstNonEmptyIdx >= 0 ? firstNonEmptyIdx : 0;
+
+    return linesRuns.map((runs, idx) => ({
+      text: normalizeText(runs.map((r) => r.text).join("")),
+      runs,
+      mediaRefs: idx === mediaTargetIdx ? para.mediaRefs : [],
+      paragraphShading: para.paragraphShading,
+      numId: idx === 0 ? para.numId : null,
+      ilvl: idx === 0 ? para.ilvl : 0,
+    }));
+  };
+
+  const processSingleParagraph = (para: DocxParagraph): void => {
     const trimmed = para.text.trim();
     if (!trimmed && para.mediaRefs.length === 0) {
       sawBlankParagraph = true;
@@ -1380,6 +1461,13 @@ export async function parseDocxBuffer(
         current.rawLines.push(para.text);
       }
       sawBlankParagraph = false;
+    }
+  };
+
+  const processParagraph = (para: DocxParagraph): void => {
+    const subParagraphs = splitParagraphOnLineBreaks(para);
+    for (const sub of subParagraphs) {
+      processSingleParagraph(sub);
     }
   };
 

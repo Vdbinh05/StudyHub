@@ -143,8 +143,10 @@ export function validateParsedQuestion(
 }
 
 export interface ValidateBatchOptions {
-  /** Normalized or raw prompts already existing in the target Study Set */
+  /** Legacy plain prompts already existing in the target Study Set */
   existingPrompts?: readonly string[];
+  /** Full duplicate fingerprints (`computeQuestionDuplicateFingerprint`) already in target Study Set */
+  existingFingerprints?: readonly string[];
   globalIssues?: readonly ImportValidationIssue[];
 }
 
@@ -156,20 +158,74 @@ export interface ValidateBatchResult {
 }
 
 /**
+ * Compute a deterministic duplicate fingerprint for a question using:
+ *   normalizedPrompt + normalizedSortedOptions + normalizedSortedCorrectAnswers
+ * (or normalizedPrompt + normalizedAcceptedAnswers/backText for flashcards & short answer).
+ *
+ * Two questions that share a short stem (e.g. "Which cloud type is shown?") but have
+ * distinct options or different correct answers will NEVER falsely collide.
+ */
+export function computeQuestionDuplicateFingerprint(input: {
+  prompt: string;
+  backText?: string | null;
+  options?: readonly { content: string; isCorrect: boolean }[];
+  acceptedAnswers?: readonly { answerText: string }[];
+}): string {
+  const normPrompt = normalizeForComparison(input.prompt);
+  if (!normPrompt) return "";
+
+  const normalizedOptions = (input.options ?? [])
+    .map((opt) => ({
+      text: normalizeForComparison(opt.content),
+      isCorrect: Boolean(opt.isCorrect),
+    }))
+    .filter((opt) => opt.text.length > 0);
+
+  if (normalizedOptions.length > 0) {
+    const sortedOptions = normalizedOptions
+      .map((o) => o.text)
+      .sort()
+      .join("\u001f");
+    const sortedCorrect = normalizedOptions
+      .filter((o) => o.isCorrect)
+      .map((o) => o.text)
+      .sort()
+      .join("\u001f");
+    return `choice::${normPrompt}::${sortedOptions}::${sortedCorrect}`;
+  }
+
+  const sortedAccepted = (input.acceptedAnswers ?? [])
+    .map((a) => normalizeForComparison(a.answerText))
+    .filter(Boolean)
+    .sort()
+    .join("\u001f");
+  const normBack = normalizeForComparison(input.backText ?? "");
+  return `text::${normPrompt}::${sortedAccepted || normBack}`;
+}
+
+/**
  * Validate an entire parsed question batch deterministically:
  * - Preserves original question order
- * - Detects duplicates within batch AND against existing study set prompts
+ * - Detects genuine duplicates (prompt + options + correct answer) within batch
+ *   AND against existing study set fingerprints/prompts
  * - Computes accurate summary counters
  */
 export function validateImportBatch(
   questions: readonly ParsedQuestion[],
   options: ValidateBatchOptions = {},
 ): ValidateBatchResult {
-  const existingSet = new Set<string>();
+  const existingPromptSet = new Set<string>();
   if (options.existingPrompts) {
     for (const p of options.existingPrompts) {
       const norm = normalizeForComparison(p);
-      if (norm) existingSet.add(norm);
+      if (norm) existingPromptSet.add(norm);
+    }
+  }
+
+  const existingFingerprintSet = new Set<string>();
+  if (options.existingFingerprints) {
+    for (const fp of options.existingFingerprints) {
+      if (fp) existingFingerprintSet.add(fp);
     }
   }
 
@@ -184,18 +240,28 @@ export function validateImportBatch(
     }
 
     const normPrompt = normalizeForComparison(q.prompt);
+    const fingerprint = computeQuestionDuplicateFingerprint({
+      prompt: q.prompt,
+      backText: q.backText,
+      options: q.options,
+      acceptedAnswers: q.acceptedAnswers,
+    });
+
     let isDuplicate = false;
     let duplicateReason: string | undefined;
 
-    if (normPrompt) {
-      if (existingSet.has(normPrompt)) {
+    if (fingerprint) {
+      if (
+        existingFingerprintSet.has(fingerprint) ||
+        (normPrompt && existingPromptSet.has(normPrompt))
+      ) {
         isDuplicate = true;
         duplicateReason = `Question #${i + 1} already exists in this study set.`;
-      } else if (seenInBatch.has(normPrompt)) {
+      } else if (seenInBatch.has(fingerprint)) {
         isDuplicate = true;
-        duplicateReason = `Question #${i + 1} duplicates question #${seenInBatch.get(normPrompt)! + 1} in this import batch.`;
+        duplicateReason = `Question #${i + 1} duplicates question #${seenInBatch.get(fingerprint)! + 1} in this import batch.`;
       } else {
-        seenInBatch.set(normPrompt, i);
+        seenInBatch.set(fingerprint, i);
       }
     }
 

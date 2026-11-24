@@ -89,6 +89,18 @@ function exportToJson(
   };
 }
 
+/**
+ * Neutralize OWASP CSV Formula Injection (CWE-1236) triggers (`=`, `+`, `-`, `@`, `\t`, `\r`)
+ * by prefixing a single quote `'`, while preserving pure negative numeric literals (e.g. `-1`, `-273.15`).
+ */
+export function sanitizeCsvCell(value: string): string {
+  if (!value) return value;
+  if (/^[=+\-@\t\r]/.test(value) && !/^-\d+(?:\.\d+)?$/.test(value)) {
+    return `'${value}`;
+  }
+  return value;
+}
+
 function exportToCsv(
   studySet: Pick<StudySet, "title">,
   questions: readonly Question[],
@@ -116,7 +128,9 @@ function exportToCsv(
 
   for (const q of questions) {
     const options = sortedOptions(q);
-    const optCells = Array.from({ length: 6 }, (_, idx) => options[idx]?.content ?? "");
+    const optCells = Array.from({ length: 6 }, (_, idx) =>
+      sanitizeCsvCell(options[idx]?.content ?? ""),
+    );
     const correctLetters = options
       .map((opt, idx) =>
         opt.is_correct ? opt.label || indexToOptionLabel(idx) : null,
@@ -132,18 +146,22 @@ function exportToCsv(
           "");
 
     rows.push([
-      opts.includeChapters === false ? "" : (q.chapter ?? ""),
+      sanitizeCsvCell(opts.includeChapters === false ? "" : (q.chapter ?? "")),
       q.question_type,
-      q.prompt,
+      sanitizeCsvCell(q.prompt),
       ...optCells,
-      correctValue,
-      q.back_text ?? "",
-      opts.includeExplanations === false ? "" : (q.explanation ?? ""),
-      q.hint ?? "",
+      sanitizeCsvCell(correctValue),
+      sanitizeCsvCell(q.back_text ?? ""),
+      sanitizeCsvCell(
+        opts.includeExplanations === false ? "" : (q.explanation ?? ""),
+      ),
+      sanitizeCsvCell(q.hint ?? ""),
       opts.includeDifficulty === false ? "" : q.difficulty,
-      opts.includeTags === false
-        ? ""
-        : (q.tags ?? []).map((t) => t.name).join(", "),
+      sanitizeCsvCell(
+        opts.includeTags === false
+          ? ""
+          : (q.tags ?? []).map((t) => t.name).join(", "),
+      ),
     ]);
   }
 

@@ -4,11 +4,9 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useTheme } from "next-themes";
 import {
-  AlertCircle,
   BarChart3,
-  BookMarked,
+  BookOpenCheck,
   Clock,
   FileCheck2,
   FolderPlus,
@@ -16,6 +14,7 @@ import {
   Home,
   Layers,
   Library,
+  LogIn,
   LogOut,
   Menu,
   PanelLeftClose,
@@ -53,11 +52,13 @@ import {
 } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 import type { Locale, Profile, ThemePreference, UserPreferences } from "@/types/domain";
 import { apiFetch, ApiError, isSupabaseConfiguredClient } from "./api-client";
 import { BrandLogo } from "./brand-logo";
 import { LanguageToggle } from "./language-toggle";
+import { ServiceSetupNotice } from "./service-setup-notice";
 import { ThemeToggle } from "./theme-toggle";
 
 interface NavItem {
@@ -66,6 +67,8 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   labelVi: string;
   labelEn: string;
+  shortLabelVi?: string;
+  shortLabelEn?: string;
   group: "core" | "study" | "activity" | "social" | "system";
   match: (pathname: string, searchParams: URLSearchParams) => boolean;
 }
@@ -84,46 +87,55 @@ const NAV_ITEMS: NavItem[] = [
     id: "library",
     href: "/library",
     icon: Library,
-    labelVi: "Thư viện của tôi",
-    labelEn: "My Library",
+    labelVi: "Thư viện",
+    labelEn: "Library",
     group: "core",
-    match: (p, sp) =>
-      (p === "/library" && !sp.get("type") && !sp.get("action")) ||
-      p.startsWith("/folders/"),
+    match: (p) =>
+      p === "/library" ||
+      p === "/folders" ||
+      p.startsWith("/folders/") ||
+      p === "/import" ||
+      p === "/sets/new",
   },
   {
-    id: "question-bank",
-    href: "/library?type=multiple_choice",
-    icon: BookMarked,
-    labelVi: "Ngân hàng câu hỏi",
-    labelEn: "Question Bank",
-    group: "core",
-    match: (p, sp) => p === "/library" && sp.get("type") === "multiple_choice",
-  },
-  {
-    id: "flashcards",
-    href: "/library?type=flashcards",
-    icon: Layers,
-    labelVi: "Flashcards",
-    labelEn: "Flashcards",
-    group: "study",
-    match: (p, sp) => p === "/library" && sp.get("type") === "flashcards",
-  },
-  {
-    id: "mock-exams",
-    href: "/library?action=test",
+    id: "custom-exam",
+    href: "/exams/new",
     icon: FileCheck2,
-    labelVi: "Thi thử",
-    labelEn: "Mock Exams",
+    labelVi: "Thi thử tùy chỉnh",
+    labelEn: "Custom Exam",
+    shortLabelVi: "Thi thử mới",
+    shortLabelEn: "Custom Exam",
     group: "study",
-    match: (p, sp) => p === "/library" && sp.get("action") === "test",
+    match: (p) => p === "/exams/new",
+  },
+  {
+    id: "practice",
+    href: "/practice",
+    icon: BookOpenCheck,
+    labelVi: "Luyện tập",
+    labelEn: "Practice",
+    group: "study",
+    match: (p) => p === "/practice",
+  },
+  {
+    id: "exams-hub",
+    href: "/exams",
+    icon: Layers,
+    labelVi: "Đề & Chu kỳ thi",
+    labelEn: "Exams & Cycles",
+    shortLabelVi: "Đề & Chu kỳ",
+    shortLabelEn: "Exams & Cycles",
+    group: "study",
+    match: (p) => p === "/exams",
   },
   {
     id: "review",
     href: "/review",
     icon: RotateCcw,
-    labelVi: "Câu hỏi đã sai",
+    labelVi: "Câu đã sai",
     labelEn: "Review Mistakes",
+    shortLabelVi: "Ôn câu sai",
+    shortLabelEn: "Mistakes",
     group: "study",
     match: (p) => p === "/review",
   },
@@ -131,8 +143,10 @@ const NAV_ITEMS: NavItem[] = [
     id: "starred",
     href: "/starred",
     icon: Star,
-    labelVi: "Câu hỏi đánh dấu",
+    labelVi: "Đánh dấu sao",
     labelEn: "Starred",
+    shortLabelVi: "Gắn sao",
+    shortLabelEn: "Starred",
     group: "study",
     match: (p) => p === "/starred",
   },
@@ -140,8 +154,8 @@ const NAV_ITEMS: NavItem[] = [
     id: "history",
     href: "/history",
     icon: History,
-    labelVi: "Lịch sử học tập",
-    labelEn: "Study History",
+    labelVi: "Lịch sử",
+    labelEn: "History",
     group: "activity",
     match: (p) => p === "/history",
   },
@@ -158,8 +172,8 @@ const NAV_ITEMS: NavItem[] = [
     id: "shared",
     href: "/shared",
     icon: Share2,
-    labelVi: "Được chia sẻ với tôi",
-    labelEn: "Shared with Me",
+    labelVi: "Được chia sẻ",
+    labelEn: "Shared",
     group: "social",
     match: (p) => p === "/shared",
   },
@@ -179,12 +193,14 @@ const NAV_ITEMS: NavItem[] = [
     labelVi: "Cài đặt",
     labelEn: "Settings",
     group: "system",
-    match: (p) => p === "/settings" || p === "/profile",
+    // Strictly match /settings so /profile does NOT wrongly highlight Settings
+    match: (p) => p === "/settings",
   },
 ];
 
+// Focus routes render their own single <main id="main-content"> and focus header
 const FOCUS_ROUTE_PATTERN =
-  /^\/sets\/[^/]+\/(flashcards|learn|practice|write|match|test)(?:\/|$)/;
+  /^(\/sets\/[^/]+\/(flashcards|learn|practice|write|match|test|results)(?:\/|$)|\/exams\/(?!new(?:\/|$))[^/]+(?:\/|$))/;
 
 const SIDEBAR_STORAGE_KEY = "studyhub-sidebar-collapsed";
 const sidebarListeners = new Set<() => void>();
@@ -236,8 +252,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { locale, setLocale, t } = useI18n();
-  const { setTheme } = useTheme();
+  const { locale, t } = useI18n();
+  const { updatePreferences } = useUserPreferences();
 
   const collapsed = React.useSyncExternalStore(
     subscribeSidebar,
@@ -247,7 +263,6 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const [mobileMoreOpen, setMobileMoreOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [signingOut, setSigningOut] = React.useState(false);
-  const syncedPrefsRef = React.useRef(false);
 
   const toggleSidebar = () => {
     writeSidebarCollapsed(!collapsed);
@@ -256,7 +271,11 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const isFocusRoute = FOCUS_ROUTE_PATTERN.test(pathname);
   const supabaseConfigured = isSupabaseConfiguredClient();
 
-  const { data: profileData, error: profileError } = useQuery<ProfileBundle | null>({
+  const {
+    data: profileData,
+    error: profileError,
+    isLoading: profileLoading,
+  } = useQuery<ProfileBundle | null>({
     queryKey: ["current-profile"],
     enabled: supabaseConfigured && !isFocusRoute,
     retry: false,
@@ -277,54 +296,6 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
       }
     },
   });
-
-  const { data: prefsData } = useQuery<UserPreferences | null>({
-    queryKey: ["user-preferences"],
-    enabled: supabaseConfigured && !isFocusRoute && Boolean(profileData?.profile),
-    retry: false,
-    staleTime: 60_000,
-    queryFn: async () => {
-      try {
-        const res = await apiFetch<UserPreferences>("/api/preferences");
-        return res.data;
-      } catch {
-        return null;
-      }
-    },
-  });
-
-  const activePreferences = prefsData ?? profileData?.preferences ?? null;
-
-  React.useEffect(() => {
-    if (!activePreferences || syncedPrefsRef.current) return;
-    syncedPrefsRef.current = true;
-    if (activePreferences.language === "vi" || activePreferences.language === "en") {
-      setLocale(activePreferences.language);
-    }
-    if (
-      activePreferences.theme === "light" ||
-      activePreferences.theme === "dark" ||
-      activePreferences.theme === "system"
-    ) {
-      setTheme(activePreferences.theme);
-    }
-  }, [activePreferences, setLocale, setTheme]);
-
-  const persistPreference = React.useCallback(
-    async (patch: Partial<Pick<UserPreferences, "language" | "theme">>) => {
-      if (!supabaseConfigured || !profileData?.profile) return;
-      try {
-        await apiFetch("/api/preferences", {
-          method: "PATCH",
-          body: JSON.stringify(patch),
-        });
-        queryClient.invalidateQueries({ queryKey: ["user-preferences"] });
-      } catch {
-        // Non-blocking preference sync
-      }
-    },
-    [supabaseConfigured, profileData?.profile, queryClient],
-  );
 
   const handleGlobalSearch = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -353,12 +324,11 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Focus mode routes provide their own single <main id="main-content">
   if (isFocusRoute) {
     return (
-      <div className="bg-background text-foreground min-h-screen overflow-x-clip">
-        <main id="main-content" className="min-h-screen">
-          {children}
-        </main>
+      <div className="bg-background text-foreground min-h-dvh overflow-x-clip">
+        {children}
       </div>
     );
   }
@@ -374,6 +344,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     (profileError instanceof ApiError &&
       profileError.code === "SUPABASE_NOT_CONFIGURED");
 
+  const hideTopbarSearch = pathname === "/library";
+
   const renderNavLink = (item: NavItem, onNavigate?: () => void) => {
     const active = item.match(pathname, searchParams);
     const Icon = item.icon;
@@ -385,22 +357,23 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         href={item.href}
         onClick={onNavigate}
         aria-current={active ? "page" : undefined}
+        aria-label={collapsed ? label : undefined}
         className={cn(
-          "group relative flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+          "group relative flex min-h-10 items-center gap-3 rounded-lg border-l-[3px] px-3 py-2 text-sm font-medium transition-colors",
           active
-            ? "bg-accent text-accent-foreground font-semibold"
-            : "text-muted-foreground hover:bg-secondary hover:text-foreground",
-          collapsed && "justify-center px-2",
+            ? "border-primary bg-accent text-accent-foreground font-semibold"
+            : "text-muted-foreground hover:bg-secondary hover:text-foreground border-transparent",
+          collapsed && "justify-center border-l-0 px-2",
         )}
       >
-        {active && (
+        {active && collapsed && (
           <span
             aria-hidden="true"
-            className="bg-primary absolute inset-y-1.5 left-0 w-1 rounded-r-full"
+            className="border-primary absolute inset-y-1.5 left-0 border-l-[3px]"
           />
         )}
         <Icon className="size-4 shrink-0" aria-hidden="true" />
-        {!collapsed && <span className="truncate">{label}</span>}
+        <span className={collapsed ? "sr-only" : "truncate"}>{label}</span>
       </Link>
     );
 
@@ -415,40 +388,112 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     return linkEl;
   };
 
+  // Mobile 1-hand 5-tab bar: Dashboard | Library | Custom Exam (center) | Review | More
   const mobileTabs = [
     {
       href: "/dashboard",
       icon: Home,
       label: locale === "vi" ? "Tổng quan" : "Home",
       active: pathname === "/dashboard",
+      featured: false,
     },
     {
       href: "/library",
       icon: Library,
       label: locale === "vi" ? "Thư viện" : "Library",
-      active: pathname.startsWith("/library") || pathname.startsWith("/folders"),
+      active:
+        pathname.startsWith("/library") ||
+        pathname.startsWith("/folders") ||
+        pathname === "/import",
+      featured: false,
+    },
+    {
+      href: "/exams/new",
+      icon: FileCheck2,
+      label: locale === "vi" ? "Thi thử" : "Exam",
+      active: pathname === "/exams/new" || pathname === "/exams",
+      featured: true,
     },
     {
       href: "/review",
       icon: RotateCcw,
-      label: locale === "vi" ? "Ôn tập" : "Review",
-      active: pathname === "/review" || pathname === "/starred",
+      label: locale === "vi" ? "Ôn sai" : "Review",
+      active: pathname === "/review" || pathname === "/practice",
+      featured: false,
+    },
+  ];
+
+  // Mobile "More" sheet items with crisp non-truncating labels
+  const mobileSheetLinks = [
+    {
+      href: "/exams",
+      icon: Layers,
+      label: locale === "vi" ? "Đề & Chu kỳ" : "Exams & Cycles",
+      active: pathname === "/exams",
+    },
+    {
+      href: "/practice",
+      icon: BookOpenCheck,
+      label: locale === "vi" ? "Luyện tập" : "Practice",
+      active: pathname === "/practice",
+    },
+    {
+      href: "/starred",
+      icon: Star,
+      label: locale === "vi" ? "Gắn sao" : "Starred",
+      active: pathname === "/starred",
+    },
+    {
+      href: "/history",
+      icon: History,
+      label: locale === "vi" ? "Lịch sử thi" : "History",
+      active: pathname === "/history",
     },
     {
       href: "/statistics",
       icon: BarChart3,
-      label: locale === "vi" ? "Thống kê" : "Stats",
-      active: pathname === "/statistics" || pathname === "/history",
+      label: locale === "vi" ? "Thống kê" : "Statistics",
+      active: pathname === "/statistics",
+    },
+    {
+      href: "/shared",
+      icon: Share2,
+      label: locale === "vi" ? "Được chia sẻ" : "Shared",
+      active: pathname === "/shared",
+    },
+    {
+      href: "/friends",
+      icon: Users,
+      label: locale === "vi" ? "Bạn bè" : "Friends",
+      active: pathname === "/friends",
+    },
+    {
+      href: "/import",
+      icon: Upload,
+      label: locale === "vi" ? "Nhập từ file" : "Import File",
+      active: pathname === "/import",
+    },
+    {
+      href: "/profile",
+      icon: User,
+      label: locale === "vi" ? "Hồ sơ" : "Profile",
+      active: pathname === "/profile",
+    },
+    {
+      href: "/settings",
+      icon: Settings,
+      label: locale === "vi" ? "Cài đặt" : "Settings",
+      active: pathname === "/settings",
     },
   ];
 
   return (
-    <div className="bg-background text-foreground flex min-h-screen w-full overflow-x-clip">
+    <div className="bg-background text-foreground flex min-h-dvh w-full overflow-x-clip">
       {/* Desktop Collapsible Sidebar */}
       <aside
-        aria-label={locale === "vi" ? "Điều hướng chính" : "Primary navigation"}
+        aria-label={locale === "vi" ? "Chính" : "Primary"}
         className={cn(
-          "border-sidebar-border bg-sidebar hidden shrink-0 flex-col border-r lg:sticky lg:top-0 lg:flex lg:h-screen",
+          "border-sidebar-border bg-sidebar hidden shrink-0 flex-col border-r lg:sticky lg:top-0 lg:flex lg:h-dvh",
           collapsed ? "w-[68px]" : "w-[248px]",
         )}
       >
@@ -482,25 +527,29 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           {collapsed ? (
             <Tooltip delayDuration={150}>
               <TooltipTrigger asChild>
-                <Button asChild size="icon" className="w-full">
-                  <Link href="/sets/new" aria-label={t("library.newSet")}>
-                    <Plus className="size-4" aria-hidden="true" />
+                <Button asChild variant="outline" size="icon" className="w-full">
+                  <Link href="/exams/new" aria-label={t("nav.customExam")}>
+                    <FileCheck2 className="size-4" aria-hidden="true" />
+                    <span className="sr-only">{t("nav.customExam")}</span>
                   </Link>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right">{t("library.newSet")}</TooltipContent>
+              <TooltipContent side="right">{t("nav.customExam")}</TooltipContent>
             </Tooltip>
           ) : (
-            <Button asChild className="w-full justify-start gap-2">
-              <Link href="/sets/new">
-                <Plus className="size-4" aria-hidden="true" />
-                <span>{t("library.newSet")}</span>
+            <Button asChild variant="outline" className="w-full justify-start gap-2">
+              <Link href="/exams/new">
+                <FileCheck2 className="text-primary size-4" aria-hidden="true" />
+                <span>{t("nav.customExam")}</span>
               </Link>
             </Button>
           )}
         </div>
 
-        <nav className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4">
+        <nav
+          aria-label={locale === "vi" ? "Danh mục học tập" : "Study sections"}
+          className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4"
+        >
           {NAV_ITEMS.filter((i) => i.group === "core").map((item) =>
             renderNavLink(item),
           )}
@@ -550,25 +599,25 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               <BrandLogo />
             </Link>
 
-            <form
-              onSubmit={handleGlobalSearch}
-              role="search"
-              className="relative hidden max-w-md flex-1 sm:block"
-            >
-              <Search
-                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                aria-hidden="true"
-              />
-              <Input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                enterKeyHint="search"
-                placeholder={t("library.searchPlaceholder")}
-                aria-label={t("library.searchPlaceholder")}
-                className="bg-background h-9 pl-9"
-              />
-            </form>
+            {!hideTopbarSearch && (
+              <search className="hidden max-w-md flex-1 sm:block">
+                <form onSubmit={handleGlobalSearch} className="relative">
+                  <Search
+                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    enterKeyHint="search"
+                    placeholder={t("library.searchPlaceholder")}
+                    aria-label={t("library.searchPlaceholder")}
+                    className="bg-background h-9 pl-9"
+                  />
+                </form>
+              </search>
+            )}
           </div>
 
           <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
@@ -576,8 +625,9 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
+                  variant="outline"
                   size="sm"
-                  className="h-9 gap-1.5 px-2.5 sm:px-3"
+                  className="min-h-11 min-w-11 gap-1.5 px-2.5 sm:min-h-9 sm:min-w-0 sm:px-3"
                   aria-label={locale === "vi" ? "Tạo nhanh" : "Quick create"}
                 >
                   <Plus className="size-4" aria-hidden="true" />
@@ -586,15 +636,27 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                   </span>
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
                   {locale === "vi" ? "Tạo nhanh" : "Quick Create"}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
+                  <Link href="/exams/new">
+                    <FileCheck2 className="size-4" aria-hidden="true" />
+                    <span>{t("nav.customExam")}</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
                   <Link href="/sets/new">
                     <Plus className="size-4" aria-hidden="true" />
                     <span>{t("library.newSet")}</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link href="/import">
+                    <Upload className="size-4" aria-hidden="true" />
+                    <span>{t("library.importSet")}</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem asChild>
@@ -603,109 +665,102 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     <span>{t("library.newFolder")}</span>
                   </Link>
                 </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/library?action=import">
-                    <Upload className="size-4" aria-hidden="true" />
-                    <span>{t("library.importSet")}</span>
-                  </Link>
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
 
             <LanguageToggle
-              onPersist={(next: Locale) => void persistPreference({ language: next })}
+              onPersist={(next: Locale) => void updatePreferences({ language: next })}
             />
             <ThemeToggle
               compact
-              onPersist={(next: ThemePreference) => void persistPreference({ theme: next })}
+              onPersist={(next: ThemePreference) =>
+                void updatePreferences({ theme: next })
+              }
             />
 
-            {/* User Menu */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-9 gap-2 rounded-full pr-2 pl-1"
-                  aria-label={locale === "vi" ? "Menu tài khoản" : "Account menu"}
-                >
-                  <Avatar className="size-7">
-                    {profile?.avatar_url ? (
-                      <AvatarImage src={profile.avatar_url} alt={displayName} />
-                    ) : null}
-                    <AvatarFallback className="bg-primary/10 text-primary text-xs">
-                      {getInitials(profile?.display_name, profile?.email)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="hidden max-w-28 truncate text-xs font-medium md:inline">
-                    {displayName}
-                  </span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel className="font-normal">
-                  <div className="flex flex-col space-y-0.5">
-                    <p className="text-foreground truncate text-sm font-semibold">
+            {/* User Menu or Sign-In Link */}
+            {!profile && !profileLoading ? (
+              <Button asChild size="sm" variant="ghost" className="min-h-11 sm:min-h-9">
+                <Link href="/login">
+                  <LogIn className="size-4" aria-hidden="true" />
+                  <span className="hidden sm:inline">{t("nav.signIn")}</span>
+                </Link>
+              </Button>
+            ) : (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="min-h-11 min-w-11 gap-2 rounded-full pr-2 pl-1 sm:min-h-9 sm:min-w-0"
+                    aria-label={locale === "vi" ? "Menu tài khoản" : "Account menu"}
+                  >
+                    <Avatar className="size-7">
+                      {profile?.avatar_url ? (
+                        <AvatarImage src={profile.avatar_url} alt={displayName} />
+                      ) : null}
+                      <AvatarFallback className="bg-primary/10 text-primary text-xs">
+                        {getInitials(profile?.display_name, profile?.email)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="hidden max-w-28 truncate text-xs font-medium md:inline">
                       {displayName}
-                    </p>
-                    {profile?.email && (
-                      <p className="text-muted-foreground truncate text-xs">
-                        {profile.email}
+                    </span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuLabel className="font-normal">
+                    <div className="flex flex-col space-y-0.5">
+                      <p className="text-foreground truncate text-sm font-semibold">
+                        {displayName}
                       </p>
-                    )}
-                  </div>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link href="/profile">
-                    <User className="size-4" aria-hidden="true" />
-                    <span>{t("settings.profileTab")}</span>
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/settings">
-                    <Settings className="size-4" aria-hidden="true" />
-                    <span>{t("nav.settings")}</span>
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/history">
-                    <Clock className="size-4" aria-hidden="true" />
-                    <span>{locale === "vi" ? "Lịch sử học tập" : "Study History"}</span>
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  disabled={signingOut}
-                  onClick={() => void handleSignOut()}
-                >
-                  <LogOut className="size-4" aria-hidden="true" />
-                  <span>{t("nav.signOut")}</span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                      {profile?.email && (
+                        <p className="text-muted-foreground truncate text-xs">
+                          {profile.email}
+                        </p>
+                      )}
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem asChild>
+                    <Link href="/profile">
+                      <User className="size-4" aria-hidden="true" />
+                      <span>{t("settings.profileTab")}</span>
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href="/settings">
+                      <Settings className="size-4" aria-hidden="true" />
+                      <span>{t("nav.settings")}</span>
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href="/history">
+                      <Clock className="size-4" aria-hidden="true" />
+                      <span>{t("nav.history")}</span>
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={signingOut}
+                    onClick={() => void handleSignOut()}
+                  >
+                    <LogOut className="size-4" aria-hidden="true" />
+                    <span>{t("nav.signOut")}</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </header>
 
-        {showConfigBanner && (
-          <div
-            role="status"
-            className="border-warning/30 bg-warning-subtle text-warning-subtle-foreground flex items-center gap-2.5 border-b px-4 py-2.5 text-xs sm:px-6 sm:text-sm"
-          >
-            <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
-            <span>
-              {locale === "vi"
-                ? "Supabase chưa được cấu hình (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY). Hãy thiết lập file .env.local để bật xác thực và lưu trữ dữ liệu thật."
-                : "Supabase is not configured (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY). Configure .env.local to enable real authentication and database persistence."}
-            </span>
-          </div>
-        )}
+        {showConfigBanner && <ServiceSetupNotice compact />}
 
-        {/* Primary Page Content */}
+        {/* Primary Page Content — generous mobile bottom padding so bottom nav never clips content */}
         <main
           id="main-content"
-          className="mx-auto w-full max-w-7xl flex-1 px-4 pt-5 pb-24 sm:px-6 sm:pt-6 lg:pb-10"
+          className="mx-auto w-full max-w-7xl flex-1 px-4 pt-5 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))] sm:px-6 sm:pt-6 md:pb-24 lg:pb-10"
         >
           {children}
         </main>
@@ -713,11 +768,11 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
       {/* Mobile One-Hand Bottom Navigation (< 1024px) */}
       <nav
-        aria-label={locale === "vi" ? "Điều hướng di động" : "Mobile navigation"}
+        aria-label={locale === "vi" ? "Thanh dưới" : "Bottom bar"}
         className="border-border bg-card/95 fixed inset-x-0 bottom-0 z-40 border-t backdrop-blur-xs lg:hidden"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        style={{ paddingBottom: "max(0.25rem, env(safe-area-inset-bottom, 0px))" }}
       >
-        <div className="grid h-16 grid-cols-5 items-center px-1">
+        <div className="grid h-16 grid-cols-5 items-stretch px-1">
           {mobileTabs.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -726,14 +781,15 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                 href={tab.href}
                 aria-current={tab.active ? "page" : undefined}
                 className={cn(
-                  "flex min-h-11 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-[11px] font-medium transition-colors",
+                  "flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 px-1 py-1.5 text-[11px] font-medium transition-colors",
                   tab.active
-                    ? "text-primary font-semibold"
-                    : "text-muted-foreground hover:text-foreground",
+                    ? "border-primary text-primary font-semibold"
+                    : "text-muted-foreground hover:text-foreground border-transparent",
+                  tab.featured && !tab.active && "text-foreground",
                 )}
               >
                 <Icon className="size-5 shrink-0" aria-hidden="true" />
-                <span className="max-w-full truncate">{tab.label}</span>
+                <span className="max-w-full truncate leading-none">{tab.label}</span>
               </Link>
             );
           })}
@@ -742,16 +798,19 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             <SheetTrigger asChild>
               <button
                 type="button"
-                className="text-muted-foreground hover:text-foreground flex min-h-11 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-[11px] font-medium transition-colors"
+                className="text-muted-foreground hover:text-foreground flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 border-transparent px-1 py-1.5 text-[11px] font-medium transition-colors"
                 aria-label={t("common.more")}
               >
                 <Menu className="size-5 shrink-0" aria-hidden="true" />
-                <span>{t("common.more")}</span>
+                <span className="leading-none">{t("common.more")}</span>
               </button>
             </SheetTrigger>
-            <SheetContent side="bottom" className="max-h-[82dvh] overflow-y-auto rounded-t-2xl">
+            <SheetContent
+              side="bottom"
+              className="max-h-[84dvh] overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]"
+            >
               <SheetHeader>
-                <SheetTitle>{locale === "vi" ? "Tất cả mục" : "Navigation"}</SheetTitle>
+                <SheetTitle>{locale === "vi" ? "Tất cả mục" : "More"}</SheetTitle>
                 <SheetDescription>
                   {locale === "vi"
                     ? "Truy cập nhanh các tính năng ôn tập, chia sẻ và cài đặt."
@@ -759,42 +818,48 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                 </SheetDescription>
               </SheetHeader>
 
-              <form onSubmit={(e) => { handleGlobalSearch(e); setMobileMoreOpen(false); }} className="relative mt-2">
-                <Search
-                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                  aria-hidden="true"
-                />
-                <Input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  enterKeyHint="search"
-                  placeholder={t("library.searchPlaceholder")}
-                  aria-label={t("library.searchPlaceholder")}
-                  className="pl-9"
-                />
-              </form>
+              <search className="mt-2">
+                <form
+                  onSubmit={(e) => {
+                    handleGlobalSearch(e);
+                    setMobileMoreOpen(false);
+                  }}
+                  className="relative"
+                >
+                  <Search
+                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    enterKeyHint="search"
+                    placeholder={t("library.searchPlaceholder")}
+                    aria-label={t("library.searchPlaceholder")}
+                    className="pl-9"
+                  />
+                </form>
+              </search>
 
               <div className="mt-3 grid grid-cols-2 gap-2">
-                {NAV_ITEMS.map((item) => {
+                {mobileSheetLinks.map((item) => {
                   const Icon = item.icon;
-                  const active = item.match(pathname, searchParams);
-                  const label = locale === "vi" ? item.labelVi : item.labelEn;
                   return (
                     <Link
-                      key={item.id}
+                      key={item.href}
                       href={item.href}
                       onClick={() => setMobileMoreOpen(false)}
-                      aria-current={active ? "page" : undefined}
+                      aria-current={item.active ? "page" : undefined}
                       className={cn(
-                        "flex min-h-11 items-center gap-2.5 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors",
-                        active
-                          ? "border-primary/40 bg-accent text-accent-foreground font-semibold"
+                        "flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors",
+                        item.active
+                          ? "border-primary bg-accent text-accent-foreground font-semibold"
                           : "border-border bg-card text-foreground hover:bg-secondary",
                       )}
                     >
                       <Icon className="size-4 shrink-0" aria-hidden="true" />
-                      <span className="truncate">{label}</span>
+                      <span className="leading-snug">{item.label}</span>
                     </Link>
                   );
                 })}
@@ -805,25 +870,31 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
                 <div className="flex items-center gap-2">
                   <LanguageToggle
-                    onPersist={(next: Locale) => void persistPreference({ language: next })}
+                    onPersist={(next: Locale) =>
+                      void updatePreferences({ language: next })
+                    }
                   />
                   <ThemeToggle
-                    onPersist={(next: ThemePreference) => void persistPreference({ theme: next })}
+                    onPersist={(next: ThemePreference) =>
+                      void updatePreferences({ theme: next })
+                    }
                   />
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={signingOut}
-                  onClick={() => {
-                    setMobileMoreOpen(false);
-                    void handleSignOut();
-                  }}
-                  className="text-destructive border-destructive/30 hover:bg-destructive-subtle"
-                >
-                  <LogOut className="size-4" aria-hidden="true" />
-                  <span>{t("nav.signOut")}</span>
-                </Button>
+                {profile && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={signingOut}
+                    onClick={() => {
+                      setMobileMoreOpen(false);
+                      void handleSignOut();
+                    }}
+                    className="text-destructive border-destructive/30 hover:bg-destructive-subtle min-h-11"
+                  >
+                    <LogOut className="size-4" aria-hidden="true" />
+                    <span>{t("nav.signOut")}</span>
+                  </Button>
+                )}
               </div>
             </SheetContent>
           </Sheet>
@@ -837,7 +908,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <React.Suspense
       fallback={
-        <div className="bg-background min-h-screen w-full" aria-busy="true" />
+        <div className="bg-background min-h-dvh w-full" aria-busy="true" />
       }
     >
       <AppShellInner>{children}</AppShellInner>

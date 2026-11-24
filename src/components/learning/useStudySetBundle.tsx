@@ -26,16 +26,24 @@ export interface StudySetBundle {
   chapters: string[];
 }
 
-export function useStudySetBundle(setId: string) {
+export function useStudySetBundle(
+  setId: string,
+  options?: { enabled?: boolean; maxQuestions?: number },
+) {
   const queryClient = useQueryClient();
+  const enabled = options?.enabled ?? true;
+  const maxQuestions = options?.maxQuestions ?? 10_000;
 
   const query = useQuery<StudySetBundle>({
-    queryKey: ["study-set-bundle", setId],
+    queryKey: ["study-set-bundle", setId, maxQuestions],
+    enabled: Boolean(setId) && enabled,
     queryFn: async () => {
       const [studySet, questions, progressList, starredList] = await Promise.all([
         fetchStudySet(setId),
-        fetchStudySetQuestions(setId),
-        fetchSetProgress(setId).catch(() => [] as UserQuestionProgress[]),
+        fetchStudySetQuestions(setId, maxQuestions),
+        fetchSetProgress(setId, maxQuestions).catch(
+          () => [] as UserQuestionProgress[],
+        ),
         fetchStarredQuestions(setId).catch(() => []),
       ]);
 
@@ -65,10 +73,8 @@ export function useStudySetBundle(setId: string) {
 
   const toggleStar = React.useCallback(
     async (questionId: string) => {
-      const previous = queryClient.getQueryData<StudySetBundle>([
-        "study-set-bundle",
-        setId,
-      ]);
+      const queryKey = ["study-set-bundle", setId, maxQuestions];
+      const previous = queryClient.getQueryData<StudySetBundle>(queryKey);
 
       // Optimistic toggle
       if (previous) {
@@ -78,7 +84,7 @@ export function useStudySetBundle(setId: string) {
         } else {
           nextSet.add(questionId);
         }
-        queryClient.setQueryData<StudySetBundle>(["study-set-bundle", setId], {
+        queryClient.setQueryData<StudySetBundle>(queryKey, {
           ...previous,
           starredIds: nextSet,
         });
@@ -88,18 +94,18 @@ export function useStudySetBundle(setId: string) {
         await toggleStarQuestion(questionId, setId);
       } catch (err) {
         if (previous) {
-          queryClient.setQueryData(["study-set-bundle", setId], previous);
+          queryClient.setQueryData(queryKey, previous);
         }
         throw err;
       }
     },
-    [queryClient, setId],
+    [maxQuestions, queryClient, setId],
   );
 
   const updateLocalProgress = React.useCallback(
     (progress: UserQuestionProgress) => {
       queryClient.setQueryData<StudySetBundle>(
-        ["study-set-bundle", setId],
+        ["study-set-bundle", setId, maxQuestions],
         (prev) => {
           if (!prev) return prev;
           const nextMap = new Map(prev.progressMap);
@@ -108,7 +114,7 @@ export function useStudySetBundle(setId: string) {
         },
       );
     },
-    [queryClient, setId],
+    [maxQuestions, queryClient, setId],
   );
 
   return {

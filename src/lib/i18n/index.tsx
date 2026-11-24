@@ -144,4 +144,8 @@ export function useI18n(): I18nContextValue {
   return context;
 }
 
+export function useOptionalI18n(): I18nContextValue | null {
+  return React.useContext(I18nContext);
+}
+
 export type { Dictionary, Locale, TranslationKey, TranslationParams };

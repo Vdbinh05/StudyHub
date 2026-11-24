@@ -1,81 +1,148 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
+import { stripPreSubmitQuestions } from "@/lib/supabase/exam-engine";
 import {
   rpcGetExamAttemptDetail,
+  rpcSubmitExamAttempt,
   type ExamAttemptPayload,
 } from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
-import type { ExamSnapshotQuestion } from "@/types/domain";
+import type {
+  ExamChapterBreakdown,
+  ExamSubjectBreakdown,
+  ExamTagBreakdown,
+} from "@/types/domain";
 
 interface RouteContext {
   params: Promise<{ attemptId: string }>;
 }
 
-function sanitizeInProgressQuestions(
-  questions: ExamSnapshotQuestion[],
-): ExamSnapshotQuestion[] {
-  return questions.map((q) => ({
-    id: q.id,
-    attempt_id: q.attempt_id,
-    question_id: q.question_id,
-    position: q.position,
-    question_type: q.question_type,
-    chapter_snapshot: q.chapter_snapshot,
-    prompt_snapshot: q.prompt_snapshot,
-    prompt_image_url_snapshot: q.prompt_image_url_snapshot,
-    options_snapshot: (q.options_snapshot ?? []).map((opt) => ({
-      id: opt.id,
-      label: opt.label,
-      content: opt.content,
-      image_url: opt.image_url ?? null,
-      position: opt.position,
-    })),
-    created_at: q.created_at,
-  }));
-}
-
-function buildChapterBreakdown(payload: ExamAttemptPayload) {
+function buildFallbackBreakdowns(payload: ExamAttemptPayload): {
+  subject_breakdown: ExamSubjectBreakdown[];
+  chapter_breakdown: ExamChapterBreakdown[];
+  tag_breakdown: ExamTagBreakdown[];
+} {
   const answerByQId = new Map(
-    payload.answers.map((a) => [a.attempt_question_id, a]),
+    (payload.answers ?? []).map((a) => [a.attempt_question_id, a]),
   );
 
   const chapterMap = new Map<
     string,
-    { chapter: string; total: number; correct: number; wrong: number; unanswered: number }
+    {
+      study_set_id?: string | null;
+      subject_title?: string | null;
+      chapter: string;
+      total: number;
+      correct: number;
+      wrong: number;
+      unanswered: number;
+    }
   >();
 
-  for (const q of payload.questions) {
-    const key = q.chapter_snapshot?.trim() || "Uncategorized";
-    const entry = chapterMap.get(key) ?? {
-      chapter: key,
-      total: 0,
-      correct: 0,
-      wrong: 0,
-      unanswered: 0,
-    };
-    entry.total += 1;
+  const subjectMap = new Map<
+    string,
+    {
+      study_set_id: string | null;
+      subject_title: string;
+      total: number;
+      correct: number;
+      wrong: number;
+      unanswered: number;
+    }
+  >();
+
+  const tagMap = new Map<
+    string,
+    {
+      tag_id: string;
+      tag_name: string;
+      total: number;
+      correct: number;
+      wrong: number;
+      unanswered: number;
+    }
+  >();
+
+  for (const q of payload.questions ?? []) {
     const ans = answerByQId.get(q.id);
     const hasAns =
       ans !== undefined &&
       ((ans.selected_option_ids && ans.selected_option_ids.length > 0) ||
         Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0));
+    const correct = hasAns && Boolean(ans?.is_correct);
 
-    if (!hasAns) {
-      entry.unanswered += 1;
-    } else if (ans.is_correct) {
-      entry.correct += 1;
-    } else {
-      entry.wrong += 1;
+    // Chapter breakdown (preserves exact V1 shape when source_study_set_id is absent)
+    const chapName = q.chapter_snapshot?.trim() || "Uncategorized";
+    const chapKey = q.source_study_set_id
+      ? `${q.source_study_set_id}::${chapName}`
+      : chapName;
+    const chapEntry = chapterMap.get(chapKey) ?? {
+      ...(q.source_study_set_id !== undefined
+        ? {
+            study_set_id: q.source_study_set_id,
+            subject_title: q.source_subject_title ?? null,
+          }
+        : {}),
+      chapter: chapName,
+      total: 0,
+      correct: 0,
+      wrong: 0,
+      unanswered: 0,
+    };
+    chapEntry.total += 1;
+    if (!hasAns) chapEntry.unanswered += 1;
+    else if (correct) chapEntry.correct += 1;
+    else chapEntry.wrong += 1;
+    chapterMap.set(chapKey, chapEntry);
+
+    // Subject breakdown
+    if (q.source_study_set_id !== undefined || q.source_subject_title !== undefined) {
+      const sKey = q.source_study_set_id ?? q.source_subject_title ?? "general";
+      const sEntry = subjectMap.get(sKey) ?? {
+        study_set_id: q.source_study_set_id ?? null,
+        subject_title: q.source_subject_title ?? payload.attempt.study_set_title_snapshot,
+        total: 0,
+        correct: 0,
+        wrong: 0,
+        unanswered: 0,
+      };
+      sEntry.total += 1;
+      if (!hasAns) sEntry.unanswered += 1;
+      else if (correct) sEntry.correct += 1;
+      else sEntry.wrong += 1;
+      subjectMap.set(sKey, sEntry);
     }
-    chapterMap.set(key, entry);
+
+    // Tag breakdown
+    for (const tag of q.tags_snapshot ?? []) {
+      const tEntry = tagMap.get(tag.id) ?? {
+        tag_id: tag.id,
+        tag_name: tag.name,
+        total: 0,
+        correct: 0,
+        wrong: 0,
+        unanswered: 0,
+      };
+      tEntry.total += 1;
+      if (!hasAns) tEntry.unanswered += 1;
+      else if (correct) tEntry.correct += 1;
+      else tEntry.wrong += 1;
+      tagMap.set(tag.id, tEntry);
+    }
   }
 
-  return Array.from(chapterMap.values()).map((c) => ({
-    ...c,
+  const withPct = <T extends { total: number; correct: number }>(item: T) => ({
+    ...item,
     accuracy_percent:
-      c.total > 0 ? Math.round((c.correct / c.total) * 10000) / 100 : 0,
-  }));
+      item.total > 0 ? Math.round((item.correct / item.total) * 10000) / 100 : 0,
+  });
+
+  return {
+    subject_breakdown: Array.from(subjectMap.values()).map(withPct),
+    chapter_breakdown: Array.from(chapterMap.values()).map(withPct),
+    tag_breakdown: Array.from(tagMap.values()).map(withPct),
+  };
 }
 
 export async function GET(
@@ -102,33 +169,53 @@ export async function GET(
       detail.attempt.expires_at &&
       serverNowMs > Date.parse(detail.attempt.expires_at)
     ) {
-      const { data: graded, error: submitErr } = await supabase.rpc(
-        "submit_exam_attempt",
-        { p_attempt_id: id },
+      const { data: graded, error: submitErr } = await rpcSubmitExamAttempt(
+        supabase,
+        id,
       );
       if (submitErr) throw submitErr;
-      const gradedPayload = graded as unknown as ExamAttemptPayload;
+      if (!graded) {
+        throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
+      }
+      const fallback = buildFallbackBreakdowns(graded);
       return apiSuccess({
-        ...gradedPayload,
+        ...graded,
+        sources: graded.sources ?? [],
+        subject_breakdown:
+          graded.subject_breakdown && graded.subject_breakdown.length > 0
+            ? graded.subject_breakdown
+            : fallback.subject_breakdown,
+        chapter_breakdown:
+          graded.chapter_breakdown && graded.chapter_breakdown.length > 0
+            ? graded.chapter_breakdown
+            : fallback.chapter_breakdown,
+        tag_breakdown:
+          graded.tag_breakdown && graded.tag_breakdown.length > 0
+            ? graded.tag_breakdown
+            : fallback.tag_breakdown,
         server_now: new Date().toISOString(),
         remaining_seconds: 0,
-        chapter_breakdown: buildChapterBreakdown(gradedPayload),
       });
     }
 
-    if (detail.attempt.status === "in_progress") {
-      const remainingSeconds = detail.attempt.expires_at
-        ? Math.max(
-            0,
-            Math.floor(
-              (Date.parse(detail.attempt.expires_at) - serverNowMs) / 1000,
-            ),
-          )
-        : null;
+    if (
+      detail.attempt.status === "in_progress" ||
+      detail.attempt.status === "discarded"
+    ) {
+      const remainingSeconds =
+        detail.attempt.status === "in_progress" && detail.attempt.expires_at
+          ? Math.max(
+              0,
+              Math.floor(
+                (Date.parse(detail.attempt.expires_at) - serverNowMs) / 1000,
+              ),
+            )
+          : null;
 
       return apiSuccess({
         attempt: detail.attempt,
-        questions: sanitizeInProgressQuestions(detail.questions),
+        sources: detail.sources ?? [],
+        questions: stripPreSubmitQuestions(detail.questions),
         answers: detail.answers.map((a) => ({
           id: a.id,
           attempt_id: a.attempt_id,
@@ -136,6 +223,7 @@ export async function GET(
           selected_option_ids: a.selected_option_ids,
           typed_answer: a.typed_answer,
           is_flagged: a.is_flagged,
+          client_seq: a.client_seq ?? 0,
           updated_at: a.updated_at,
         })),
         server_now: serverNowIso,
@@ -143,11 +231,25 @@ export async function GET(
       });
     }
 
+    const fallback = buildFallbackBreakdowns(detail);
+
     return apiSuccess({
       ...detail,
+      sources: detail.sources ?? [],
+      subject_breakdown:
+        detail.subject_breakdown && detail.subject_breakdown.length > 0
+          ? detail.subject_breakdown
+          : fallback.subject_breakdown,
+      chapter_breakdown:
+        detail.chapter_breakdown && detail.chapter_breakdown.length > 0
+          ? detail.chapter_breakdown
+          : fallback.chapter_breakdown,
+      tag_breakdown:
+        detail.tag_breakdown && detail.tag_breakdown.length > 0
+          ? detail.tag_breakdown
+          : fallback.tag_breakdown,
       server_now: serverNowIso,
       remaining_seconds: 0,
-      chapter_breakdown: buildChapterBreakdown(detail),
     });
   } catch (err) {
     return handleApiError(err);

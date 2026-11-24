@@ -1,14 +1,19 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { exportStudySet, type StudySetExportFormat } from "@/lib/export";
+import { chunkArray } from "@/lib/import";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiError, handleApiError } from "@/lib/security/errors";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
 import type {
   Question,
   QuestionAcceptedAnswer,
   QuestionOption,
   Tag,
 } from "@/types/domain";
+
+const EXPORT_QUESTION_PAGE_SIZE = 500;
+const EXPORT_IN_CHUNK_SIZE = 120;
 
 const ExportQuerySchema = z.object({
   format: z.enum(["json", "csv", "txt", "xlsx"]).default("json"),
@@ -52,16 +57,33 @@ export async function GET(
     });
 
     const { supabase, user } = await requireAuth();
-    const { studySet } = await requireStudySetAccess(
+
+    // Enforce export rate limit (SEC-014)
+    const rateLimited = enforceRateLimit(request, RATE_LIMITS.EXPORT, user.id);
+    if (rateLimited) return rateLimited;
+
+    const access = await requireStudySetAccess(
       supabase,
       studySetId,
       user.id,
       "read",
     );
 
-    // Fetch all questions in 1,000-row pages so large 10,000+ sets export completely
+    // Enforce share-link allow_clone restriction on non-public sets (SEC-012)
+    if (!access.isOwner && !access.canClone) {
+      return apiError(
+        "FORBIDDEN",
+        "Exporting and copying are disabled by the owner of this study set.",
+        403,
+      );
+    }
+
+    const { studySet } = access;
+
+    // Fetch all questions in 500-row pages and chunk .in() batches to <= 120 UUIDs
+    // so 10,000+ question sets never hit PostgREST 1,000-row truncation or HTTP 414 (SH-005).
     const allQuestions: Question[] = [];
-    const PAGE_SIZE = 1000;
+    const tagCache = new Map<string, Tag>();
     let offset = 0;
 
     while (true) {
@@ -70,83 +92,96 @@ export async function GET(
         .select("*")
         .eq("study_set_id", studySetId)
         .order("position", { ascending: true })
-        .range(offset, offset + PAGE_SIZE - 1);
+        .order("id", { ascending: true })
+        .range(offset, offset + EXPORT_QUESTION_PAGE_SIZE - 1);
 
       if (qErr) throw qErr;
       if (!qRows || qRows.length === 0) break;
 
       const qIds = qRows.map((q) => q.id);
-
-      const [optRes, accRes, qtRes] = await Promise.all([
-        supabase
-          .from("question_options")
-          .select("*")
-          .in("question_id", qIds)
-          .order("position", { ascending: true }),
-        supabase
-          .from("question_accepted_answers")
-          .select("*")
-          .in("question_id", qIds),
-        supabase
-          .from("question_tags")
-          .select("question_id, tag_id")
-          .in("question_id", qIds),
-      ]);
-
-      if (optRes.error) throw optRes.error;
-      if (accRes.error) throw accRes.error;
-      if (qtRes.error) throw qtRes.error;
-
       const optionsByQ = new Map<string, QuestionOption[]>();
-      for (const opt of optRes.data ?? []) {
-        const list = optionsByQ.get(opt.question_id);
-        if (list) list.push(opt as QuestionOption);
-        else optionsByQ.set(opt.question_id, [opt as QuestionOption]);
-      }
-
       const accByQ = new Map<string, QuestionAcceptedAnswer[]>();
-      for (const acc of accRes.data ?? []) {
-        const list = accByQ.get(acc.question_id);
-        if (list) list.push(acc as QuestionAcceptedAnswer);
-        else accByQ.set(acc.question_id, [acc as QuestionAcceptedAnswer]);
-      }
+      const tagIdsByQ = new Map<string, string[]>();
+      const missingTagIds = new Set<string>();
 
-      // Resolve tag records if any exist
-      const uniqueTagIds = Array.from(
-        new Set((qtRes.data ?? []).map((r) => r.tag_id)),
-      );
-      const tagMap = new Map<string, Tag>();
-      if (uniqueTagIds.length > 0) {
-        const { data: tagRows, error: tagErr } = await supabase
-          .from("tags")
-          .select("*")
-          .in("id", uniqueTagIds);
-        if (tagErr) throw tagErr;
-        for (const t of tagRows ?? []) {
-          tagMap.set(t.id, t as Tag);
+      for (const idChunk of chunkArray(qIds, EXPORT_IN_CHUNK_SIZE)) {
+        const [optRes, accRes, qtRes] = await Promise.all([
+          supabase
+            .from("question_options")
+            .select("*")
+            .eq("study_set_id", studySetId)
+            .in("question_id", idChunk)
+            .order("position", { ascending: true }),
+          supabase
+            .from("question_accepted_answers")
+            .select("*")
+            .eq("study_set_id", studySetId)
+            .in("question_id", idChunk),
+          supabase
+            .from("question_tags")
+            .select("question_id, tag_id")
+            .eq("study_set_id", studySetId)
+            .in("question_id", idChunk),
+        ]);
+
+        if (optRes.error) throw optRes.error;
+        if (accRes.error) throw accRes.error;
+        if (qtRes.error) throw qtRes.error;
+
+        for (const opt of optRes.data ?? []) {
+          const list = optionsByQ.get(opt.question_id);
+          if (list) list.push(opt as QuestionOption);
+          else optionsByQ.set(opt.question_id, [opt as QuestionOption]);
+        }
+
+        for (const acc of accRes.data ?? []) {
+          const list = accByQ.get(acc.question_id);
+          if (list) list.push(acc as QuestionAcceptedAnswer);
+          else accByQ.set(acc.question_id, [acc as QuestionAcceptedAnswer]);
+        }
+
+        for (const qt of qtRes.data ?? []) {
+          const list = tagIdsByQ.get(qt.question_id);
+          if (list) list.push(qt.tag_id);
+          else tagIdsByQ.set(qt.question_id, [qt.tag_id]);
+          if (!tagCache.has(qt.tag_id)) {
+            missingTagIds.add(qt.tag_id);
+          }
         }
       }
 
-      const tagsByQ = new Map<string, Tag[]>();
-      for (const qt of qtRes.data ?? []) {
-        const tag = tagMap.get(qt.tag_id);
-        if (!tag) continue;
-        const list = tagsByQ.get(qt.question_id);
-        if (list) list.push(tag);
-        else tagsByQ.set(qt.question_id, [tag]);
+      // Resolve any newly seen tags in <= 120-UUID chunks
+      if (missingTagIds.size > 0) {
+        for (const tagChunk of chunkArray(Array.from(missingTagIds), EXPORT_IN_CHUNK_SIZE)) {
+          const { data: tagRows, error: tagErr } = await supabase
+            .from("tags")
+            .select("*")
+            .in("id", tagChunk);
+          if (tagErr) throw tagErr;
+          for (const t of tagRows ?? []) {
+            tagCache.set(t.id, t as Tag);
+          }
+        }
       }
 
       for (const q of qRows) {
+        const qTagIds = tagIdsByQ.get(q.id) ?? [];
+        const qTags: Tag[] = [];
+        for (const tid of qTagIds) {
+          const tag = tagCache.get(tid);
+          if (tag) qTags.push(tag);
+        }
+
         allQuestions.push({
           ...(q as unknown as Question),
           options: optionsByQ.get(q.id) ?? [],
           accepted_answers: accByQ.get(q.id) ?? [],
-          tags: tagsByQ.get(q.id) ?? [],
+          tags: qTags,
         });
       }
 
-      if (qRows.length < PAGE_SIZE) break;
-      offset += PAGE_SIZE;
+      if (qRows.length < EXPORT_QUESTION_PAGE_SIZE) break;
+      offset += EXPORT_QUESTION_PAGE_SIZE;
     }
 
     const exported = await exportStudySet(studySet, allQuestions, {

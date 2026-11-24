@@ -3,13 +3,16 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ============================================================================
- * StudyHub V1.0 — Design System Tokens
+ * StudyHub V2.0 — Design System Tokens
  * Aesthetic: Minimal, calm, academic SaaS (Indigo primary, Blue accent,
  * Green success, Red error, Amber warning, Neutral Slate surfaces).
- * WCAG 2.2 AA contrast & focus rings; prefers-reduced-motion respected.
+ * WCAG 2.2 AA verified contrast (>= 4.5:1 text, >= 3.0:1 UI boundaries);
+ * targeted prefers-reduced-motion & user preference support; print styles.
  * ========================================================================== */
 
 :root {
+  color-scheme: light dark;
+
   /* Base surfaces (Slate neutral) */
   --background: #f8fafc;
   --foreground: #0f172a;
@@ -18,7 +21,7 @@
   --popover: #ffffff;
   --popover-foreground: #0f172a;
 
-  /* Primary: Indigo */
+  /* Primary: Indigo (6.29:1 with #ffffff) */
   --primary: #4f46e5;
   --primary-foreground: #ffffff;
   --primary-hover: #4338ca;
@@ -31,14 +34,14 @@
   --muted: #f1f5f9;
   --muted-foreground: #475569;
 
-  /* Accent: Blue */
+  /* Accent: Blue (5.17:1 with #ffffff) */
   --accent: #eff6ff;
   --accent-foreground: #1d4ed8;
   --accent-solid: #2563eb;
   --accent-solid-foreground: #ffffff;
 
-  /* Semantic status */
-  --success: #16a34a;
+  /* Semantic status — WCAG 2.2 AA (>= 4.5:1 text contrast) */
+  --success: #15803d;
   --success-foreground: #ffffff;
   --success-subtle: #f0fdf4;
   --success-subtle-foreground: #15803d;
@@ -48,21 +51,21 @@
   --destructive-subtle: #fef2f2;
   --destructive-subtle-foreground: #b91c1c;
 
-  --warning: #d97706;
+  --warning: #b45309;
   --warning-foreground: #ffffff;
   --warning-subtle: #fffbeb;
   --warning-subtle-foreground: #b45309;
 
-  /* Borders, inputs, rings */
+  /* Borders, inputs (>= 3.0:1 on #ffffff per WCAG 1.4.11: 4.76:1), rings */
   --border: #e2e8f0;
-  --input: #cbd5e1;
+  --input: #64748b;
   --ring: #4f46e5;
 
   /* Chart palette */
   --chart-1: #4f46e5;
   --chart-2: #2563eb;
-  --chart-3: #16a34a;
-  --chart-4: #d97706;
+  --chart-3: #15803d;
+  --chart-4: #b45309;
   --chart-5: #dc2626;
 
   /* Sidebar */
@@ -79,7 +82,14 @@
   --radius: 0.625rem;
 }
 
-.dark {
+:root.light {
+  color-scheme: light;
+}
+
+.dark,
+:root.dark {
+  color-scheme: dark;
+
   /* Base surfaces (Dark Slate neutral) */
   --background: #0b1120;
   --foreground: #f8fafc;
@@ -88,10 +98,10 @@
   --popover: #111827;
   --popover-foreground: #f8fafc;
 
-  /* Primary: Indigo */
-  --primary: #6366f1;
+  /* Primary: Indigo — WCAG 2.2 AA (6.29:1 / 7.90:1 with #ffffff) */
+  --primary: #4f46e5;
   --primary-foreground: #ffffff;
-  --primary-hover: #818cf8;
+  --primary-hover: #4338ca;
 
   /* Secondary / Subtle surface */
   --secondary: #1e293b;
@@ -101,19 +111,19 @@
   --muted: #1e293b;
   --muted-foreground: #94a3b8;
 
-  /* Accent: Blue */
+  /* Accent: Blue — WCAG 2.2 AA (5.17:1 with #ffffff) */
   --accent: #172554;
   --accent-foreground: #93c5fd;
-  --accent-solid: #3b82f6;
+  --accent-solid: #2563eb;
   --accent-solid-foreground: #ffffff;
 
-  /* Semantic status */
+  /* Semantic status — WCAG 2.2 AA */
   --success: #22c55e;
   --success-foreground: #052e16;
   --success-subtle: #052e16;
   --success-subtle-foreground: #86efac;
 
-  --destructive: #ef4444;
+  --destructive: #dc2626;
   --destructive-foreground: #ffffff;
   --destructive-subtle: #450a0a;
   --destructive-subtle-foreground: #fca5a5;
@@ -123,9 +133,9 @@
   --warning-subtle: #451a03;
   --warning-subtle-foreground: #fcd34d;
 
-  /* Borders, inputs, rings */
+  /* Borders, inputs (>= 3.0:1 on #111827 per WCAG 1.4.11: 3.73:1), rings */
   --border: #1e293b;
-  --input: #334155;
+  --input: #64748b;
   --ring: #818cf8;
 
   /* Chart palette */
@@ -135,10 +145,10 @@
   --chart-4: #fbbf24;
   --chart-5: #f87171;
 
-  /* Sidebar */
+  /* Sidebar — WCAG 2.2 AA (6.29:1 with #ffffff) */
   --sidebar: #0f172a;
   --sidebar-foreground: #f8fafc;
-  --sidebar-primary: #6366f1;
+  --sidebar-primary: #4f46e5;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #1e293b;
   --sidebar-accent-foreground: #f8fafc;
@@ -158,6 +168,7 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -207,18 +218,28 @@
   }
 
   html {
-    color-scheme: light;
     scroll-behavior: smooth;
+    scroll-padding-top: 4.5rem;
+    scroll-padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
   }
 
-  html.dark {
-    color-scheme: dark;
+  @media (min-width: 1024px) {
+    html {
+      scroll-padding-bottom: 2rem;
+    }
   }
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     text-rendering: optimizeLegibility;
+    overflow-wrap: break-word;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
   }
 
   /* WCAG 2.2 AA crisp focus-visible outline */
@@ -231,39 +252,134 @@
   [role="button"]:not([aria-disabled="true"]) {
     cursor: pointer;
   }
+
+  /* Prevent scroll chaining inside modals/dialogs */
+  [role="dialog"],
+  [role="alertdialog"],
+  dialog:modal {
+    overscroll-behavior: contain;
+  }
 }
 
-/* Global reduced-motion safeguard */
+/* Mobile & coarse pointer ergonomics: >= 44px touch targets & >= 16px inputs (prevents iOS zoom) */
+@media (pointer: coarse), (max-width: 639px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]),
+  textarea,
+  select,
+  [data-slot="select-trigger"] {
+    font-size: max(1rem, 1em);
+    min-block-size: 2.75rem;
+  }
+}
+
+@media (pointer: coarse) {
+  button:not([role="switch"]):not([role="checkbox"]):not([data-compact="true"]),
+  [role="button"]:not([role="switch"]):not([role="checkbox"]):not([data-compact="true"]) {
+    min-block-size: 2.75rem;
+    min-inline-size: 2.75rem;
+  }
+}
+
+/* Targeted reduced-motion rules (system preference OR in-app reduced_motion setting).
+ * Never globally apply `* { animation-duration: 0.01ms !important }` — preserve calm
+ * non-motion color/background/border hover & focus transitions and UI event listeners. */
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
   }
 
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+  .animate-bounce,
+  .animate-ping {
+    animation: none;
+  }
+
+  .animate-pulse {
+    animation-duration: 6s;
+  }
+
+  .skip-to-content {
+    transition: none;
   }
 }
 
-/* Skip to main content accessibility link */
+html[data-reduced-motion="true"] {
+  scroll-behavior: auto;
+}
+
+html[data-reduced-motion="true"] .animate-bounce,
+html[data-reduced-motion="true"] .animate-ping {
+  animation: none;
+}
+
+html[data-reduced-motion="true"] .animate-pulse {
+  animation-duration: 6s;
+}
+
+html[data-reduced-motion="true"] .skip-to-content {
+  transition: none;
+}
+
+/* Skip to main content accessibility link (compositor-only transform) */
 .skip-to-content {
   position: fixed;
-  top: -100%;
+  top: 1rem;
   left: 1rem;
   z-index: 100;
-  padding: 0.5rem 1rem;
+  padding: 0.625rem 1rem;
   border-radius: var(--radius-md);
   background: var(--primary);
   color: var(--primary-foreground);
   font-weight: 600;
   font-size: 0.875rem;
-  transition: top 120ms ease-out;
+  transform: translateY(-250%);
+  transition: transform 140ms ease-out;
 }
 
 .skip-to-content:focus {
-  top: 1rem;
+  transform: translateY(0);
+}
+
+/* Container-aware horizontal table scroll wrapper */
+.responsive-table-region {
+  overflow-x: auto;
+  max-inline-size: 100%;
+  container-type: inline-size;
+}
+
+/* Printable study sheet stylesheet (WCAG & PRD printable sheets) */
+@media print {
+  @page {
+    margin: 14mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    color-scheme: light !important;
+    font-size: 11pt;
+  }
+
+  header,
+  aside,
+  nav,
+  footer,
+  .skip-to-content,
+  [data-print="hide"] {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  [data-slot="card"],
+  article,
+  tr {
+    break-inside: avoid;
+    box-shadow: none !important;
+    border-color: #cbd5e1 !important;
+  }
 }

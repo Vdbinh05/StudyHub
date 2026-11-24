@@ -6,6 +6,7 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { rpcSaveExamAttemptAnswers } from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import {
   saveExamAnswersSchema,
@@ -16,12 +17,19 @@ interface RouteContext {
   params: Promise<{ attemptId: string }>;
 }
 
+/**
+ * Atomic exam answer autosave (fixes SH-010 / DB-P0-6 / SEC-016):
+ * - Enforces Postgres server-clock `expires_at` (`409 EXAM_EXPIRED`)
+ * - Verifies `attempt_question_id` belongs to `attemptId`
+ * - Applies monotonic `client_seq` stale-write guard
+ * - Atomically updates live `exam_attempts.answered_count` & `unanswered_count`
+ */
 export async function PUT(
   request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const { supabase, user } = await requireAuth();
+    const { supabase } = await requireAuth();
     const { attemptId } = await context.params;
     const id = uuidSchema.parse(attemptId);
 
@@ -30,67 +38,31 @@ export async function PUT(
     const items: SaveExamAnswerItem[] =
       "answers" in parsed ? parsed.answers : [parsed];
 
-    const { data: attempt, error: attErr } = await supabase
-      .from("exam_attempts")
-      .select("id, user_id, status, expires_at")
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (attErr) throw attErr;
-    if (!attempt) {
-      throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
-    }
-
-    if (attempt.status !== "in_progress") {
-      throw new AppError(
-        "CONFLICT",
-        "Exam attempt has already been submitted and can no longer be modified.",
-        409,
-      );
-    }
-
-    if (attempt.expires_at && Date.now() > Date.parse(attempt.expires_at)) {
-      throw new AppError(
-        "EXAM_EXPIRED",
-        "Exam time limit has expired. Submit the exam to view your graded result.",
-        409,
-      );
-    }
-
-    const rows = items.map((item) => ({
-      attempt_id: id,
+    const payload = items.map((item) => ({
       attempt_question_id: item.attempt_question_id,
-      user_id: user.id,
       selected_option_ids: item.selected_option_ids,
       typed_answer: item.typed_answer ?? null,
       is_flagged: item.is_flagged,
-      is_correct: null, // Strictly server-graded on submit; clients cannot set is_correct
+      client_seq: item.client_seq ?? 0,
     }));
 
-    const { data: saved, error: saveErr } = await supabase
-      .from("exam_attempt_answers")
-      .upsert(rows, { onConflict: "attempt_id,attempt_question_id" })
-      .select(
-        "id, attempt_id, attempt_question_id, selected_option_ids, typed_answer, is_flagged, updated_at",
-      );
+    const { data, error } = await rpcSaveExamAttemptAnswers(
+      supabase,
+      id,
+      payload,
+    );
 
-    if (saveErr) throw saveErr;
-
-    const serverNow = new Date().toISOString();
-    const remainingSeconds = attempt.expires_at
-      ? Math.max(
-          0,
-          Math.floor(
-            (Date.parse(attempt.expires_at) - Date.parse(serverNow)) / 1000,
-          ),
-        )
-      : null;
+    if (error) throw error;
+    if (!data) {
+      throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
+    }
 
     return apiSuccess({
-      saved: saved ?? [],
-      server_now: serverNow,
-      remaining_seconds: remainingSeconds,
+      saved: data.saved ?? [],
+      stale_ignored_ids: data.stale_ignored_ids ?? [],
+      answered_count: data.answered_count ?? 0,
+      server_now: data.server_now ?? new Date().toISOString(),
+      remaining_seconds: data.remaining_seconds ?? null,
     });
   } catch (err) {
     return handleApiError(err);

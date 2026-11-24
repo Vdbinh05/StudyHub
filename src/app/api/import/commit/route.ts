@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   chunkArray,
+  computeQuestionDuplicateFingerprint,
   normalizeForComparison,
   sanitizeFileName,
   validateParsedQuestion,
@@ -21,6 +22,15 @@ import {
 } from "@/lib/security/sanitize";
 import type { Database, Json } from "@/types/database";
 import type { ParsedQuestion } from "@/types/import";
+import { fetchExistingQuestionFingerprints } from "../_existing-fingerprints";
+
+const MAX_COMMIT_JSON_BYTES = 12 * 1024 * 1024; // 12 MB cap per commit chunk (SEC-021)
+const NEW_IMPORT_JOB_RATE_LIMIT = {
+  id: "import_commit_new_job",
+  limit: 20,
+  windowMs: 5 * 60 * 1000,
+} as const;
+const IN_DELETE_CHUNK_SIZE = 120;
 
 const CommitOptionSchema = z.object({
   id: z.string().optional(),
@@ -129,6 +139,8 @@ const ImportCommitBodySchema = z.object({
 function safeUrlOrNull(url: string | null | undefined): string | null {
   if (!url) return null;
   const trimmed = url.trim();
+  // Never persist temporary unuploaded DOCX preview paths as broken 404 image links
+  if (trimmed.startsWith("/docx-media/")) return null;
   return trimmed && isSafeHttpOrStorageUrl(trimmed) ? trimmed : null;
 }
 
@@ -136,17 +148,46 @@ export async function POST(request: Request) {
   try {
     const { supabase, user } = await requireAuth();
 
-    const rateLimited = enforceRateLimit(
+    // High chunk ceiling (120 chunks / 5m = up to 60,000 questions across a single job)
+    // so multi-chunk 10k-20k imports never falsely trip 429 at chunk 21 (SH-025).
+    const chunkRateLimited = enforceRateLimit(
       request,
       RATE_LIMITS.IMPORT_COMMIT,
       user.id,
     );
-    if (rateLimited) return rateLimited;
+    if (chunkRateLimited) return chunkRateLimited;
 
-    const rawBody = await parseJsonBody(request);
+    const rawBody = await parseJsonBody(request, MAX_COMMIT_JSON_BYTES);
     const body = ImportCommitBodySchema.parse(rawBody);
 
     await requireStudySetAccess(supabase, body.studySetId, user.id, "edit");
+
+    // Enforce stricter job-start rate limit on new imports, and verify active job ownership on continuation chunks
+    if (body.isFirstChunk || !body.importJobId) {
+      const newJobLimited = enforceRateLimit(
+        request,
+        NEW_IMPORT_JOB_RATE_LIMIT,
+        user.id,
+      );
+      if (newJobLimited) return newJobLimited;
+    } else {
+      const { data: activeJob, error: activeJobErr } = await supabase
+        .from("import_jobs")
+        .select("id, status")
+        .eq("id", body.importJobId)
+        .eq("user_id", user.id)
+        .eq("study_set_id", body.studySetId)
+        .maybeSingle();
+
+      if (activeJobErr) throw activeJobErr;
+      if (!activeJob || activeJob.status !== "importing") {
+        return apiError(
+          "BAD_REQUEST",
+          "Invalid or inactive import job for continuation chunk.",
+          400,
+        );
+      }
+    }
 
     // 1. Idempotency check: if this chunk's idempotencyKey already committed rows, replay cleanly!
     const { data: existingIdemRows } = await supabase
@@ -268,54 +309,64 @@ export async function POST(request: Request) {
       if (delErr) throw delErr;
     }
 
-    // 5. Handle duplicate policy ("skip" | "keep_both" | "replace") against existing questions
+    // 5. Handle duplicate policy ("skip" | "keep_both" | "replace") using paginated,
+    // chunked full-fingerprint matching (prompt + sorted options + correct answers) (SH-005 & SH-017)
     let questionsToInsert = validQuestions;
     let skippedCount = body.questions.length - validQuestions.length;
     let replacedCount = 0;
 
     if (body.duplicatePolicy !== "keep_both" && validQuestions.length > 0) {
-      const { data: existingRows } = await supabase
-        .from("questions")
-        .select("id, prompt")
-        .eq("study_set_id", body.studySetId);
-
-      const existingMap = new Map<string, string[]>();
-      for (const row of existingRows ?? []) {
-        const key = normalizeForComparison(row.prompt);
-        const list = existingMap.get(key);
-        if (list) list.push(row.id);
-        else existingMap.set(key, [row.id]);
-      }
+      const candidateNormalizedPrompts = new Set(
+        validQuestions
+          .map((q) => normalizeForComparison(q.prompt))
+          .filter(Boolean),
+      );
+      const { fingerprintToIds: existingMap } =
+        await fetchExistingQuestionFingerprints(
+          supabase,
+          body.studySetId,
+          candidateNormalizedPrompts,
+        );
 
       if (body.duplicatePolicy === "skip") {
         const seenBatch = new Set<string>();
         const filtered: ParsedQuestion[] = [];
         for (const q of validQuestions) {
-          const norm = normalizeForComparison(q.prompt);
-          if (existingMap.has(norm) || seenBatch.has(norm)) {
+          const fp = computeQuestionDuplicateFingerprint({
+            prompt: q.prompt,
+            backText: q.backText,
+            options: q.options,
+            acceptedAnswers: q.acceptedAnswers,
+          });
+          if (fp && (existingMap.has(fp) || seenBatch.has(fp))) {
             skippedCount += 1;
             continue;
           }
-          seenBatch.add(norm);
+          if (fp) seenBatch.add(fp);
           filtered.push(q);
         }
         questionsToInsert = filtered;
       } else if (body.duplicatePolicy === "replace") {
         const idsToDelete: string[] = [];
         for (const q of validQuestions) {
-          const norm = normalizeForComparison(q.prompt);
-          const matchedIds = existingMap.get(norm);
+          const fp = computeQuestionDuplicateFingerprint({
+            prompt: q.prompt,
+            backText: q.backText,
+            options: q.options,
+            acceptedAnswers: q.acceptedAnswers,
+          });
+          const matchedIds = fp ? existingMap.get(fp) : undefined;
           if (matchedIds && matchedIds.length > 0) {
             idsToDelete.push(...matchedIds);
-            existingMap.delete(norm);
+            existingMap.delete(fp);
           }
         }
         if (idsToDelete.length > 0) {
-          for (const delChunk of chunkArray(idsToDelete, 500)) {
+          for (const delChunk of chunkArray(idsToDelete, IN_DELETE_CHUNK_SIZE)) {
             const { error: delDupErr } = await supabase
               .from("questions")
               .delete()
-              .in("id", delDupErrSafe(delChunk))
+              .in("id", delChunk)
               .eq("study_set_id", body.studySetId);
             if (delDupErr) throw delDupErr;
           }
@@ -477,24 +528,19 @@ export async function POST(request: Request) {
       importedCount += questionRows.length;
     }
 
-    // 9. Update import_jobs progress & study_sets.question_count
+    // 9. Update import_jobs progress (study_sets.question_count is maintained automatically by DB trigger)
     const { count: totalSetQuestions } = await supabase
       .from("questions")
       .select("id", { count: "exact", head: true })
       .eq("study_set_id", body.studySetId);
-
-    if (body.isFinalChunk) {
-      await supabase
-        .from("study_sets")
-        .update({ question_count: totalSetQuestions ?? 0 })
-        .eq("id", body.studySetId);
-    }
 
     if (importJobId) {
       const { data: currentJob } = await supabase
         .from("import_jobs")
         .select("imported_count")
         .eq("id", importJobId)
+        .eq("user_id", user.id)
+        .eq("study_set_id", body.studySetId)
         .maybeSingle();
 
       const nextImportedTotal = (currentJob?.imported_count ?? 0) + importedCount;
@@ -506,7 +552,9 @@ export async function POST(request: Request) {
           status: body.isFinalChunk ? "completed" : "importing",
           completed_at: body.isFinalChunk ? new Date().toISOString() : null,
         })
-        .eq("id", importJobId);
+        .eq("id", importJobId)
+        .eq("user_id", user.id)
+        .eq("study_set_id", body.studySetId);
     }
 
     return apiSuccess({
@@ -520,8 +568,4 @@ export async function POST(request: Request) {
   } catch (err) {
     return handleApiError(err);
   }
-}
-
-function delDupErrSafe(ids: string[]): string[] {
-  return ids;
 }

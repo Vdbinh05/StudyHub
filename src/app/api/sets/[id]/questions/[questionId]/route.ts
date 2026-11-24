@@ -7,6 +7,7 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
+import { fetchQuestionRelationsChunked } from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import { updateQuestionSchema } from "@/lib/validation/questions";
 import type { Json, TablesUpdate } from "@/types/database";
@@ -27,46 +28,33 @@ export async function GET(
 
     await requireStudySetAccess(supabase, setId, user.id, "read");
 
-    const [
-      { data: question, error: qErr },
-      { data: options, error: optErr },
-      { data: accepted, error: accErr },
-      { data: starred },
-    ] = await Promise.all([
-      supabase
-        .from("questions")
-        .select("*")
-        .eq("id", qId)
-        .eq("study_set_id", setId)
-        .maybeSingle(),
-      supabase
-        .from("question_options")
-        .select("*")
-        .eq("question_id", qId)
-        .order("position", { ascending: true }),
-      supabase
-        .from("question_accepted_answers")
-        .select("*")
-        .eq("question_id", qId),
-      supabase
-        .from("starred_questions")
-        .select("question_id")
-        .eq("user_id", user.id)
-        .eq("question_id", qId)
-        .maybeSingle(),
-    ]);
+    const [{ data: question, error: qErr }, relations, { data: starred }] =
+      await Promise.all([
+        supabase
+          .from("questions")
+          .select("*")
+          .eq("id", qId)
+          .eq("study_set_id", setId)
+          .maybeSingle(),
+        fetchQuestionRelationsChunked(supabase, [qId], setId),
+        supabase
+          .from("starred_questions")
+          .select("question_id")
+          .eq("user_id", user.id)
+          .eq("question_id", qId)
+          .maybeSingle(),
+      ]);
 
     if (qErr) throw qErr;
-    if (optErr) throw optErr;
-    if (accErr) throw accErr;
     if (!question) {
       throw new AppError("NOT_FOUND", "Question not found.", 404);
     }
 
     return apiSuccess({
       ...question,
-      options: options ?? [],
-      accepted_answers: accepted ?? [],
+      options: relations.optionsByQ.get(qId) ?? [],
+      accepted_answers: relations.answersByQ.get(qId) ?? [],
+      tags: relations.tagsByQ.get(qId) ?? [],
       is_starred: Boolean(starred),
     });
   } catch (err) {
@@ -91,7 +79,7 @@ export async function PATCH(
 
     const { data: existing, error: existingErr } = await supabase
       .from("questions")
-      .select("id")
+      .select("id, question_type, back_text")
       .eq("id", qId)
       .eq("study_set_id", setId)
       .maybeSingle();
@@ -99,6 +87,53 @@ export async function PATCH(
     if (existingErr) throw existingErr;
     if (!existing) {
       throw new AppError("NOT_FOUND", "Question not found.", 404);
+    }
+
+    // SH-025: Validate effective merged question_type + options/back_text integrity!
+    const effectiveType = input.question_type ?? existing.question_type;
+    const isChoiceType =
+      effectiveType === "single_choice" ||
+      effectiveType === "multiple_choice" ||
+      effectiveType === "true_false";
+
+    if (isChoiceType && input.options !== undefined) {
+      if (input.options.length < 2) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "Choice questions require at least 2 options.",
+          400,
+        );
+      }
+      const correctCount = input.options.filter((o) => o.is_correct).length;
+      if (correctCount < 1) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "Choice questions require at least 1 correct option.",
+          400,
+        );
+      }
+      if (
+        (effectiveType === "single_choice" || effectiveType === "true_false") &&
+        correctCount > 1
+      ) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "Single-choice and true/false questions must have exactly 1 correct option.",
+          400,
+        );
+      }
+    }
+
+    if (effectiveType === "flashcard") {
+      const effectiveBack =
+        input.back_text !== undefined ? input.back_text : existing.back_text;
+      if (!effectiveBack || effectiveBack.trim().length === 0) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "Flashcards require non-empty back_text.",
+          400,
+        );
+      }
     }
 
     const updatePayload: TablesUpdate<"questions"> = {};
@@ -123,68 +158,106 @@ export async function PATCH(
       if (updErr) throw updErr;
     }
 
-    // Update options while preserving stable option UUIDs where supplied
+    // Update options in batched operations while preserving stable option UUIDs
     if (input.options !== undefined) {
       const { data: existingOpts, error: exOptErr } = await supabase
         .from("question_options")
         .select("id")
-        .eq("question_id", qId);
+        .eq("question_id", qId)
+        .eq("study_set_id", setId);
       if (exOptErr) throw exOptErr;
 
       const existingIds = new Set((existingOpts ?? []).map((o) => o.id));
       const keptIds = new Set<string>();
+      const toUpdate: Array<{
+        id: string;
+        position: number;
+        label: string;
+        content: string;
+        image_url: string | null;
+        is_correct: boolean;
+      }> = [];
+      const toInsert: Array<{
+        question_id: string;
+        study_set_id: string;
+        position: number;
+        label: string;
+        content: string;
+        image_url: string | null;
+        is_correct: boolean;
+      }> = [];
 
       for (let idx = 0; idx < input.options.length; idx += 1) {
         const opt = input.options[idx];
         if (opt.id && existingIds.has(opt.id)) {
           keptIds.add(opt.id);
-          const { error: optUpdErr } = await supabase
-            .from("question_options")
-            .update({
-              position: opt.position ?? idx,
-              label: opt.label,
-              content: opt.content,
-              image_url: opt.image_url ?? null,
-              is_correct: opt.is_correct,
-            })
-            .eq("id", opt.id)
-            .eq("question_id", qId);
-          if (optUpdErr) throw optUpdErr;
+          toUpdate.push({
+            id: opt.id,
+            position: opt.position ?? idx,
+            label: opt.label,
+            content: opt.content,
+            image_url: opt.image_url ?? null,
+            is_correct: opt.is_correct,
+          });
         } else {
-          const { data: insertedOpt, error: optInsErr } = await supabase
-            .from("question_options")
-            .insert({
-              question_id: qId,
-              study_set_id: setId,
-              position: opt.position ?? idx,
-              label: opt.label,
-              content: opt.content,
-              image_url: opt.image_url ?? null,
-              is_correct: opt.is_correct,
-            })
-            .select("id")
-            .single();
-          if (optInsErr) throw optInsErr;
-          if (insertedOpt) keptIds.add(insertedOpt.id);
+          toInsert.push({
+            question_id: qId,
+            study_set_id: setId,
+            position: opt.position ?? idx,
+            label: opt.label,
+            content: opt.content,
+            image_url: opt.image_url ?? null,
+            is_correct: opt.is_correct,
+          });
         }
       }
 
       const toDelete = Array.from(existingIds).filter((oid) => !keptIds.has(oid));
-      if (toDelete.length > 0) {
-        const { error: delOptErr } = await supabase
-          .from("question_options")
-          .delete()
-          .in("id", toDelete)
-          .eq("question_id", qId);
-        if (delOptErr) throw delOptErr;
-      }
+
+      await Promise.all([
+        ...toUpdate.map(async (u) => {
+          const { error: optUpdErr } = await supabase
+            .from("question_options")
+            .update({
+              position: u.position,
+              label: u.label,
+              content: u.content,
+              image_url: u.image_url,
+              is_correct: u.is_correct,
+            })
+            .eq("id", u.id)
+            .eq("question_id", qId)
+            .eq("study_set_id", setId);
+          if (optUpdErr) throw optUpdErr;
+        }),
+        toInsert.length > 0
+          ? supabase
+              .from("question_options")
+              .insert(toInsert)
+              .then(({ error: insErr }) => {
+                if (insErr) throw insErr;
+              })
+          : Promise.resolve(),
+        toDelete.length > 0
+          ? supabase
+              .from("question_options")
+              .delete()
+              .in("id", toDelete)
+              .eq("question_id", qId)
+              .eq("study_set_id", setId)
+              .then(({ error: delErr }) => {
+                if (delErr) throw delErr;
+              })
+          : Promise.resolve(),
+      ]);
     }
 
     if (input.accepted_answers !== undefined) {
       const { error: delAccErr } = await supabase
         .from("question_accepted_answers")
         .delete()
-        .eq("question_id", qId);
+        .eq("question_id", qId)
+        .eq("study_set_id", setId);
       if (delAccErr) throw delAccErr;
 
       if (input.accepted_answers.length > 0) {
@@ -207,7 +280,8 @@ export async function PATCH(
       const { error: delQtErr } = await supabase
         .from("question_tags")
         .delete()
-        .eq("question_id", qId);
+        .eq("question_id", qId)
+        .eq("study_set_id", setId);
       if (delQtErr) throw delQtErr;
 
       if (input.tags.length > 0) {
@@ -241,26 +315,18 @@ export async function PATCH(
       }
     }
 
-    const [
-      { data: updated, error: fetchErr },
-      { data: options },
-      { data: accepted },
-    ] = await Promise.all([
+    const [{ data: updated, error: fetchErr }, relations] = await Promise.all([
       supabase.from("questions").select("*").eq("id", qId).single(),
-      supabase
-        .from("question_options")
-        .select("*")
-        .eq("question_id", qId)
-        .order("position", { ascending: true }),
-      supabase.from("question_accepted_answers").select("*").eq("question_id", qId),
+      fetchQuestionRelationsChunked(supabase, [qId], setId),
     ]);
 
     if (fetchErr) throw fetchErr;
 
     return apiSuccess({
       ...updated,
-      options: options ?? [],
-      accepted_answers: accepted ?? [],
+      options: relations.optionsByQ.get(qId) ?? [],
+      accepted_answers: relations.answersByQ.get(qId) ?? [],
+      tags: relations.tagsByQ.get(qId) ?? [],
     });
   } catch (err) {
     return handleApiError(err);

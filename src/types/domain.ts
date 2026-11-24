@@ -1,6 +1,7 @@
 /**
- * Core domain types for StudyHub V1.0.
- * Strictly aligned with `docs/DATABASE.md` (all 20 tables) and `docs/ARCHITECTURE.md`.
+ * Core domain types for StudyHub V2.0.
+ * Strictly aligned with PostgreSQL migrations `0001`–`0005` (26 canonical tables)
+ * and the V2.0 Universal Custom Exam Engine & Full Coverage Cycle contracts.
  */
 
 export type Locale = "vi" | "en";
@@ -38,7 +39,7 @@ export type StudyMode =
   | "review";
 
 export type SessionStatus = "in_progress" | "completed" | "abandoned";
-export type ExamStatus = "in_progress" | "submitted" | "expired";
+export type ExamStatus = "in_progress" | "submitted" | "expired" | "discarded";
 export type FriendshipStatus = "pending" | "accepted" | "declined" | "blocked";
 export type ImportJobStatus =
   | "pending"
@@ -48,9 +49,33 @@ export type ImportJobStatus =
   | "completed"
   | "failed";
 
+/** V2.0 Multi-Subject Allocation Strategies (A–E) */
+export type AllocationStrategy =
+  | "global_random"
+  | "equal"
+  | "proportional"
+  | "custom"
+  | "weighted";
+
+/** V2.0 Deterministic Question Selection Policies (1–8) */
+export type SelectionPolicy =
+  | "random"
+  | "unseen_first"
+  | "mistakes_first"
+  | "weak_topics_first"
+  | "due_for_review"
+  | "starred_only"
+  | "incorrect_only"
+  | "anti_repeat";
+
+export type ExamSourceType = "study_set" | "folder";
+export type CoverageCycleStatus = "active" | "completed" | "archived";
+export type CoverageQuestionState = "unassigned" | "assigned" | "completed";
+export type CoverageAttemptStatus = "in_progress" | "completed" | "discarded";
+
 export interface Profile {
   id: string;
-  email: string;
+  email?: string;
   display_name: string;
   username: string | null;
   avatar_url: string | null;
@@ -58,6 +83,9 @@ export interface Profile {
   created_at: string;
   updated_at: string;
 }
+
+/** Peer-safe profile projection (never leaks private email). */
+export type PublicProfile = Omit<Profile, "email">;
 
 export interface UserPreferences {
   user_id: string;
@@ -99,6 +127,7 @@ export interface StudySet {
   default_exam_duration_minutes: number;
   default_pass_threshold: number;
   is_archived: boolean;
+  is_favorite?: boolean;
   last_studied_at: string | null;
   created_at: string;
   updated_at: string;
@@ -109,6 +138,7 @@ export interface StudySetMember {
   study_set_id: string;
   user_id: string;
   role: MemberRole;
+  allow_clone?: boolean;
   invited_by: string | null;
   created_at: string;
   profile?: Profile;
@@ -214,7 +244,8 @@ export interface StarredQuestion {
 export interface StudySession {
   id: string;
   user_id: string;
-  study_set_id: string;
+  study_set_id: string | null;
+  source_study_set_ids?: string[];
   mode: StudyMode;
   status: SessionStatus;
   config: Record<string, unknown>;
@@ -259,6 +290,27 @@ export interface ExamAcceptedAnswerSnapshot {
   match_mode: AnswerMatchMode;
 }
 
+export interface ExamTagSnapshot {
+  id: string;
+  name: string;
+  color?: string | null;
+}
+
+export interface ExamFilterConfig {
+  chapters?: string[];
+  tag_ids?: string[];
+  difficulties?: DifficultyLevel[];
+  question_types?: ExamQuestionType[];
+}
+
+export interface ExamSourceInput {
+  source_type: ExamSourceType;
+  id: string;
+  include_subfolders?: boolean;
+  custom_count?: number | null;
+  custom_percentage?: number | null;
+}
+
 export interface ExamConfig {
   question_count: number;
   duration_limit_seconds: number | null;
@@ -268,8 +320,22 @@ export interface ExamConfig {
   chapters?: string[];
   tag_ids?: string[];
   difficulties?: DifficultyLevel[];
+  question_types?: ExamQuestionType[];
   only_starred?: boolean;
   only_unmastered?: boolean;
+  only_mistakes?: boolean;
+  allocation_strategy?: AllocationStrategy;
+  selection_policy?: SelectionPolicy;
+  show_subject_names?: boolean;
+  show_chapter_names?: boolean;
+  allow_navigation?: boolean;
+  allow_mark_for_review?: boolean;
+  auto_submit_on_expire?: boolean;
+  show_review_after_submit?: boolean;
+  additional_study_set_ids?: string[];
+  sources?: ExamSourceInput[];
+  preset_id?: string | null;
+  coverage_cycle_id?: string | null;
 }
 
 export interface ExamAttempt {
@@ -293,6 +359,18 @@ export interface ExamAttempt {
   expires_at: string | null;
   submitted_at: string | null;
   created_at: string;
+  allocation_strategy?: AllocationStrategy;
+  selection_policy?: SelectionPolicy;
+  requested_question_count?: number | null;
+  show_subject_names?: boolean;
+  show_chapter_names?: boolean;
+  allow_navigation?: boolean;
+  allow_mark_for_review?: boolean;
+  auto_submit_on_expire?: boolean;
+  show_review_after_submit?: boolean;
+  coverage_cycle_id?: string | null;
+  preset_id?: string | null;
+  is_multi_subject?: boolean;
 }
 
 /**
@@ -306,7 +384,10 @@ export interface ExamSnapshotQuestion {
   question_id: string | null;
   position: number;
   question_type: ExamQuestionType;
+  source_study_set_id?: string | null;
+  source_subject_title?: string | null;
   chapter_snapshot: string | null;
+  tags_snapshot?: ExamTagSnapshot[];
   prompt_snapshot: string;
   prompt_image_url_snapshot: string | null;
   options_snapshot: ExamSnapshotOption[];
@@ -325,7 +406,274 @@ export interface ExamAttemptAnswer {
   typed_answer: string | null;
   is_flagged: boolean;
   is_correct: boolean | null;
+  client_seq?: number;
   updated_at: string;
+}
+
+export interface ExamAttemptSource {
+  id: string;
+  attempt_id: string;
+  user_id: string;
+  source_type: ExamSourceType;
+  study_set_id: string | null;
+  folder_id: string | null;
+  subject_title_snapshot: string;
+  eligible_count: number;
+  requested_count: number | null;
+  requested_percentage: number | null;
+  allocated_count: number;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface ExamPresetSource {
+  id: string;
+  preset_id: string;
+  source_type: ExamSourceType;
+  study_set_id: string | null;
+  folder_id: string | null;
+  include_subfolders: boolean;
+  custom_count: number | null;
+  custom_percentage: number | null;
+  sort_order: number;
+  created_at: string;
+  title?: string | null;
+}
+
+export interface ExamPreset {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  is_favorite: boolean;
+  requested_question_count: number | null;
+  allocation_strategy: AllocationStrategy;
+  selection_policy: SelectionPolicy;
+  full_coverage_mode: boolean;
+  duration_limit_seconds: number | null;
+  pass_threshold: number;
+  shuffle_questions: boolean;
+  shuffle_options: boolean;
+  show_subject_names: boolean;
+  show_chapter_names: boolean;
+  allow_navigation: boolean;
+  allow_mark_for_review: boolean;
+  auto_submit_on_expire: boolean;
+  show_review_after_submit: boolean;
+  filters: ExamFilterConfig;
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+  sources?: ExamPresetSource[];
+  current_eligible_count?: number;
+}
+
+export interface CoverageSubjectProgress {
+  study_set_id: string | null;
+  subject_title: string;
+  total: number;
+  completed: number;
+  assigned: number;
+  remaining: number;
+}
+
+export interface CoverageCycleAttempt {
+  id: string;
+  cycle_id: string;
+  attempt_id: string;
+  user_id: string;
+  sequence_number: number;
+  status: CoverageAttemptStatus;
+  assigned_question_count: number;
+  answered_question_count: number;
+  completed_question_count: number;
+  discarded_at: string | null;
+  created_at: string;
+  score_percent?: number | null;
+  passed?: boolean | null;
+  exam_status?: ExamStatus;
+}
+
+export interface CoverageCycleQuestion {
+  id: string;
+  cycle_id: string;
+  user_id: string;
+  question_id: string | null;
+  source_study_set_id: string | null;
+  source_subject_title: string;
+  pool_order: number;
+  state: CoverageQuestionState;
+  assigned_attempt_id: string | null;
+  completed_attempt_id: string | null;
+  was_answered: boolean;
+  last_is_correct: boolean | null;
+  times_assigned: number;
+  assigned_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface CoverageCycle {
+  id: string;
+  user_id: string;
+  preset_id: string | null;
+  title: string;
+  status: CoverageCycleStatus;
+  source_snapshot: Array<{
+    study_set_id: string;
+    title: string;
+    subject?: string | null;
+    custom_count?: number | null;
+    custom_percentage?: number | null;
+  }>;
+  filter_snapshot: Record<string, unknown>;
+  allocation_strategy: AllocationStrategy;
+  questions_per_exam: number;
+  total_questions: number;
+  assigned_count: number;
+  answered_count: number;
+  completed_count: number;
+  remaining_count?: number;
+  progress_percent?: number;
+  active_attempt_id: string | null;
+  cycle_number: number;
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  subject_progress?: CoverageSubjectProgress[];
+  attempts?: CoverageCycleAttempt[];
+  active_attempt?: {
+    id: string;
+    status: ExamStatus;
+    total_questions: number;
+    answered_count: number;
+    started_at: string;
+    expires_at: string | null;
+  } | null;
+}
+
+export interface ExamEligibleSubject {
+  study_set_id: string;
+  title: string;
+  subject: string | null;
+  total_exam_questions: number;
+  eligible_count: number;
+  unseen_count: number;
+  mistakes_count: number;
+  starred_count: number;
+  unmastered_count: number;
+  due_count: number;
+}
+
+export interface ExamEligibleChapter {
+  study_set_id: string;
+  subject_title: string;
+  chapter: string;
+  count: number;
+}
+
+export interface ExamEligibleTag {
+  id: string;
+  name: string;
+  color: string;
+  count: number;
+}
+
+export interface ExamEligiblePool {
+  total_eligible: number;
+  deduplicated_set_count: number;
+  overlap_sets_removed: number;
+  subjects: ExamEligibleSubject[];
+  chapters: ExamEligibleChapter[];
+  tags: ExamEligibleTag[];
+  question_type_counts: Partial<Record<ExamQuestionType, number>>;
+  difficulty_counts: Partial<Record<DifficultyLevel, number>>;
+}
+
+export interface ExamAllocationPreviewItem {
+  study_set_id: string;
+  title: string;
+  eligible_count: number;
+  requested_count: number | null;
+  requested_percentage: number | null;
+  allocated_count: number;
+  share_percent: number;
+  shortfall: number;
+  was_redistributed: boolean;
+}
+
+export interface ExamPreviewWarning {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ExamPreviewResult {
+  valid: boolean;
+  total_eligible: number;
+  requested_question_count: number;
+  actual_question_count: number;
+  allocation_strategy: AllocationStrategy;
+  selection_policy: SelectionPolicy;
+  duration_limit_seconds: number | null;
+  avg_seconds_per_question: number | null;
+  was_redistributed: boolean;
+  repeated_count: number;
+  is_random_on_start: boolean;
+  allocations: ExamAllocationPreviewItem[];
+  coverage_plan?: {
+    questions_per_exam: number;
+    total_exams: number;
+    batch_sizes: number[];
+  } | null;
+  warnings: ExamPreviewWarning[];
+  errors: ExamPreviewWarning[];
+}
+
+export interface ExamSubjectBreakdown {
+  study_set_id: string | null;
+  subject_title: string;
+  total: number;
+  correct: number;
+  wrong: number;
+  unanswered: number;
+  accuracy_percent: number;
+}
+
+export interface ExamChapterBreakdown {
+  study_set_id?: string | null;
+  subject_title?: string | null;
+  chapter: string;
+  total: number;
+  correct: number;
+  wrong: number;
+  unanswered: number;
+  accuracy_percent: number;
+}
+
+export interface ExamTagBreakdown {
+  tag_id: string;
+  tag_name: string;
+  total: number;
+  correct: number;
+  wrong: number;
+  unanswered: number;
+  accuracy_percent: number;
+}
+
+export interface PracticeQuestionItem extends Question {
+  source_subject_title?: string | null;
+  is_starred?: boolean;
+  progress?: UserQuestionProgress | null;
+}
+
+export interface PracticePoolResponse {
+  session: StudySession | null;
+  total_eligible: number;
+  sources: Array<{ study_set_id: string; title: string }>;
+  questions: PracticeQuestionItem[];
 }
 
 export interface Friendship {
@@ -333,6 +681,7 @@ export interface Friendship {
   requester_id: string;
   addressee_id: string;
   status: FriendshipStatus;
+  blocked_by?: string | null;
   created_at: string;
   updated_at: string;
   requester?: Profile;

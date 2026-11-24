@@ -23,11 +23,11 @@ const buttonVariants = cva(
           "bg-success text-success-foreground shadow-xs hover:bg-success/90",
       },
       size: {
-        default: "h-9 px-4 py-2 has-[>svg]:px-3",
-        sm: "h-8 rounded-md gap-1.5 px-3 text-xs has-[>svg]:px-2.5",
-        lg: "h-10 rounded-md px-6 has-[>svg]:px-4",
-        icon: "size-9",
-        "icon-sm": "size-8",
+        default: "min-h-11 sm:min-h-9 px-4 py-2 has-[>svg]:px-3",
+        sm: "min-h-10 sm:min-h-8 rounded-md gap-1.5 px-3 py-1.5 text-xs has-[>svg]:px-2.5",
+        lg: "min-h-11 sm:min-h-10 rounded-md px-6 py-2.5 has-[>svg]:px-4",
+        icon: "min-h-11 min-w-11 sm:min-h-9 sm:min-w-9",
+        "icon-sm": "min-h-10 min-w-10 sm:min-h-8 sm:min-w-8",
       },
     },
     defaultVariants: {

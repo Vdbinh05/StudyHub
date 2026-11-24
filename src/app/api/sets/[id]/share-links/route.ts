@@ -3,9 +3,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
   apiSuccess,
+  AppError,
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
 import { getAppUrl } from "@/lib/supabase/env";
 import { uuidSchema } from "@/lib/validation/common";
 import { createShareLinkSchema } from "@/lib/validation/sets";
@@ -13,6 +15,8 @@ import { createShareLinkSchema } from "@/lib/validation/sets";
 interface RouteContext {
   params: Promise<{ id: string }>;
 }
+
+const MAX_ACTIVE_SHARE_LINKS_PER_SET = 25;
 
 export async function GET(
   _request: NextRequest,
@@ -51,10 +55,29 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = enforceRateLimit(request, RATE_LIMITS.SHARE_CREATE, user.id);
+    if (limited) return limited;
+
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
     await requireStudySetAccess(supabase, setId, user.id, "owner");
+
+    // SEC-014: Cap active unrevoked share links per set
+    const { count: activeCount, error: cntErr } = await supabase
+      .from("study_set_share_links")
+      .select("id", { count: "exact", head: true })
+      .eq("study_set_id", setId)
+      .is("revoked_at", null);
+
+    if (cntErr) throw cntErr;
+    if ((activeCount ?? 0) >= MAX_ACTIVE_SHARE_LINKS_PER_SET) {
+      throw new AppError(
+        "CONFLICT",
+        `Maximum of ${MAX_ACTIVE_SHARE_LINKS_PER_SET} active share links reached. Revoke an unused link first.`,
+        409,
+      );
+    }
 
     const body = await parseJsonBody(request);
     const input = createShareLinkSchema.parse(body);

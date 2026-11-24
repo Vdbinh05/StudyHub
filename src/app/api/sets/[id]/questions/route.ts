@@ -5,7 +5,17 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
+import {
+  normalizeAnswerText,
+  sanitizePostgrestSearch,
+  slugifyTag,
+} from "@/lib/security/sanitize";
+import {
+  fetchAllPages,
+  fetchInChunks,
+  fetchQuestionRelationsChunked,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import {
   createQuestionSchema,
@@ -34,13 +44,15 @@ export async function GET(
     let filterIds: string[] | null = null;
 
     if (query.starredOnly) {
-      const { data: starredRows, error: starErr } = await supabase
-        .from("starred_questions")
-        .select("question_id")
-        .eq("user_id", user.id)
-        .eq("study_set_id", setId);
-      if (starErr) throw starErr;
-      filterIds = (starredRows ?? []).map((r) => r.question_id);
+      const starredRows = await fetchAllPages(async (from, to) =>
+        supabase
+          .from("starred_questions")
+          .select("question_id")
+          .eq("user_id", user.id)
+          .eq("study_set_id", setId)
+          .range(from, to),
+      );
+      filterIds = starredRows.map((r) => r.question_id);
       if (filterIds.length === 0) {
         return apiSuccess([], {
           total: 0,
@@ -52,13 +64,15 @@ export async function GET(
     }
 
     if (query.tagId) {
-      const { data: tagRows, error: tagErr } = await supabase
-        .from("question_tags")
-        .select("question_id")
-        .eq("study_set_id", setId)
-        .eq("tag_id", query.tagId);
-      if (tagErr) throw tagErr;
-      const taggedIds = (tagRows ?? []).map((r) => r.question_id);
+      const tagRows = await fetchAllPages(async (from, to) =>
+        supabase
+          .from("question_tags")
+          .select("question_id")
+          .eq("study_set_id", setId)
+          .eq("tag_id", query.tagId!)
+          .range(from, to),
+      );
+      const taggedIds = tagRows.map((r) => r.question_id);
       if (filterIds === null) {
         filterIds = taggedIds;
       } else {
@@ -77,133 +91,121 @@ export async function GET(
 
     const from = (query.page - 1) * query.pageSize;
     const to = from + query.pageSize - 1;
+    const escapedSearch = query.search ? sanitizePostgrestSearch(query.search) : "";
 
-    let qQuery = supabase
-      .from("questions")
-      .select("*", { count: "exact" })
-      .eq("study_set_id", setId);
+    let rows: Array<Record<string, unknown> & { id: string }> = [];
+    let total = 0;
 
-    if (filterIds !== null) {
-      qQuery = qQuery.in("id", filterIds);
-    }
-    if (query.chapter) {
-      qQuery = qQuery.eq("chapter", query.chapter);
-    }
-    if (query.difficulty) {
-      qQuery = qQuery.eq("difficulty", query.difficulty);
-    }
-    if (query.questionType) {
-      qQuery = qQuery.eq("question_type", query.questionType);
-    }
-    if (query.search) {
-      const escaped = query.search.replace(/[%_,]/g, "");
-      if (escaped) {
+    if (filterIds !== null && filterIds.length > SAFE_IN_CHUNK_SIZE) {
+      // Avoid HTTP 414 URI Too Long when filtering by large starred/tag sets
+      const matched = await fetchInChunks(
+        filterIds,
+        async (chunk) => {
+          let q = supabase
+            .from("questions")
+            .select("*")
+            .eq("study_set_id", setId)
+            .in("id", chunk);
+          if (query.chapter) q = q.eq("chapter", query.chapter);
+          if (query.difficulty) q = q.eq("difficulty", query.difficulty);
+          if (query.questionType) q = q.eq("question_type", query.questionType);
+          if (escapedSearch) {
+            q = q.or(
+              `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`,
+            );
+          }
+          return q;
+        },
+        SAFE_IN_CHUNK_SIZE,
+      );
+      matched.sort((a, b) => a.position - b.position || a.created_at.localeCompare(b.created_at));
+      total = matched.length;
+      rows = matched.slice(from, to + 1);
+    } else {
+      let qQuery = supabase
+        .from("questions")
+        .select("*", { count: "exact" })
+        .eq("study_set_id", setId);
+
+      if (filterIds !== null) {
+        qQuery = qQuery.in("id", filterIds);
+      }
+      if (query.chapter) {
+        qQuery = qQuery.eq("chapter", query.chapter);
+      }
+      if (query.difficulty) {
+        qQuery = qQuery.eq("difficulty", query.difficulty);
+      }
+      if (query.questionType) {
+        qQuery = qQuery.eq("question_type", query.questionType);
+      }
+      if (escapedSearch) {
         qQuery = qQuery.or(
-          `prompt.ilike.%${escaped}%,back_text.ilike.%${escaped}%,explanation.ilike.%${escaped}%`,
+          `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`,
         );
       }
+
+      const { data: questions, count, error } = await qQuery
+        .order("position", { ascending: true })
+        .order("created_at", { ascending: true })
+        .range(from, to);
+
+      if (error) throw error;
+      rows = (questions ?? []) as Array<Record<string, unknown> & { id: string }>;
+      total = count ?? rows.length;
     }
 
-    const { data: questions, count, error } = await qQuery
-      .order("position", { ascending: true })
-      .order("created_at", { ascending: true })
-      .range(from, to);
-
-    if (error) throw error;
-
-    const rows = questions ?? [];
     const questionIds = rows.map((q) => q.id);
 
     if (questionIds.length === 0) {
       return apiSuccess([], {
-        total: count ?? 0,
+        total,
         page: query.page,
         pageSize: query.pageSize,
         hasMore: false,
       });
     }
 
-    const [
-      { data: options, error: optErr },
-      { data: accepted, error: accErr },
-      { data: qTags, error: qtErr },
-      { data: starred, error: starErr },
-      { data: progress, error: progErr },
-    ] = await Promise.all([
-      supabase
-        .from("question_options")
-        .select("*")
-        .in("question_id", questionIds)
-        .order("position", { ascending: true }),
-      supabase
-        .from("question_accepted_answers")
-        .select("*")
-        .in("question_id", questionIds),
-      supabase
-        .from("question_tags")
-        .select("question_id, tag_id")
-        .in("question_id", questionIds),
-      supabase
-        .from("starred_questions")
-        .select("question_id")
-        .eq("user_id", user.id)
-        .in("question_id", questionIds),
-      supabase
-        .from("user_question_progress")
-        .select("question_id, mastery_level, correct_count, wrong_count, next_review_at")
-        .eq("user_id", user.id)
-        .in("question_id", questionIds),
-    ]);
+    // SH-005: Chunked relation fetching (<= 100 Qs/batch -> <= 400-600 options, NEVER hits 1,000-row cap!)
+    const [{ optionsByQ, answersByQ, tagsByQ }, starred, progress] =
+      await Promise.all([
+        fetchQuestionRelationsChunked(supabase, questionIds, setId),
+        fetchInChunks(
+          questionIds,
+          async (chunk) =>
+            supabase
+              .from("starred_questions")
+              .select("question_id")
+              .eq("user_id", user.id)
+              .in("question_id", chunk),
+          SAFE_IN_CHUNK_SIZE,
+        ),
+        fetchInChunks(
+          questionIds,
+          async (chunk) =>
+            supabase
+              .from("user_question_progress")
+              .select(
+                "question_id, mastery_level, correct_count, wrong_count, consecutive_correct, ease_factor, interval_days, repetitions, last_reviewed_at, next_review_at",
+              )
+              .eq("user_id", user.id)
+              .in("question_id", chunk),
+          SAFE_IN_CHUNK_SIZE,
+        ),
+      ]);
 
-    if (optErr) throw optErr;
-    if (accErr) throw accErr;
-    if (qtErr) throw qtErr;
-    if (starErr) throw starErr;
-    if (progErr) throw progErr;
-
-    const tagIds = Array.from(new Set((qTags ?? []).map((t) => t.tag_id)));
-    const { data: tags } =
-      tagIds.length > 0
-        ? await supabase.from("tags").select("*").in("id", tagIds)
-        : { data: [] };
-
-    const tagMap = new Map((tags ?? []).map((t) => [t.id, t]));
-    const optionsMap = new Map<string, typeof options>();
-    for (const o of options ?? []) {
-      const list = optionsMap.get(o.question_id) ?? [];
-      list.push(o);
-      optionsMap.set(o.question_id, list);
-    }
-
-    const acceptedMap = new Map<string, typeof accepted>();
-    for (const a of accepted ?? []) {
-      const list = acceptedMap.get(a.question_id) ?? [];
-      list.push(a);
-      acceptedMap.set(a.question_id, list);
-    }
-
-    const tagsByQuestion = new Map<string, Array<NonNullable<typeof tags>[number]>>();
-    for (const qt of qTags ?? []) {
-      const tag = tagMap.get(qt.tag_id);
-      if (!tag) continue;
-      const list = tagsByQuestion.get(qt.question_id) ?? [];
-      list.push(tag);
-      tagsByQuestion.set(qt.question_id, list);
-    }
-
-    const starredSet = new Set((starred ?? []).map((s) => s.question_id));
-    const progressMap = new Map((progress ?? []).map((p) => [p.question_id, p]));
+    const starredSet = new Set(starred.map((s) => s.question_id));
+    const progressMap = new Map(progress.map((p) => [p.question_id, p]));
 
     const enriched = rows.map((q) => ({
       ...q,
-      options: optionsMap.get(q.id) ?? [],
-      accepted_answers: acceptedMap.get(q.id) ?? [],
-      tags: tagsByQuestion.get(q.id) ?? [],
+      options: optionsByQ.get(q.id) ?? [],
+      accepted_answers: answersByQ.get(q.id) ?? [],
+      tags: tagsByQ.get(q.id) ?? [],
       is_starred: starredSet.has(q.id),
       progress: progressMap.get(q.id) ?? null,
     }));
 
-    const total = count ?? enriched.length;
     return apiSuccess(enriched, {
       total,
       page: query.page,
@@ -262,91 +264,97 @@ export async function POST(
 
     if (createErr) throw createErr;
 
-    let insertedOptions: unknown[] = [];
-    if (input.options && input.options.length > 0) {
-      const { data: opts, error: optErr } = await supabase
-        .from("question_options")
-        .insert(
-          input.options.map((opt, idx) => ({
-            question_id: created.id,
-            study_set_id: setId,
-            position: opt.position ?? idx,
-            label: opt.label,
-            content: opt.content,
-            image_url: opt.image_url ?? null,
-            is_correct: opt.is_correct,
-          })),
-        )
-        .select("*")
-        .order("position", { ascending: true });
+    try {
+      let insertedOptions: unknown[] = [];
+      if (input.options && input.options.length > 0) {
+        const { data: opts, error: optErr } = await supabase
+          .from("question_options")
+          .insert(
+            input.options.map((opt, idx) => ({
+              question_id: created.id,
+              study_set_id: setId,
+              position: opt.position ?? idx,
+              label: opt.label,
+              content: opt.content,
+              image_url: opt.image_url ?? null,
+              is_correct: opt.is_correct,
+            })),
+          )
+          .select("*")
+          .order("position", { ascending: true });
 
-      if (optErr) throw optErr;
-      insertedOptions = opts ?? [];
-    }
-
-    let insertedAccepted: unknown[] = [];
-    if (input.accepted_answers && input.accepted_answers.length > 0) {
-      const { data: accs, error: accErr } = await supabase
-        .from("question_accepted_answers")
-        .insert(
-          input.accepted_answers.map((ans) => ({
-            question_id: created.id,
-            study_set_id: setId,
-            answer_text: ans.answer_text,
-            normalized_answer: normalizeAnswerText(ans.answer_text, ans.match_mode),
-            match_mode: ans.match_mode,
-          })),
-        )
-        .select("*");
-
-      if (accErr) throw accErr;
-      insertedAccepted = accs ?? [];
-    }
-
-    const attachedTags: unknown[] = [];
-    if (input.tags && input.tags.length > 0) {
-      const uniqueSlugs = new Map<string, string>();
-      for (const name of input.tags) {
-        uniqueSlugs.set(slugifyTag(name), name.trim());
+        if (optErr) throw optErr;
+        insertedOptions = opts ?? [];
       }
 
-      const tagRows = Array.from(uniqueSlugs.entries()).map(([slug, name]) => ({
-        owner_id: user.id,
-        name,
-        slug,
-      }));
+      let insertedAccepted: unknown[] = [];
+      if (input.accepted_answers && input.accepted_answers.length > 0) {
+        const { data: accs, error: accErr } = await supabase
+          .from("question_accepted_answers")
+          .insert(
+            input.accepted_answers.map((ans) => ({
+              question_id: created.id,
+              study_set_id: setId,
+              answer_text: ans.answer_text,
+              normalized_answer: normalizeAnswerText(ans.answer_text, ans.match_mode),
+              match_mode: ans.match_mode,
+            })),
+          )
+          .select("*");
 
-      const { data: upsertedTags, error: tagErr } = await supabase
-        .from("tags")
-        .upsert(tagRows, { onConflict: "owner_id,slug" })
-        .select("*");
-
-      if (tagErr) throw tagErr;
-
-      if (upsertedTags && upsertedTags.length > 0) {
-        const { error: qtErr } = await supabase.from("question_tags").upsert(
-          upsertedTags.map((t) => ({
-            question_id: created.id,
-            tag_id: t.id,
-            study_set_id: setId,
-          })),
-          { onConflict: "question_id,tag_id" },
-        );
-        if (qtErr) throw qtErr;
-        attachedTags.push(...upsertedTags);
+        if (accErr) throw accErr;
+        insertedAccepted = accs ?? [];
       }
-    }
 
-    return apiSuccess(
-      {
-        ...created,
-        options: insertedOptions,
-        accepted_answers: insertedAccepted,
-        tags: attachedTags,
-      },
-      undefined,
-      { status: 201 },
-    );
+      const attachedTags: unknown[] = [];
+      if (input.tags && input.tags.length > 0) {
+        const uniqueSlugs = new Map<string, string>();
+        for (const name of input.tags) {
+          uniqueSlugs.set(slugifyTag(name), name.trim());
+        }
+
+        const tagRows = Array.from(uniqueSlugs.entries()).map(([slug, name]) => ({
+          owner_id: user.id,
+          name,
+          slug,
+        }));
+
+        const { data: upsertedTags, error: tagErr } = await supabase
+          .from("tags")
+          .upsert(tagRows, { onConflict: "owner_id,slug" })
+          .select("*");
+
+        if (tagErr) throw tagErr;
+
+        if (upsertedTags && upsertedTags.length > 0) {
+          const { error: qtErr } = await supabase.from("question_tags").upsert(
+            upsertedTags.map((t) => ({
+              question_id: created.id,
+              tag_id: t.id,
+              study_set_id: setId,
+            })),
+            { onConflict: "question_id,tag_id" },
+          );
+          if (qtErr) throw qtErr;
+          attachedTags.push(...upsertedTags);
+        }
+      }
+
+      return apiSuccess(
+        {
+          ...created,
+          options: insertedOptions,
+          accepted_answers: insertedAccepted,
+          tags: attachedTags,
+        },
+        undefined,
+        { status: 201 },
+      );
+    } catch (childErr) {
+      // Clean up orphaned question row if child insert fails (P3-3)
+      await supabase.from("questions").delete().eq("id", created.id);
+      throw childErr;
+    }
   } catch (err) {
     return handleApiError(err);
   }

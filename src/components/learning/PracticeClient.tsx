@@ -38,14 +38,20 @@ import {
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   isEditableEventTarget,
+  isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   recordStudySessionAnswer,
   updateStudySession,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  ExamNavigatorGrid,
+  type NavigatorQuestionItem,
+} from "@/components/exam/ExamNavigatorGrid";
 import {
   gradeChoiceSelection,
   shuffleOptions,
@@ -89,7 +95,8 @@ interface PracticeClientProps {
 
 export function PracticeClient({ setId }: PracticeClientProps) {
   const { locale, t } = useI18n();
-  const prefersReducedMotion = useReducedMotion();
+  const { preferences, playFeedbackSound } = useUserPreferences();
+  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const searchParams = useSearchParams();
   const {
     data: bundle,
@@ -105,7 +112,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const initialChapterParam = searchParams.get("chapter") ?? "all";
   const initialQuestionIdsParam = searchParams.get("questionIds");
 
-  // Config state
+  // Config state (hydrated with user_preferences defaults — SH-032!)
   const [phase, setPhase] = React.useState<"config" | "active" | "complete">(
     "config",
   );
@@ -121,11 +128,32 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     React.useState<string>(initialChapterParam);
   const [selectedTag, setSelectedTag] = React.useState<string>("all");
   const [countMode, setCountMode] = React.useState<"all" | "custom">("all");
-  const [customCount, setCustomCount] = React.useState<number>(20);
-  const [shuffleQ, setShuffleQ] = React.useState<boolean>(false);
-  const [shuffleA, setShuffleA] = React.useState<boolean>(true);
+  const [customCountInput, setCustomCountInput] = React.useState<string>("20");
+  const [shuffleQ, setShuffleQ] = React.useState<boolean>(
+    () => preferences.default_shuffle_questions,
+  );
+  const [shuffleA, setShuffleA] = React.useState<boolean>(
+    () => preferences.default_shuffle_options,
+  );
   const [autoNext, setAutoNext] = React.useState<boolean>(false);
-  const [showExplanation, setShowExplanation] = React.useState<boolean>(true);
+  const [showExplanation, setShowExplanation] = React.useState<boolean>(
+    () => preferences.show_instant_feedback,
+  );
+
+  const syncedPrefsRef = React.useRef(false);
+  React.useEffect(() => {
+    if (syncedPrefsRef.current) return;
+    syncedPrefsRef.current = true;
+    setShuffleQ(preferences.default_shuffle_questions);
+    setShuffleA(preferences.default_shuffle_options);
+    setShowExplanation(preferences.show_instant_feedback);
+  }, [
+    preferences.default_shuffle_options,
+    preferences.default_shuffle_questions,
+    preferences.show_instant_feedback,
+  ]);
+
+  const customCount = Math.max(1, Number(customCountInput.trim()) || 20);
 
   // Active session state
   const [items, setItems] = React.useState<PracticeItem[]>([]);
@@ -421,6 +449,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         [currentItem.question.id]: nextState,
       };
       setAnswers(nextAnswers);
+      playFeedbackSound(isCorrect ? "correct" : "wrong");
       persistAnswer(currentItem.question, selectedIds, null, isCorrect);
 
       if (autoNext && isCorrect) {
@@ -444,6 +473,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       finishPractice,
       items.length,
       persistAnswer,
+      playFeedbackSound,
     ],
   );
 
@@ -492,9 +522,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         [currentItem.question.id]: nextState,
       };
       setAnswers(nextAnswers);
+      playFeedbackSound(graded.isCorrect ? "correct" : "wrong");
       persistAnswer(currentItem.question, [], typed, graded.isCorrect);
     },
-    [answers, currentAnswer, currentItem, persistAnswer],
+    [answers, currentAnswer, currentItem, persistAnswer, playFeedbackSound],
   );
 
   const handleGoNext = React.useCallback(() => {
@@ -540,7 +571,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         );
         return;
       }
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && !isInteractiveControlTarget(event.target)) {
         event.preventDefault();
         if (currentAnswer.isSubmitted) {
           handleGoNext();
@@ -583,6 +614,34 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     toggleStar,
   ]);
 
+  const practiceNavItems = React.useMemo<NavigatorQuestionItem[]>(() => {
+    return items.map((item, idx) => {
+      const ans = answers[item.question.id];
+      return {
+        attemptQuestionId: item.question.id,
+        position: idx,
+        isAnswered: Boolean(ans?.isSubmitted),
+        isFlagged: false,
+        practiceResult: ans?.isSubmitted
+          ? ans.isCorrect
+            ? "correct"
+            : "incorrect"
+          : null,
+      };
+    });
+  }, [answers, items]);
+
+  const handleSelectNavIndex = React.useCallback((idx: number) => {
+    // Cancel pending autoNext timer when jumping manually via navigator (SH-025 / BUG-020)!
+    if (autoNextTimerRef.current) {
+      clearTimeout(autoNextTimerRef.current);
+      autoNextTimerRef.current = null;
+    }
+    setCurrentIndex(idx);
+    questionStartRef.current = Date.now();
+    setNavSheetOpen(false);
+  }, []);
+
   if (isLoading) {
     return (
       <FocusModeShell
@@ -619,55 +678,14 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   });
 
   const renderNavigatorGrid = () => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>{lText(locale, "Tiến độ", "Progress")}</span>
-        <span className="font-medium tabular-nums">
-          {answeredCount}/{items.length}
-        </span>
-      </div>
-      <div className="grid grid-cols-5 gap-1.5">
-        {items.map((item, idx) => {
-          const ans = answers[item.question.id];
-          const isCurrent = idx === currentIndex;
-          let style = "border-border bg-card text-foreground hover:bg-secondary";
-          let statusLabel = lText(locale, "Chưa làm", "Unanswered");
-
-          if (ans?.isSubmitted) {
-            if (ans.isCorrect) {
-              style =
-                "border-success/50 bg-success-subtle text-success-subtle-foreground";
-              statusLabel = t("study.correct");
-            } else {
-              style =
-                "border-destructive/50 bg-destructive-subtle text-destructive-subtle-foreground";
-              statusLabel = t("study.incorrect");
-            }
-          }
-
-          return (
-            <button
-              key={item.question.id}
-              type="button"
-              onClick={() => {
-                setCurrentIndex(idx);
-                questionStartRef.current = Date.now();
-                setNavSheetOpen(false);
-              }}
-              aria-current={isCurrent ? "step" : undefined}
-              aria-label={`${lText(locale, "Câu", "Question")} ${idx + 1} (${statusLabel})`}
-              className={cn(
-                "flex h-9 w-full items-center justify-center rounded-md border text-xs font-medium tabular-nums transition-colors",
-                style,
-                isCurrent && "ring-2 ring-primary ring-offset-1 ring-offset-background",
-              )}
-            >
-              {idx + 1}
-            </button>
-          );
-        })}
-      </div>
-    </div>
+    <ExamNavigatorGrid
+      mode="practice"
+      items={practiceNavItems}
+      currentIndex={currentIndex}
+      answeredCount={answeredCount}
+      flaggedCount={0}
+      onSelectIndex={handleSelectNavIndex}
+    />
   );
 
   return (
@@ -824,13 +842,17 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                   </Button>
                   {countMode === "custom" ? (
                     <Input
-                      type="number"
-                      min={1}
-                      max={Math.max(1, filteredQuestions.length)}
-                      value={customCount}
-                      onChange={(e) =>
-                        setCustomCount(Math.max(1, Number(e.target.value) || 1))
-                      }
+                      type="text"
+                      inputMode="numeric"
+                      value={customCountInput}
+                      onChange={(e) => setCustomCountInput(e.target.value)}
+                      onBlur={() => {
+                        const clamped = Math.min(
+                          Math.max(1, filteredQuestions.length),
+                          Math.max(1, Number(customCountInput.trim()) || 20),
+                        );
+                        setCustomCountInput(String(clamped));
+                      }}
                       aria-label={lText(locale, "Số câu tùy chỉnh", "Custom count")}
                       className="h-10 w-28 tabular-nums"
                     />

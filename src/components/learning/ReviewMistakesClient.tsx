@@ -65,7 +65,7 @@ export function ReviewMistakesClient() {
 
   const setsQuery = useQuery({
     queryKey: ["accessible-sets"],
-    queryFn: fetchAccessibleSets,
+    queryFn: () => fetchAccessibleSets(),
     staleTime: 60_000,
   });
 
@@ -186,25 +186,40 @@ export function ReviewMistakesClient() {
     [dueIndex, dueItems.length, queryClient, t],
   );
 
-  // Target set for 1-click Practice / Test launch
-  const launchSetId =
-    selectedSetId !== "all"
-      ? selectedSetId
-      : mistakes[0]?.study_set_id ?? null;
+  // True multi-subject Practice & Exam launch (fixes SH-024 — NEVER drops sets after items[0]!)
+  const affectedSetIds = React.useMemo(() => {
+    if (selectedSetId !== "all") return [selectedSetId];
+    return Array.from(new Set(mistakes.map((m) => m.study_set_id).filter(Boolean)));
+  }, [mistakes, selectedSetId]);
 
-  const filteredQuestionIdsForLaunch = React.useMemo(() => {
-    if (!launchSetId) return [];
-    return mistakes
-      .filter((m) => m.study_set_id === launchSetId && m.needs_review)
-      .slice(0, 100)
-      .map((m) => m.question_id);
-  }, [launchSetId, mistakes]);
+  const practiceMistakesHref = React.useMemo(() => {
+    const qs = new URLSearchParams({ mode: "mistakes" });
+    if (selectedSetId !== "all") {
+      qs.set("setId", selectedSetId);
+    } else if (affectedSetIds.length > 0) {
+      qs.set("setIds", affectedSetIds.join(","));
+    }
+    if (selectedChapter !== "all") {
+      qs.set("chapter", selectedChapter);
+    }
+    return `/practice?${qs.toString()}`;
+  }, [affectedSetIds, selectedChapter, selectedSetId]);
+
+  const testMistakesHref = React.useMemo(() => {
+    const qs = new URLSearchParams({ mode: "mistakes" });
+    if (selectedSetId !== "all") {
+      qs.set("setId", selectedSetId);
+    } else if (affectedSetIds.length > 0) {
+      qs.set("setIds", affectedSetIds.join(","));
+    }
+    return `/exams/new?${qs.toString()}`;
+  }, [affectedSetIds, selectedSetId]);
 
   const needsReviewCount = mistakes.filter((m) => m.needs_review).length;
   const resolvedCount = mistakes.filter((m) => !m.needs_review).length;
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
+    <div className="mx-auto w-full max-w-6xl space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -221,22 +236,24 @@ export function ReviewMistakesClient() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {launchSetId ? (
+          {affectedSetIds.length > 0 ? (
             <>
               <Button asChild className="min-h-10">
-                <Link
-                  href={`/sets/${launchSetId}/practice?filter=mistakes${
-                    filteredQuestionIdsForLaunch.length > 0
-                      ? `&questionIds=${filteredQuestionIdsForLaunch.join(",")}`
-                      : ""
-                  }`}
-                >
+                <Link href={practiceMistakesHref}>
                   <Play className="size-4" aria-hidden="true" />
-                  {lText(locale, "Luyện tập câu sai", "Practice Mistakes")}
+                  {lText(
+                    locale,
+                    affectedSetIds.length > 1
+                      ? `Luyện tập câu sai (${affectedSetIds.length} môn)`
+                      : "Luyện tập câu sai",
+                    affectedSetIds.length > 1
+                      ? `Practice Mistakes (${affectedSetIds.length} sets)`
+                      : "Practice Mistakes",
+                  )}
                 </Link>
               </Button>
               <Button variant="outline" asChild className="min-h-10">
-                <Link href={`/sets/${launchSetId}/test?onlyMistakes=true`}>
+                <Link href={testMistakesHref}>
                   <ClipboardList className="size-4" aria-hidden="true" />
                   {lText(locale, "Thi thử câu sai", "Test Mistakes")}
                 </Link>

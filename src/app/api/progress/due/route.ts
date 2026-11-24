@@ -1,6 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, handleApiError } from "@/lib/security/errors";
+import {
+  fetchInChunks,
+  fetchQuestionRelationsChunked,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
 import { listDueQuerySchema } from "@/lib/validation/learning";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -34,40 +39,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return apiSuccess([], { total: 0 });
     }
 
-    const [
-      { data: questions, error: qErr },
-      { data: options, error: optErr },
-      { data: accepted, error: accErr },
-    ] = await Promise.all([
-      supabase.from("questions").select("*").in("id", questionIds),
-      supabase
-        .from("question_options")
-        .select("*")
-        .in("question_id", questionIds)
-        .order("position", { ascending: true }),
-      supabase
-        .from("question_accepted_answers")
-        .select("*")
-        .in("question_id", questionIds),
+    // SH-005: Chunk all relation queries safely (<= 100 Qs/batch)
+    const [questions, relations] = await Promise.all([
+      fetchInChunks(
+        questionIds,
+        async (chunk) => supabase.from("questions").select("*").in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      ),
+      fetchQuestionRelationsChunked(supabase, questionIds),
     ]);
 
-    if (qErr) throw qErr;
-    if (optErr) throw optErr;
-    if (accErr) throw accErr;
-
-    const qMap = new Map((questions ?? []).map((q) => [q.id, q]));
-    const optMap = new Map<string, typeof options>();
-    for (const o of options ?? []) {
-      const list = optMap.get(o.question_id) ?? [];
-      list.push(o);
-      optMap.set(o.question_id, list);
-    }
-    const accMap = new Map<string, typeof accepted>();
-    for (const a of accepted ?? []) {
-      const list = accMap.get(a.question_id) ?? [];
-      list.push(a);
-      accMap.set(a.question_id, list);
-    }
+    const qMap = new Map(questions.map((q) => [q.id, q]));
 
     const items = rows
       .map((prog) => {
@@ -77,8 +59,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           progress: prog,
           question: {
             ...q,
-            options: optMap.get(q.id) ?? [],
-            accepted_answers: accMap.get(q.id) ?? [],
+            options: relations.optionsByQ.get(q.id) ?? [],
+            accepted_answers: relations.answersByQ.get(q.id) ?? [],
+            tags: relations.tagsByQ.get(q.id) ?? [],
           },
         };
       })

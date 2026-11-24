@@ -334,6 +334,7 @@ export interface InspectedZipResult {
   zip: JSZip;
   entryCount: number;
   declaredUncompressedBytes: number;
+  compressedSizes: Map<string, number>;
 }
 
 /**
@@ -342,7 +343,8 @@ export interface InspectedZipResult {
  * - Magic bytes (PK\x03\x04)
  * - Central directory inspection BEFORE decompression (encryption, ZIP Slip, macros,
  *   entry cap, 50 MB uncompressed cap, 100:1 compression ratio bomb guard)
- * - Required OOXML structure verification
+ * - Streaming decompression budget & ratio enforcement (defeats forged ZIP headers!)
+ * - Required OOXML structure & XXE verification for ALL XML parts in .xlsx before ExcelJS load
  */
 export async function inspectAndLoadZip(
   bytes: Uint8Array,
@@ -359,12 +361,14 @@ export async function inspectAndLoadZip(
   }
 
   const cdEntries = inspectZipCentralDirectory(bytes);
+  const compressedSizes = new Map<string, number>();
 
   let nonMediaCount = 0;
   let totalUncompressed = 0;
 
   for (const entry of cdEntries) {
     assertSafeZipEntryPath(entry.name);
+    compressedSizes.set(entry.name, entry.compressedSize);
 
     // Bit 0 = encrypted entry
     if ((entry.flags & 0x01) !== 0) {
@@ -450,10 +454,16 @@ export async function inspectAndLoadZip(
     }
   }
 
-  // Verify [Content_Types].xml does not declare macroEnabled content
+  const inspectBudget = { remainingBytes: MAX_UNCOMPRESSED_BYTES };
+
+  // Verify [Content_Types].xml does not declare macroEnabled content or XXE
   const contentTypesEntry = zip.file("[Content_Types].xml");
   if (contentTypesEntry) {
-    const ctXml = await readSafeZipTextEntry(contentTypesEntry, { remainingBytes: MAX_UNCOMPRESSED_BYTES });
+    const ctXml = await readSafeZipTextEntry(contentTypesEntry, inspectBudget, {
+      compressedSize: compressedSizes.get("[Content_Types].xml"),
+      entryName: "[Content_Types].xml",
+    });
+    assertNoXxeDeclarations(ctXml);
     if (ctXml.toLowerCase().includes("macroenabled")) {
       throw new ImportSecurityError(
         "MACRO_PAYLOAD_DETECTED",
@@ -479,30 +489,208 @@ export async function inspectAndLoadZip(
     );
   }
 
+  // For XLSX: stream-decompress ALL archive entries under the 50 MB + 100:1 caps
+  // and verify EVERY XML/rels part against XXE BEFORE ExcelJS.xlsx.load() touches it!
+  if (expectedType === "xlsx") {
+    const decoder = new TextDecoder("utf-8", { fatal: false });
+    for (const [entryName, entry] of Object.entries(zip.files)) {
+      if (entry.dir || entryName === "[Content_Types].xml") continue;
+      const entryBytes = await readSafeZipEntryBytes(entry, inspectBudget, {
+        compressedSize: compressedSizes.get(entryName),
+        entryName,
+      });
+      const lower = entryName.toLowerCase();
+      if (lower.endsWith(".xml") || lower.endsWith(".rels")) {
+        assertNoXxeDeclarations(decoder.decode(entryBytes));
+      }
+    }
+  }
+
   return {
     zip,
     entryCount: cdEntries.length,
     declaredUncompressedBytes: totalUncompressed,
+    compressedSizes,
   };
 }
 
+export interface SafeZipReadOptions {
+  compressedSize?: number;
+  entryName?: string;
+}
+
+interface JSZipInternalStreamHelper {
+  on(event: "data", cb: (chunk: Uint8Array) => void): this;
+  on(event: "end", cb: () => void): this;
+  on(event: "error", cb: (err: unknown) => void): this;
+  pause(): this;
+  resume(): this;
+}
+
+type JSZipObjectWithInternalStream = JSZip.JSZipObject & {
+  internalStream?: (type: "uint8array") => JSZipInternalStreamHelper;
+};
+
 /**
- * Safely read a text entry from JSZip while tracking cumulative decompressed byte budget
- * (defends against spoofed ZIP header uncompressedSize values).
+ * Safely stream-decompress a JSZip entry chunk-by-chunk while enforcing cumulative
+ * decompressed byte cap (50 MB) and actual compression ratio cap (100:1) BEFORE full
+ * allocation — defending against forged ZIP Central Directory uncompressedSize headers (SEC-010).
+ */
+export async function readSafeZipEntryBytes(
+  entry: JSZip.JSZipObject,
+  budget: { remainingBytes: number },
+  options: SafeZipReadOptions = {},
+): Promise<Uint8Array> {
+  const entryLabel = options.entryName ?? entry.name;
+  const compressedSize = options.compressedSize;
+
+  const chunks: Uint8Array[] = [];
+  let entryBytes = 0;
+
+  const checkChunk = (chunk: Uint8Array): ImportSecurityError | null => {
+    entryBytes += chunk.byteLength;
+    budget.remainingBytes -= chunk.byteLength;
+    if (budget.remainingBytes < 0) {
+      return new ImportSecurityError(
+        "ZIP_UNCOMPRESSED_LIMIT_EXCEEDED",
+        "Decompressed archive content exceeded the 50 MB safety budget.",
+        400,
+      );
+    }
+    if (
+      compressedSize !== undefined &&
+      entryBytes > RATIO_CHECK_MIN_UNCOMPRESSED_BYTES
+    ) {
+      const ratio = entryBytes / Math.max(compressedSize, 1);
+      if (ratio > MAX_COMPRESSION_RATIO) {
+        return new ImportSecurityError(
+          "ZIP_RATIO_BOMB_DETECTED",
+          `Suspicious actual compression ratio (${Math.round(ratio)}:1) detected in "${entryLabel}". Archive rejected.`,
+          400,
+        );
+      }
+    }
+    return null;
+  };
+
+  const concatChunks = (): Uint8Array => {
+    const out = new Uint8Array(entryBytes);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.byteLength;
+    }
+    return out;
+  };
+
+  if (typeof entry.nodeStream === "function") {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
+      const stream = entry.nodeStream("nodebuffer") as NodeJS.ReadableStream & {
+        destroy?: () => void;
+      };
+
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        stream.destroy?.();
+        reject(err);
+      };
+
+      stream.on("data", (rawChunk: Buffer | Uint8Array) => {
+        if (settled) return;
+        const chunk =
+          rawChunk instanceof Uint8Array
+            ? new Uint8Array(rawChunk.buffer, rawChunk.byteOffset, rawChunk.byteLength)
+            : new Uint8Array(rawChunk);
+        const violation = checkChunk(chunk);
+        if (violation) {
+          fail(violation);
+          return;
+        }
+        chunks.push(chunk);
+      });
+
+      stream.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve(concatChunks());
+      });
+
+      stream.on("error", () => {
+        fail(
+          new ImportSecurityError(
+            "CORRUPT_ARCHIVE",
+            `Corrupt or unreadable archive entry "${entryLabel}".`,
+            400,
+          ),
+        );
+      });
+    });
+  }
+
+  // Fallback for non-Node runtimes using JSZip internalStream when available
+  const streamable = entry as JSZipObjectWithInternalStream;
+  if (typeof streamable.internalStream === "function") {
+    const internalStream = streamable.internalStream.bind(streamable);
+    return new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
+      const helper = internalStream("uint8array");
+
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        helper.pause();
+        reject(err);
+      };
+
+      helper
+        .on("data", (chunk: Uint8Array) => {
+          if (settled) return;
+          const violation = checkChunk(chunk);
+          if (violation) {
+            fail(violation);
+            return;
+          }
+          chunks.push(chunk);
+        })
+        .on("end", () => {
+          if (settled) return;
+          settled = true;
+          resolve(concatChunks());
+        })
+        .on("error", () => {
+          fail(
+            new ImportSecurityError(
+              "CORRUPT_ARCHIVE",
+              `Corrupt or unreadable archive entry "${entryLabel}".`,
+              400,
+            ),
+          );
+        })
+        .resume();
+    });
+  }
+
+  // Final defensive fallback if neither streaming API exists in a constrained runtime
+  const fallbackBytes = await entry.async("uint8array");
+  const violation = checkChunk(fallbackBytes);
+  if (violation) {
+    throw violation;
+  }
+  return fallbackBytes;
+}
+
+/**
+ * Safely stream-read a UTF-8 text entry from JSZip while enforcing cumulative
+ * decompressed byte budget and actual compression ratio limits.
  */
 export async function readSafeZipTextEntry(
   entry: JSZip.JSZipObject,
   budget: { remainingBytes: number },
+  options: SafeZipReadOptions = {},
 ): Promise<string> {
-  const bytes = await entry.async("uint8array");
-  budget.remainingBytes -= bytes.byteLength;
-  if (budget.remainingBytes < 0) {
-    throw new ImportSecurityError(
-      "ZIP_UNCOMPRESSED_LIMIT_EXCEEDED",
-      "Decompressed archive content exceeded the 50 MB safety budget.",
-      400,
-    );
-  }
+  const bytes = await readSafeZipEntryBytes(entry, budget, options);
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 

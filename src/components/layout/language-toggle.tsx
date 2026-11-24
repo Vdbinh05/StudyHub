@@ -30,7 +30,10 @@ export function LanguageToggle({ onPersist, className }: LanguageToggleProps) {
           ? "Chuyển ngôn ngữ giao diện sang tiếng Anh"
           : "Switch interface language to Vietnamese"
       }
-      className={className ?? "h-9 gap-1.5 px-2.5 font-mono text-xs font-semibold"}
+      className={
+        className ??
+        "min-h-11 min-w-11 gap-1.5 px-2.5 font-mono text-xs font-semibold sm:min-h-9 sm:min-w-9"
+      }
     >
       <Languages className="size-4" aria-hidden="true" />
       <span>{locale.toUpperCase()}</span>

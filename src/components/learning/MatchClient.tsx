@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/lib/i18n";
+import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   updateStudySession,
@@ -60,7 +61,8 @@ function formatTenths(ms: number): string {
 
 export function MatchClient({ setId }: MatchClientProps) {
   const { locale, t } = useI18n();
-  const prefersReducedMotion = useReducedMotion();
+  const { preferences, playFeedbackSound } = useUserPreferences();
+  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
     data: bundle,
     isLoading,
@@ -68,6 +70,8 @@ export function MatchClient({ setId }: MatchClientProps) {
     error,
     refetch,
   } = useStudySetBundle(setId);
+
+  const gridRef = React.useRef<HTMLDivElement | null>(null);
 
   const [phase, setPhase] = React.useState<"config" | "playing" | "complete">(
     "config",
@@ -156,6 +160,7 @@ export function MatchClient({ setId }: MatchClientProps) {
       if (next.lastOutcome === "match") {
         setMismatchTileIds(null);
         setStatusMessage(lText(locale, "Ghép đúng cặp!", "Matched pair!"));
+        playFeedbackSound(next.isCompleted ? "complete" : "correct");
         if (next.isCompleted) {
           setLiveElapsedMs(next.elapsedMs);
           setPhase("complete");
@@ -169,6 +174,7 @@ export function MatchClient({ setId }: MatchClientProps) {
           }
         }
       } else if (next.lastOutcome === "mismatch" && next.lastPairTileIds) {
+        playFeedbackSound("wrong");
         setMismatchTileIds(next.lastPairTileIds);
         setStatusMessage(
           lText(locale, "Chưa khớp — hãy thử lại.", "Not a match — try again."),
@@ -179,15 +185,20 @@ export function MatchClient({ setId }: MatchClientProps) {
         }, 450);
       }
     },
-    [board, locale],
+    [board, locale, playFeedbackSound],
   );
 
-  // Keyboard grid arrow navigation across Match tiles
+  // Keyboard grid arrow navigation dynamically reading rendered CSS grid column count (LM-07!)
   const handleTileKeyDown = React.useCallback(
     (index: number, event: React.KeyboardEvent<HTMLButtonElement>) => {
       if (!board) return;
       const total = board.tiles.length;
-      const cols = total <= 8 ? 2 : 4;
+      let cols = total <= 8 ? 2 : 4;
+      if (gridRef.current && typeof window !== "undefined") {
+        const template = window.getComputedStyle(gridRef.current).gridTemplateColumns;
+        const measured = template ? template.split(/\s+/).filter(Boolean).length : 0;
+        if (measured > 0) cols = measured;
+      }
       let nextIdx = -1;
 
       if (event.key === "ArrowRight") nextIdx = (index + 1) % total;
@@ -443,6 +454,7 @@ export function MatchClient({ setId }: MatchClientProps) {
 
           {/* Match Tile Grid */}
           <div
+            ref={gridRef}
             className={cn(
               "grid gap-3",
               board.tiles.length <= 8

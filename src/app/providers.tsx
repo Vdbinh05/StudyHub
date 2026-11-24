@@ -1,12 +1,16 @@
 "use client";
 
 import * as React from "react";
+import { usePathname } from "next/navigation";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
+import { ApiError } from "@/components/layout/api-client";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { I18nProvider } from "@/lib/i18n";
+import { I18nProvider, useI18n } from "@/lib/i18n";
+import { PreferencesProvider, useUserPreferences } from "@/lib/preferences";
+import type { Locale } from "@/types/domain";
 
 function makeQueryClient() {
   return new QueryClient({
@@ -14,7 +18,22 @@ function makeQueryClient() {
       queries: {
         staleTime: 30_000,
         gcTime: 5 * 60_000,
-        retry: 1,
+        retry: (failureCount, error) => {
+          if (failureCount >= 1) return false;
+          if (error instanceof ApiError) {
+            if (
+              error.status === 400 ||
+              error.status === 401 ||
+              error.status === 403 ||
+              error.status === 404 ||
+              error.status === 503 ||
+              error.code === "SUPABASE_NOT_CONFIGURED"
+            ) {
+              return false;
+            }
+          }
+          return true;
+        },
         refetchOnWindowFocus: false,
       },
       mutations: {
@@ -22,6 +41,201 @@ function makeQueryClient() {
       },
     },
   });
+}
+
+const EXACT_ROUTE_TITLES: Record<string, { vi: string; en: string }> = {
+  "/": {
+    vi: "StudyHub — Nền tảng tự học & luyện thi cá nhân",
+    en: "StudyHub — Personal Self-Study & Exam Platform",
+  },
+  "/login": { vi: "Đăng nhập | StudyHub", en: "Sign in | StudyHub" },
+  "/register": { vi: "Đăng ký | StudyHub", en: "Sign up | StudyHub" },
+  "/forgot-password": {
+    vi: "Quên mật khẩu | StudyHub",
+    en: "Forgot password | StudyHub",
+  },
+  "/reset-password": {
+    vi: "Đặt lại mật khẩu | StudyHub",
+    en: "Reset password | StudyHub",
+  },
+  "/dashboard": { vi: "Tổng quan | StudyHub", en: "Dashboard | StudyHub" },
+  "/library": { vi: "Thư viện học phần | StudyHub", en: "Library | StudyHub" },
+  "/folders": { vi: "Thư mục | StudyHub", en: "Folders | StudyHub" },
+  "/import": {
+    vi: "Nhập câu hỏi từ file | StudyHub",
+    en: "Import questions | StudyHub",
+  },
+  "/sets/new": {
+    vi: "Tạo học phần mới | StudyHub",
+    en: "Create study set | StudyHub",
+  },
+  "/exams": {
+    vi: "Đề & Chu kỳ thi | StudyHub",
+    en: "Exams & Coverage Cycles | StudyHub",
+  },
+  "/exams/new": {
+    vi: "Thi thử tùy chỉnh | StudyHub",
+    en: "Custom Exam Builder | StudyHub",
+  },
+  "/practice": {
+    vi: "Luyện tập tùy chọn | StudyHub",
+    en: "Custom Practice | StudyHub",
+  },
+  "/review": {
+    vi: "Ôn tập & Câu đã sai | StudyHub",
+    en: "Review & Mistakes | StudyHub",
+  },
+  "/starred": {
+    vi: "Câu hỏi đánh dấu sao | StudyHub",
+    en: "Starred Questions | StudyHub",
+  },
+  "/history": {
+    vi: "Lịch sử học tập & Thi thử | StudyHub",
+    en: "Study & Exam History | StudyHub",
+  },
+  "/statistics": {
+    vi: "Thống kê học tập | StudyHub",
+    en: "Study Statistics | StudyHub",
+  },
+  "/shared": {
+    vi: "Được chia sẻ với tôi | StudyHub",
+    en: "Shared with me | StudyHub",
+  },
+  "/friends": {
+    vi: "Bạn bè & Chia sẻ | StudyHub",
+    en: "Friends & Sharing | StudyHub",
+  },
+  "/profile": {
+    vi: "Hồ sơ cá nhân | StudyHub",
+    en: "Profile | StudyHub",
+  },
+  "/settings": { vi: "Cài đặt | StudyHub", en: "Settings | StudyHub" },
+};
+
+function resolveLocalizedTitle(pathname: string, locale: Locale): string | null {
+  const exact = EXACT_ROUTE_TITLES[pathname];
+  if (exact) return exact[locale];
+
+  if (/^\/sets\/[^/]+\/edit$/.test(pathname)) {
+    return locale === "vi"
+      ? "Chỉnh sửa câu hỏi | StudyHub"
+      : "Edit questions | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/import$/.test(pathname)) {
+    return locale === "vi"
+      ? "Nhập câu hỏi | StudyHub"
+      : "Import questions | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/flashcards$/.test(pathname)) {
+    return locale === "vi" ? "Flashcards | StudyHub" : "Flashcards | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/learn$/.test(pathname)) {
+    return locale === "vi" ? "Học thích ứng | StudyHub" : "Adaptive Learn | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/practice$/.test(pathname)) {
+    return locale === "vi" ? "Luyện trắc nghiệm | StudyHub" : "Practice | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/write$/.test(pathname)) {
+    return locale === "vi" ? "Gõ đáp án | StudyHub" : "Write Mode | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/match$/.test(pathname)) {
+    return locale === "vi" ? "Ghép thẻ | StudyHub" : "Match Mode | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/test$/.test(pathname)) {
+    return locale === "vi" ? "Phòng thi thử | StudyHub" : "Mock Exam | StudyHub";
+  }
+  if (/^\/sets\/[^/]+\/results\/[^/]+$/.test(pathname) || /^\/exams\/[^/]+\/results$/.test(pathname)) {
+    return locale === "vi" ? "Kết quả bài thi | StudyHub" : "Exam Results | StudyHub";
+  }
+  if (/^\/exams\/[^/]+$/.test(pathname)) {
+    return locale === "vi" ? "Đang làm bài thi | StudyHub" : "Live Exam | StudyHub";
+  }
+  if (pathname.startsWith("/share/")) {
+    return locale === "vi"
+      ? "Liên kết chia sẻ học phần | StudyHub"
+      : "Shared Study Set | StudyHub";
+  }
+  return null;
+}
+
+function DocumentTitleSync() {
+  const { locale } = useI18n();
+  const pathname = usePathname() ?? "/";
+
+  React.useEffect(() => {
+    const nextTitle = resolveLocalizedTitle(pathname, locale);
+    if (!nextTitle) return;
+
+    const applyTitle = () => {
+      if (document.title !== nextTitle) {
+        document.title = nextTitle;
+      }
+    };
+
+    applyTitle();
+    const rafId = window.requestAnimationFrame(applyTitle);
+
+    const observer = new MutationObserver(applyTitle);
+    if (document.head) {
+      observer.observe(document.head, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      observer.disconnect();
+    };
+  }, [pathname, locale]);
+
+  return null;
+}
+
+function SkipToContentLink() {
+  const { t } = useI18n();
+  return (
+    <a href="#main-content" className="skip-to-content">
+      {t("common.skipToContent")}
+    </a>
+  );
+}
+
+function ResponsiveToaster() {
+  const [isMobile, setIsMobile] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mql = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobile(mql.matches);
+    update();
+    mql.addEventListener("change", update);
+    return () => mql.removeEventListener("change", update);
+  }, []);
+
+  return (
+    <Toaster
+      position={isMobile ? "top-center" : "bottom-right"}
+      richColors
+      closeButton
+    />
+  );
+}
+
+function PreferencesMotionShell({ children }: { children: React.ReactNode }) {
+  const { preferences } = useUserPreferences();
+
+  return (
+    <MotionConfig reducedMotion={preferences.reduced_motion ? "always" : "user"}>
+      <TooltipProvider>
+        <SkipToContentLink />
+        <DocumentTitleSync />
+        {children}
+        <ResponsiveToaster />
+      </TooltipProvider>
+    </MotionConfig>
+  );
 }
 
 export function AppProviders({ children }: { children: React.ReactNode }) {
@@ -36,12 +250,9 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     >
       <QueryClientProvider client={queryClient}>
         <I18nProvider defaultLocale="vi">
-          <MotionConfig reducedMotion="user">
-            <TooltipProvider>
-              {children}
-              <Toaster position="bottom-right" richColors closeButton />
-            </TooltipProvider>
-          </MotionConfig>
+          <PreferencesProvider>
+            <PreferencesMotionShell>{children}</PreferencesMotionShell>
+          </PreferencesProvider>
         </I18nProvider>
       </QueryClientProvider>
     </ThemeProvider>

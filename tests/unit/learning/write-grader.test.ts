@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   gradeWriteAnswer,
   isLongOpenAnswer,
+  normalizeNumericCanonical,
+  normalizeShortAnswerSqlCompatible,
   normalizeWriteText,
 } from "@/lib/learning/write-grader";
 
@@ -95,5 +97,33 @@ describe("Deterministic Write Mode Grader (write-grader.ts)", () => {
         ignoreDiacritics: true,
       }),
     ).toBe("doc lap tu do");
+  });
+
+  it("matches Migration 0005 SQL trim_scale numeric semantics for 10, 100, 0, and 1.50 (SH-007 regression)", () => {
+    expect(normalizeNumericCanonical("10")).toBe("10");
+    expect(normalizeNumericCanonical("100")).toBe("100");
+    expect(normalizeNumericCanonical("100.00")).toBe("100");
+    expect(normalizeNumericCanonical("0")).toBe("0");
+    expect(normalizeNumericCanonical("0.00")).toBe("0");
+    expect(normalizeNumericCanonical("-0")).toBe("0");
+    expect(normalizeNumericCanonical("1.50")).toBe("1.5");
+    expect(normalizeNumericCanonical("3,50")).toBe("3.5");
+
+    // 1 must NEVER falsely pass when correct answer is 10 or 100!
+    expect(
+      gradeWriteAnswer("1", [{ answer_text: "10", match_mode: "numeric" }]).isCorrect,
+    ).toBe(false);
+    expect(
+      gradeWriteAnswer("1", [{ answer_text: "100", match_mode: "numeric" }]).isCorrect,
+    ).toBe(false);
+    // 0 MUST match 0 and 0.0!
+    expect(
+      gradeWriteAnswer("0", [{ answer_text: "0", match_mode: "numeric" }]).isCorrect,
+    ).toBe(true);
+    expect(
+      gradeWriteAnswer("0.0", [{ answer_text: "0", match_mode: "numeric" }]).isCorrect,
+    ).toBe(true);
+    expect(normalizeShortAnswerSqlCompatible("0", "numeric")).toBe("0");
+    expect(normalizeShortAnswerSqlCompatible("100.00", "numeric")).toBe("100");
   });
 });

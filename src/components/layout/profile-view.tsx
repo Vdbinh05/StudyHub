@@ -9,7 +9,11 @@ import {
   Save,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -27,8 +31,15 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
-import { tryCreateClient } from "@/lib/supabase/client";
 import type { Profile } from "@/types/domain";
+
+interface UploadedAvatarResponse {
+  path: string;
+  signedUrl: string;
+  proxyUrl?: string;
+  mimeType: string;
+  size: number;
+}
 
 const ALLOWED_AVATAR_MIME = new Set([
   "image/png",
@@ -43,6 +54,7 @@ export function ProfileView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const [draft, setDraft] = React.useState<{
     displayName?: string;
@@ -51,9 +63,15 @@ export function ProfileView() {
     avatarUrl?: string;
   }>({});
   const [uploadingAvatar, setUploadingAvatar] = React.useState(false);
+  const [nameError, setNameError] = React.useState<string | null>(null);
+  const [usernameError, setUsernameError] = React.useState<string | null>(null);
+
+  const nameRef = React.useRef<HTMLInputElement>(null);
+  const usernameRef = React.useRef<HTMLInputElement>(null);
 
   const profileQuery = useQuery<Profile>({
     queryKey: ["profile-detail"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<Profile | { profile: Profile }>("/api/profile");
       const raw = res.data;
@@ -69,10 +87,14 @@ export function ProfileView() {
   const bio = draft.bio ?? profileQuery.data?.bio ?? "";
   const avatarUrl = draft.avatarUrl ?? profileQuery.data?.avatar_url ?? "";
 
-  const setDisplayName = (val: string) =>
+  const setDisplayName = (val: string) => {
+    setNameError(null);
     setDraft((prev) => ({ ...prev, displayName: val }));
-  const setUsername = (val: string) =>
+  };
+  const setUsername = (val: string) => {
+    setUsernameError(null);
     setDraft((prev) => ({ ...prev, username: val }));
+  };
   const setBio = (val: string) => setDraft((prev) => ({ ...prev, bio: val }));
   const setAvatarUrl = (val: string) =>
     setDraft((prev) => ({ ...prev, avatarUrl: val }));
@@ -80,13 +102,6 @@ export function ProfileView() {
   const updateMutation = useMutation({
     mutationFn: async () => {
       const trimmedUsername = username.trim().toLowerCase();
-      if (trimmedUsername && !USERNAME_REGEX.test(trimmedUsername)) {
-        throw new Error(
-          vi
-            ? "Username chỉ gồm chữ thường a-z, số 0-9 và dấu gạch dưới _ (3–30 ký tự)."
-            : "Username must be 3–30 lowercase letters, numbers, or underscores.",
-        );
-      }
       const res = await apiFetch<Profile>("/api/profile", {
         method: "PATCH",
         body: JSON.stringify({
@@ -104,10 +119,11 @@ export function ProfileView() {
       toast.success(t("settings.savedSuccess"));
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
+  // Server-validated avatar upload via POST /api/uploads/image (fixes SH-019 / BUG-004)
   const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -126,52 +142,73 @@ export function ProfileView() {
       return;
     }
 
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      toast.error(
-        vi ? "Supabase chưa được cấu hình." : "Supabase is not configured.",
-      );
-      return;
-    }
-
     setUploadingAvatar(true);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
-        toast.error(vi ? "Vui lòng đăng nhập lại." : "Please sign in again.");
-        return;
-      }
-      const ext = file.name.split(".").pop()?.toLowerCase() || "png";
-      const safeExt = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext)
-        ? ext
-        : "png";
-      const path = `${user.id}/avatar-${Date.now()}.${safeExt}`;
-      const { error } = await supabase.storage
-        .from("study-media")
-        .upload(path, file, { contentType: file.type, upsert: true });
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("purpose", "avatar");
 
-      if (error) {
-        toast.error(error.message);
-        return;
+      const res = await apiFetch<UploadedAvatarResponse>("/api/uploads/image", {
+        method: "POST",
+        body: formData,
+      });
+      const resolvedUrl =
+        res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
+      if (!resolvedUrl) {
+        throw new Error(t("common.errorGeneric"));
       }
-
-      const { data: urlData } = supabase.storage
-        .from("study-media")
-        .getPublicUrl(path);
-      setAvatarUrl(urlData.publicUrl);
+      setAvatarUrl(resolvedUrl);
       toast.success(
         vi
           ? "Đã tải ảnh đại diện. Nhấn Lưu thay đổi để áp dụng."
           : "Avatar uploaded. Click Save changes to apply.",
       );
-    } catch {
-      toast.error(t("common.errorGeneric"));
+    } catch (err) {
+      toast.error(getFriendlyErrorMessage(err, locale));
     } finally {
       setUploadingAvatar(false);
     }
   };
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setNameError(null);
+    setUsernameError(null);
+
+    if (!displayName.trim()) {
+      setNameError(
+        vi ? "Vui lòng nhập tên hiển thị." : "Display name is required.",
+      );
+      nameRef.current?.focus();
+      return;
+    }
+
+    const trimmedUsername = username.trim().toLowerCase();
+    if (trimmedUsername && !USERNAME_REGEX.test(trimmedUsername)) {
+      setUsernameError(
+        vi
+          ? "Username chỉ gồm chữ thường a-z, số 0-9 và dấu gạch dưới _ (3–30 ký tự)."
+          : "Username must be 3–30 lowercase letters, numbers, or underscores.",
+      );
+      usernameRef.current?.focus();
+      return;
+    }
+
+    updateMutation.mutate();
+  };
+
+  if (!configured) {
+    return (
+      <FadeIn aboveFold className="mx-auto max-w-2xl space-y-6">
+        <PageHeader title={t("settings.profileTab")} />
+        <EmptyState
+          icon={AlertCircle}
+          title={vi ? "Chưa thể tải hồ sơ cá nhân" : "Profile unavailable"}
+          description={t("common.serviceUnavailableDesc")}
+        />
+      </FadeIn>
+    );
+  }
 
   if (profileQuery.isLoading) {
     return <Skeleton className="mx-auto h-96 max-w-2xl rounded-xl" />;
@@ -182,11 +219,7 @@ export function ProfileView() {
       <EmptyState
         icon={AlertCircle}
         title={vi ? "Không thể tải hồ sơ cá nhân" : "Unable to load profile"}
-        description={
-          profileQuery.error instanceof Error
-            ? profileQuery.error.message
-            : t("common.errorGeneric")
-        }
+        description={getFriendlyErrorMessage(profileQuery.error, locale)}
         action={
           <Button onClick={() => void profileQuery.refetch()}>
             {t("common.retry")}
@@ -202,7 +235,7 @@ export function ProfileView() {
     .toUpperCase();
 
   return (
-    <FadeIn className="mx-auto max-w-2xl space-y-6">
+    <FadeIn aboveFold className="mx-auto max-w-2xl space-y-6">
       <PageHeader
         title={t("settings.profileTab")}
         description={
@@ -217,18 +250,13 @@ export function ProfileView() {
           <CardTitle className="text-base">
             {vi ? "Thông tin cá nhân" : "Personal Details"}
           </CardTitle>
-          <CardDescription>{profileQuery.data.email}</CardDescription>
+          {profileQuery.data.email && (
+            <CardDescription>{profileQuery.data.email}</CardDescription>
+          )}
         </CardHeader>
 
         <CardContent>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!displayName.trim()) return;
-              updateMutation.mutate();
-            }}
-            className="space-y-5"
-          >
+          <form onSubmit={handleSubmit} noValidate className="space-y-5">
             {/* Avatar Preview + Upload */}
             <div className="flex flex-wrap items-center gap-4">
               <Avatar className="size-16 border">
@@ -299,17 +327,30 @@ export function ProfileView() {
                   {t("auth.displayName")}
                 </Label>
                 <Input
+                  ref={nameRef}
                   id="profile-display-name"
                   required
                   maxLength={100}
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
+                  aria-invalid={nameError ? "true" : "false"}
+                  aria-describedby={nameError ? "profile-name-error" : undefined}
                 />
+                {nameError && (
+                  <p
+                    id="profile-name-error"
+                    role="alert"
+                    className="text-destructive text-xs font-medium"
+                  >
+                    {nameError}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
                 <Label htmlFor="profile-username">{t("auth.username")}</Label>
                 <Input
+                  ref={usernameRef}
                   id="profile-username"
                   spellCheck={false}
                   autoCapitalize="none"
@@ -318,12 +359,27 @@ export function ProfileView() {
                   placeholder="minh_study"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  aria-invalid={usernameError ? "true" : "false"}
+                  aria-describedby={
+                    usernameError
+                      ? "profile-username-hint profile-username-error"
+                      : "profile-username-hint"
+                  }
                 />
-                <p className="text-muted-foreground text-xs">
+                <p id="profile-username-hint" className="text-muted-foreground text-xs">
                   {vi
                     ? "3–30 ký tự chữ thường (a-z), số và dấu gạch dưới (_)."
                     : "3–30 lowercase letters, numbers, and underscores."}
                 </p>
+                {usernameError && (
+                  <p
+                    id="profile-username-error"
+                    role="alert"
+                    className="text-destructive text-xs font-medium"
+                  >
+                    {usernameError}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -346,10 +402,7 @@ export function ProfileView() {
             </div>
 
             <div className="flex justify-end">
-              <Button
-                type="submit"
-                disabled={!displayName.trim() || updateMutation.isPending}
-              >
+              <Button type="submit" disabled={updateMutation.isPending}>
                 {updateMutation.isPending ? (
                   <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                 ) : (

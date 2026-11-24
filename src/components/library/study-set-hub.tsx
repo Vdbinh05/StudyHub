@@ -27,7 +27,12 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, formatRelativeTime } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  formatRelativeTime,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -70,9 +75,11 @@ export function StudySetHub({ setId }: { setId: string }) {
   const vi = locale === "vi";
   const router = useRouter();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const [shareOpen, setShareOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
   const [chapterFilter, setChapterFilter] = React.useState("all");
   const [starredOnly, setStarredOnly] = React.useState(false);
   const [showAnswers, setShowAnswers] = React.useState(true);
@@ -80,8 +87,17 @@ export function StudySetHub({ setId }: { setId: string }) {
 
   const listParentRef = React.useRef<HTMLDivElement>(null);
 
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   const setQuery = useQuery<StudySetDetailResponse>({
     queryKey: ["study-set", setId],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<StudySetDetailResponse>(`/api/sets/${setId}`);
       return res.data;
@@ -89,12 +105,13 @@ export function StudySetHub({ setId }: { setId: string }) {
   });
 
   const questionsQuery = useQuery<{ items: Question[]; total: number }>({
-    queryKey: ["set-questions", setId, page, search.trim(), chapterFilter, starredOnly],
+    queryKey: ["set-questions", setId, page, debouncedSearch, chapterFilter, starredOnly],
+    enabled: configured && Boolean(setQuery.data),
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("pageSize", "500");
-      if (search.trim()) params.set("search", search.trim());
+      if (debouncedSearch) params.set("search", debouncedSearch);
       if (chapterFilter !== "all") params.set("chapter", chapterFilter);
       if (starredOnly) params.set("starredOnly", "true");
       const res = await apiFetch<Question[]>(
@@ -108,21 +125,61 @@ export function StudySetHub({ setId }: { setId: string }) {
     },
   });
 
+  // Paginated fetch respecting Zod max(200) on /api/starred (fixes SH-009)
   const starredQuery = useQuery<Set<string>>({
     queryKey: ["starred-ids", setId],
+    enabled: configured && Boolean(setQuery.data),
     queryFn: async () => {
       try {
-        const res = await apiFetch<StarredRow[]>(
-          `/api/starred?studySetId=${encodeURIComponent(setId)}&pageSize=500`,
-        );
-        const list = Array.isArray(res.data) ? res.data : [];
-        const ids = list
-          .map((r) => r.question?.id ?? r.question_id)
-          .filter((id): id is string => Boolean(id));
-        return new Set(ids);
+        const ids = new Set<string>();
+        let starPage = 1;
+        let hasMore = true;
+        while (hasMore && starPage <= 25) {
+          const res = await apiFetch<StarredRow[]>(
+            `/api/starred?studySetId=${encodeURIComponent(setId)}&page=${starPage}&pageSize=200`,
+          );
+          const list = Array.isArray(res.data) ? res.data : [];
+          for (const r of list) {
+            const qId = r.question?.id ?? r.question_id;
+            if (qId) ids.add(qId);
+          }
+          hasMore = Boolean(res.meta?.hasMore) && list.length === 200;
+          starPage += 1;
+        }
+        return ids;
       } catch {
         return new Set<string>();
       }
+    },
+  });
+
+  const favoriteSetMutation = useMutation({
+    mutationFn: async (nextFav: boolean) => {
+      await apiFetch(`/api/sets/${setId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_favorite: nextFav }),
+      });
+    },
+    onMutate: async (nextFav) => {
+      await queryClient.cancelQueries({ queryKey: ["study-set", setId] });
+      const prev = queryClient.getQueryData<StudySetDetailResponse>(["study-set", setId]);
+      if (prev) {
+        queryClient.setQueryData(["study-set", setId], {
+          ...prev,
+          is_favorite: nextFav,
+        });
+      }
+      return { prev };
+    },
+    onError: (err, _, ctx) => {
+      if (ctx?.prev) {
+        queryClient.setQueryData(["study-set", setId], ctx.prev);
+      }
+      toast.error(getFriendlyErrorMessage(err, locale));
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
+      queryClient.invalidateQueries({ queryKey: ["study-sets"] });
     },
   });
 
@@ -146,11 +203,11 @@ export function StudySetHub({ setId }: { setId: string }) {
       queryClient.setQueryData(["starred-ids", setId], next);
       return { prev };
     },
-    onError: (_, __, ctx) => {
+    onError: (err, __, ctx) => {
       if (ctx?.prev) {
         queryClient.setQueryData(["starred-ids", setId], ctx.prev);
       }
-      toast.error(t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["starred-ids", setId] });
@@ -171,7 +228,7 @@ export function StudySetHub({ setId }: { setId: string }) {
       router.push(`/sets/${cloned.id}`);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -203,6 +260,21 @@ export function StudySetHub({ setId }: { setId: string }) {
     overscan: 6,
   });
 
+  if (!configured) {
+    return (
+      <EmptyState
+        icon={AlertCircle}
+        title={vi ? "Không thể tải học phần" : "Study set unavailable"}
+        description={t("common.serviceUnavailableDesc")}
+        action={
+          <Button asChild variant="outline">
+            <Link href="/library">{t("library.title")}</Link>
+          </Button>
+        }
+      />
+    );
+  }
+
   if (setQuery.isLoading) {
     return (
       <div className="space-y-6">
@@ -223,8 +295,8 @@ export function StudySetHub({ setId }: { setId: string }) {
         icon={AlertCircle}
         title={vi ? "Không tìm thấy học phần" : "Study set not found"}
         description={
-          setQuery.error instanceof Error
-            ? setQuery.error.message
+          setQuery.error
+            ? getFriendlyErrorMessage(setQuery.error, locale)
             : vi
               ? "Học phần không tồn tại hoặc bạn không có quyền truy cập."
               : "This study set does not exist or you do not have access to it."
@@ -239,23 +311,25 @@ export function StudySetHub({ setId }: { setId: string }) {
   }
 
   const studySet = setQuery.data;
+  const isOwner = studySet.role === "owner" || studySet.role === undefined;
   const canEdit =
-    studySet.can_edit !== undefined
-      ? studySet.can_edit
-      : studySet.role !== "viewer";
+    isOwner ||
+    studySet.role === "editor" ||
+    studySet.can_edit === true;
   const hasQuestions = studySet.question_count > 0 || questions.length > 0;
+  const isFavorite = Boolean(studySet.is_favorite);
 
   const modeCards = [
     {
       href: `/sets/${setId}/flashcards`,
       icon: Layers,
       title: t("study.flashcards"),
-      subtitle: vi ? "Lật thẻ 3D & phím tắt" : "3D flip & shortcuts",
+      subtitle: vi ? "Lật thẻ & phím tắt" : "Flip cards & shortcuts",
     },
     {
       href: `/sets/${setId}/practice`,
       icon: Play,
-      title: vi ? "Luyện trắc nghiệm" : "MC Practice",
+      title: t("study.practice"),
       subtitle: vi ? "Chấm ngay & giải thích" : "Instant check & notes",
     },
     {
@@ -287,7 +361,7 @@ export function StudySetHub({ setId }: { setId: string }) {
   const totalPages = Math.max(1, Math.ceil(totalQuestionsMatched / 500));
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={studySet.title}
         description={studySet.description ?? undefined}
@@ -297,6 +371,36 @@ export function StudySetHub({ setId }: { setId: string }) {
         ]}
         actions={
           <>
+            {hasQuestions && (
+              <Button size="sm" asChild>
+                <Link href={`/exams/new?setId=${setId}`}>
+                  <FileCheck2 className="size-4" aria-hidden="true" />
+                  <span>{t("library.customExamCta")}</span>
+                </Link>
+              </Button>
+            )}
+
+            {isOwner && (
+              <Button
+                size="sm"
+                variant="outline"
+                aria-pressed={isFavorite}
+                aria-label={
+                  isFavorite ? t("library.unfavoriteSet") : t("library.favoriteSet")
+                }
+                onClick={() => favoriteSetMutation.mutate(!isFavorite)}
+              >
+                <Star
+                  className={cn(
+                    "size-4",
+                    isFavorite ? "fill-warning text-warning" : "text-muted-foreground",
+                  )}
+                  aria-hidden="true"
+                />
+                <span className="hidden sm:inline">{t("library.favorites")}</span>
+              </Button>
+            )}
+
             {canEdit && (
               <>
                 <Button size="sm" variant="outline" asChild>
@@ -311,11 +415,15 @@ export function StudySetHub({ setId }: { setId: string }) {
                     <span>{t("common.edit")}</span>
                   </Link>
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setShareOpen(true)}>
-                  <Share2 className="size-4" aria-hidden="true" />
-                  <span>{vi ? "Chia sẻ" : "Share"}</span>
-                </Button>
               </>
+            )}
+
+            {/* Owner-only Share action (hidden from editor & viewer roles — fixes SH-037) */}
+            {isOwner && (
+              <Button size="sm" variant="outline" onClick={() => setShareOpen(true)}>
+                <Share2 className="size-4" aria-hidden="true" />
+                <span>{vi ? "Chia sẻ" : "Share"}</span>
+              </Button>
             )}
 
             <DropdownMenu>
@@ -369,21 +477,44 @@ export function StudySetHub({ setId }: { setId: string }) {
 
       {/* 1-Click Study & Exam Mode Launchers */}
       <section aria-labelledby="study-modes-heading" className="space-y-3">
-        <h2 id="study-modes-heading" className="text-foreground text-sm font-semibold">
-          {vi ? "Chế độ học & Thi thử" : "Study & Exam Modes"}
-        </h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 id="study-modes-heading" className="text-foreground text-sm font-semibold">
+            {vi ? "Chế độ học & Thi thử" : "Study & Exam Modes"}
+          </h2>
+          {!hasQuestions && (
+            <span className="text-muted-foreground text-xs">
+              {vi
+                ? "Thêm câu hỏi để mở khóa các chế độ học."
+                : "Add questions to unlock study modes."}
+            </span>
+          )}
+        </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           {modeCards.map((mode) => {
             const Icon = mode.icon;
+            if (!hasQuestions) {
+              return (
+                <button
+                  key={mode.href}
+                  type="button"
+                  disabled
+                  className="border-border bg-card flex min-h-24 flex-col justify-between gap-2 rounded-xl border p-4 text-left opacity-55"
+                >
+                  <div className="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg">
+                    <Icon className="size-4" aria-hidden="true" />
+                  </div>
+                  <div>
+                    <p className="text-foreground text-sm font-semibold">{mode.title}</p>
+                    <p className="text-muted-foreground text-xs">{mode.subtitle}</p>
+                  </div>
+                </button>
+              );
+            }
             return (
               <Link
                 key={mode.href}
                 href={mode.href}
-                aria-disabled={!hasQuestions}
-                className={cn(
-                  "border-border bg-card hover:border-primary/50 hover:bg-accent/40 group flex min-h-24 flex-col justify-between gap-2 rounded-xl border p-4 transition-colors",
-                  !hasQuestions && "pointer-events-none opacity-55",
-                )}
+                className="border-border bg-card hover:border-primary/50 hover:bg-accent/40 group flex min-h-24 flex-col justify-between gap-2 rounded-xl border p-4 transition-colors"
               >
                 <div className="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg">
                   <Icon className="size-4" aria-hidden="true" />
@@ -409,7 +540,7 @@ export function StudySetHub({ setId }: { setId: string }) {
           </h2>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-full sm:w-56">
+            <search className="relative w-full sm:w-56">
               <Search
                 className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
                 aria-hidden="true"
@@ -417,15 +548,12 @@ export function StudySetHub({ setId }: { setId: string }) {
               <Input
                 type="search"
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => setSearch(e.target.value)}
                 placeholder={vi ? "Tìm trong câu hỏi..." : "Search questions..."}
                 aria-label={vi ? "Tìm trong câu hỏi" : "Search questions"}
                 className="h-9 pl-9"
               />
-            </div>
+            </search>
 
             {chapters.length > 0 && (
               <Select
@@ -497,7 +625,7 @@ export function StudySetHub({ setId }: { setId: string }) {
           <EmptyState
             icon={BookOpen}
             title={
-              search || chapterFilter !== "all" || starredOnly
+              debouncedSearch || chapterFilter !== "all" || starredOnly
                 ? vi
                   ? "Không tìm thấy câu hỏi phù hợp"
                   : "No matching questions"
@@ -506,7 +634,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                   : "This study set has no questions yet"
             }
             description={
-              search || chapterFilter !== "all" || starredOnly
+              debouncedSearch || chapterFilter !== "all" || starredOnly
                 ? vi
                   ? "Thử xóa bộ lọc hoặc từ khóa tìm kiếm."
                   : "Try clearing your search or filter criteria."
@@ -582,7 +710,12 @@ export function StudySetHub({ setId }: { setId: string }) {
                                 {q.chapter && (
                                   <Badge variant="outline">{q.chapter}</Badge>
                                 )}
-                                <Badge variant="secondary">{q.difficulty}</Badge>
+                                <Badge variant="secondary">
+                                  {t(`difficulty.${q.difficulty}`)}
+                                </Badge>
+                                <Badge variant="outline">
+                                  {t(`questionType.${q.question_type}`)}
+                                </Badge>
                               </div>
                               <p className="text-foreground text-sm leading-relaxed font-medium whitespace-pre-wrap">
                                 {q.prompt}
@@ -594,8 +727,8 @@ export function StudySetHub({ setId }: { setId: string }) {
                               size="icon-sm"
                               aria-label={
                                 isStarred
-                                  ? t("study.unstarQuestion")
-                                  : t("study.starQuestion")
+                                  ? `${t("study.unstarQuestion")} #${globalIdx}`
+                                  : `${t("study.starQuestion")} #${globalIdx}`
                               }
                               aria-pressed={isStarred}
                               onClick={() =>
@@ -699,11 +832,13 @@ export function StudySetHub({ setId }: { setId: string }) {
         )}
       </section>
 
-      <ShareDialog
-        studySet={studySet}
-        open={shareOpen}
-        onOpenChange={setShareOpen}
-      />
+      {isOwner && (
+        <ShareDialog
+          studySet={studySet}
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+        />
+      )}
     </FadeIn>
   );
 }

@@ -6,6 +6,8 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import { addStudySetMemberSchema } from "@/lib/validation/sets";
 
@@ -36,15 +38,21 @@ export async function GET(
       new Set([access.studySet.owner_id, ...(members ?? []).map((m) => m.user_id)]),
     );
 
-    const { data: profiles } =
+    // SH-014 / SEC-005: Strictly omit private `email` from collaborator/owner projections
+    const profiles =
       userIds.length > 0
-        ? await supabase
-            .from("profiles")
-            .select("id, display_name, username, avatar_url, email")
-            .in("id", userIds)
-        : { data: [] };
+        ? await fetchInChunks(
+            userIds,
+            async (chunk) =>
+              supabase
+                .from("profiles")
+                .select("id, display_name, username, avatar_url")
+                .in("id", chunk),
+            SAFE_IN_CHUNK_SIZE,
+          )
+        : [];
 
-    const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
+    const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
     const enriched = (members ?? []).map((m) => ({
       ...m,
@@ -66,6 +74,10 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    // SH-040 / SEC-014: Rate-limit member invitation / identifier lookup to prevent enumeration
+    const limited = enforceRateLimit(request, RATE_LIMITS.FRIEND_REQUEST, user.id);
+    if (limited) return limited;
+
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
@@ -116,7 +128,6 @@ export async function POST(
 
     if (error) throw error;
 
-    // Ensure study set visibility reflects shared status if currently private
     await supabase
       .from("study_sets")
       .update({ visibility: "shared" })

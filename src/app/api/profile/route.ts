@@ -6,6 +6,7 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { rpcGetMyProfile } from "@/lib/supabase/rpc";
 import { updateProfileSchema } from "@/lib/validation/profile";
 
 export async function GET(): Promise<NextResponse> {
@@ -14,7 +15,7 @@ export async function GET(): Promise<NextResponse> {
 
     const [{ data: profile, error: profErr }, { data: preferences, error: prefErr }] =
       await Promise.all([
-        supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+        rpcGetMyProfile(supabase),
         supabase
           .from("user_preferences")
           .select("*")
@@ -30,7 +31,10 @@ export async function GET(): Promise<NextResponse> {
     }
 
     return apiSuccess({
-      profile,
+      profile: {
+        ...profile,
+        email: profile.email || user.email || "",
+      },
       preferences: preferences ?? null,
     });
   } catch (err) {
@@ -48,7 +52,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
       .from("profiles")
       .update(input)
       .eq("id", user.id)
-      .select("*")
+      .select("id, display_name, username, avatar_url, bio, created_at, updated_at")
       .single();
 
     if (error) {
@@ -62,7 +66,10 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
       throw error;
     }
 
-    return apiSuccess(data);
+    return apiSuccess({
+      ...data,
+      email: user.email ?? "",
+    });
   } catch (err) {
     return handleApiError(err);
   }

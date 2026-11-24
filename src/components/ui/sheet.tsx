@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Dialog as SheetPrimitive } from "radix-ui";
 import { X } from "lucide-react";
+import { useOptionalI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
@@ -48,6 +49,9 @@ function SheetContent({
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   side?: "top" | "right" | "bottom" | "left";
 }) {
+  const i18n = useOptionalI18n();
+  const closeLabel = i18n ? i18n.t("common.close") : "Đóng";
+
   return (
     <SheetPortal>
       <SheetOverlay />
@@ -64,9 +68,9 @@ function SheetContent({
         {...props}
       >
         {children}
-        <SheetPrimitive.Close className="text-muted-foreground hover:text-foreground hover:bg-secondary absolute top-4 right-4 inline-flex size-7 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <X className="size-4" />
-          <span className="sr-only">Close</span>
+        <SheetPrimitive.Close className="text-muted-foreground hover:text-foreground hover:bg-secondary absolute top-2.5 right-2.5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9 sm:min-w-9">
+          <X className="size-4" aria-hidden="true" />
+          <span className="sr-only">{closeLabel}</span>
         </SheetPrimitive.Close>
       </SheetPrimitive.Content>
     </SheetPortal>

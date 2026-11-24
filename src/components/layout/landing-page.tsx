@@ -7,6 +7,7 @@ import {
   BookOpen,
   CheckCircle2,
   Clock,
+  FileCheck2,
   FileSpreadsheet,
   FileText,
   FolderTree,
@@ -36,45 +37,45 @@ export function LandingPage() {
   const studyModes = [
     {
       icon: Layers,
-      title: vi ? "Flashcards 3D" : "3D Flashcards",
+      title: vi ? "Thẻ ghi nhớ (Flashcards)" : "3D Flashcards",
       desc: vi
-        ? "Lật thẻ mượt mà, phím tắt bàn phím, lọc thẻ chưa thuộc và đọc phát âm trình duyệt."
-        : "Crisp card flips, keyboard shortcuts, unknown-card loop, and browser speech playback.",
+        ? "Lật thẻ mượt mà, điều khiển bằng bàn phím, lọc riêng thẻ chưa thuộc và đọc phát âm trực tiếp."
+        : "Crisp card flips, keyboard shortcuts, unknown-card review loop, and browser speech playback.",
     },
     {
       icon: Repeat,
-      title: vi ? "Học thích ứng (SM-2)" : "Adaptive Learn (SM-2)",
+      title: vi ? "Học sâu lặp lại ngắt quãng" : "Adaptive Learn (SM-2)",
       desc: vi
-        ? "Thuật toán lặp lại ngắt quãng xác định: câu trả lời sai tự động quay lại đúng khoảng cách."
-        : "Deterministic spaced repetition: missed questions re-enter the queue at exact intervals.",
+        ? "Lịch ôn tập khoa học: câu trả lời sai tự động xuất hiện lại đúng nhịp để ghi nhớ bền lâu."
+        : "Spaced repetition scheduling: missed questions re-enter your queue at the right interval.",
     },
     {
       icon: CheckCircle2,
-      title: vi ? "Luyện trắc nghiệm" : "MC Practice",
+      title: vi ? "Luyện trắc nghiệm linh hoạt" : "Custom Practice",
       desc: vi
-        ? "Phản hồi đúng/sai tức thì kèm giải thích, lọc theo chương, thẻ, câu sai hoặc câu gắn sao."
-        : "Instant answer feedback with explanations, chapter/tag filters, mistakes and starred drills.",
+        ? "Hiện đáp án và giải thích ngay sau mỗi câu; lọc nhanh theo nhiều môn, chương, câu sai hoặc câu gắn sao."
+        : "Instant answer feedback with explanations; filter by subjects, chapters, mistakes, or starred items.",
     },
     {
       icon: PenLine,
-      title: vi ? "Gõ đáp án (Write)" : "Typed Recall (Write)",
+      title: vi ? "Gõ đáp án tự luận ngắn" : "Typed Recall (Write)",
       desc: vi
-        ? "Chấm chính xác theo danh sách đáp án chấp nhận, tùy chọn phân biệt hoa thường và dấu."
-        : "Deterministic text grading against accepted answers with strict or flexible normalization.",
+        ? "Kiểm tra trí nhớ chủ động bằng cách tự nhập câu trả lời, tùy chọn so khớp linh hoạt hoa thường và dấu."
+        : "Active recall grading against accepted answers with strict or flexible matching options.",
     },
     {
       icon: Shuffle,
-      title: vi ? "Ghép thẻ (Match)" : "Timed Match",
+      title: vi ? "Ghép cặp bấm giờ" : "Timed Match",
       desc: vi
-        ? "Ghép cặp câu hỏi — định nghĩa nhanh không trùng nghĩa, hỗ trợ chuột, chạm và bàn phím."
+        ? "Ghép cặp câu hỏi — đáp án rõ ràng không trùng nghĩa, hỗ trợ chuột, cảm ứng và bàn phím."
         : "Disambiguated pair matching with timer, touch support, and complete keyboard navigation.",
     },
     {
       icon: Clock,
-      title: vi ? "Thi thử bấm giờ" : "Timed Mock Exams",
+      title: vi ? "Thi thử nhiều môn & Phủ 100%" : "Multi-Subject Mock Exams",
       desc: vi
-        ? "Đề thi đóng băng bất biến, đồng hồ đồng bộ server, tự lưu đáp án và chấm điểm chính xác."
-        : "Immutable exam snapshots, server-synced countdown timer, autosave, and server-side grading.",
+        ? "Ghép nhiều môn vào một đề thi, chọn số câu bất kỳ, tự lưu bài làm và phân tích điểm theo từng môn & chương."
+        : "Combine multiple subjects, pick any question count, autosave progress, and break down scores by topic.",
     },
   ];
 
@@ -83,43 +84,43 @@ export function LandingPage() {
       icon: FileText,
       name: "Word (.docx)",
       detail: vi
-        ? "Nhận diện in đậm, tô màu, gạch chân, màu chữ, bảng Word và đa chương."
+        ? "Tự nhận diện đáp án in đậm, tô sáng, gạch chân, màu chữ, bảng Word và nhiều chương."
         : "Detects bold, highlight, underline, font color, Word tables, and multi-chapter keys.",
     },
     {
       icon: FileText,
-      name: "EduQuiz & Word (.txt)",
+      name: "EduQuiz & Văn bản (.txt)",
       detail: vi
-        ? "Hỗ trợ dấu sao *B., dòng Đáp án: A và bảng đáp án cuối tài liệu."
+        ? "Hỗ trợ dấu sao *B., dòng Đáp án: A và bảng đáp án đặt ở cuối tài liệu."
         : "Supports *B. markers, inline Answer: A lines, and end-of-document answer keys.",
     },
     {
       icon: FileSpreadsheet,
-      name: "Wayground & Excel (.xlsx / .csv)",
+      name: "Excel & Bảng tính (.xlsx / .csv)",
       detail: vi
-        ? "Ánh xạ cột trực quan, hỗ trợ UTF-8 BOM tiếng Việt và xuất lại mượt mà."
-        : "Visual column mapper, Vietnamese UTF-8 BOM support, and lossless round-trip export.",
+        ? "Tự nhận diện cột đề thi mẫu, hỗ trợ tiếng Việt có dấu chuẩn xác và xuất lại nhanh chóng."
+        : "Visual column mapper, full Vietnamese UTF-8 support, and lossless round-trip export.",
     },
     {
       icon: Upload,
-      name: "Quizlet TSV & StudyHub JSON",
+      name: "Quizlet TSV & Sao lưu JSON",
       detail: vi
-        ? "Tùy chỉnh dấu phân cách thuật ngữ/định nghĩa và sao lưu nguyên vẹn 100%."
-        : "Custom term/definition delimiters plus schema-validated lossless JSON backup.",
+        ? "Nhập trực tiếp từ bộ thẻ Quizlet và sao lưu, khôi phục toàn bộ dữ liệu học tập bất cứ lúc nào."
+        : "Import Quizlet term/definition lists plus lossless JSON backup and restore anytime.",
     },
   ];
 
   return (
-    <div className="bg-background text-foreground flex min-h-screen flex-col overflow-x-clip">
+    <div className="bg-background text-foreground flex min-h-dvh flex-col overflow-x-clip">
       {/* Header */}
       <header className="border-border bg-card/90 sticky top-0 z-30 border-b backdrop-blur-xs">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
-          <Link href="/" aria-label="StudyHub">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-2 px-3 sm:gap-4 sm:px-6">
+          <Link href="/" aria-label="StudyHub" className="shrink-0">
             <BrandLogo />
           </Link>
 
           <nav
-            aria-label={vi ? "Điều hướng trang chủ" : "Landing navigation"}
+            aria-label={vi ? "Điều hướng trang chủ" : "Landing"}
             className="hidden items-center gap-6 md:flex"
           >
             <a
@@ -138,17 +139,26 @@ export function LandingPage() {
               href="#sharing"
               className="text-muted-foreground hover:text-foreground text-sm font-medium transition-colors"
             >
-              {vi ? "Chia sẻ & Bảo mật" : "Sharing & Privacy"}
+              {vi ? "Chia sẻ & Riêng tư" : "Sharing & Privacy"}
             </a>
           </nav>
 
-          <div className="flex items-center gap-1.5 sm:gap-2">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2">
             <LanguageToggle />
             <ThemeToggle compact />
-            <Button variant="ghost" size="sm" asChild className="hidden sm:inline-flex">
+            <Button
+              variant="ghost"
+              size="sm"
+              asChild
+              className="hidden min-h-11 px-2.5 sm:inline-flex sm:min-h-9 sm:px-3"
+            >
               <Link href="/login">{t("nav.signIn")}</Link>
             </Button>
-            <Button size="sm" asChild>
+            <Button
+              size="sm"
+              asChild
+              className="min-h-11 px-3 sm:min-h-9 sm:px-4"
+            >
               <Link href="/register">{t("nav.signUp")}</Link>
             </Button>
           </div>
@@ -157,46 +167,68 @@ export function LandingPage() {
 
       <main id="main-content" className="flex-1">
         {/* Hero Section */}
-        <section className="border-border border-b py-14 sm:py-20">
+        <section className="border-border border-b py-12 sm:py-20">
           <div className="mx-auto grid max-w-6xl items-center gap-10 px-4 sm:px-6 lg:grid-cols-12 lg:gap-12">
-            <FadeIn className="space-y-6 lg:col-span-7">
+            <FadeIn aboveFold className="space-y-6 lg:col-span-7">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="accent">
                   <ShieldCheck className="size-3.5" aria-hidden="true" />
                   <span>
-                    {vi ? "100% Thuật toán xác định" : "100% Deterministic Logic"}
+                    {vi
+                      ? "Chấm điểm đúng 100% theo đáp án gốc"
+                      : "100% Exact Answer-Key Grading"}
                   </span>
                 </Badge>
                 <Badge variant="secondary">
-                  {vi ? "Miễn phí cá nhân & nhóm bạn" : "Free for personal & study groups"}
+                  {vi
+                    ? "Miễn phí cá nhân & nhóm bạn"
+                    : "Free for personal & study groups"}
                 </Badge>
               </div>
 
               <h1 className="text-foreground text-3xl font-bold tracking-tight text-balance sm:text-5xl sm:leading-[1.15]">
                 {vi
-                  ? "Tự học, ôn flashcard và luyện thi trắc nghiệm chính xác tuyệt đối."
+                  ? "Tự học, ôn thẻ ghi nhớ và luyện thi trắc nghiệm chính xác tuyệt đối."
                   : "Study flashcards, drill question banks, and run timed mock exams with zero guesswork."}
               </h1>
 
               <p className="text-muted-foreground max-w-2xl text-base leading-relaxed sm:text-lg">
                 {vi
-                  ? "StudyHub kết hợp sự gọn gàng của Flashcard với quy trình nhập đề thi Word, Excel, TXT hàng nghìn câu hỏi và phòng thi thử chấm điểm chuẩn xác — không quảng cáo, không giới hạn lượt làm bài."
-                  : "StudyHub pairs calm Quizlet-style mastery with high-scale DOCX, XLSX, CSV, and TXT question bank importing and immutable timed mock exams — no ads, no artificial limits."}
+                  ? "Nhập nhanh ngân hàng hàng nghìn câu hỏi từ Word, Excel, TXT; ghép nhiều môn học thành đề thi thử bấm giờ hoặc phủ trọn 100% ngân hàng câu hỏi — không quảng cáo, không giới hạn lượt làm bài."
+                  : "Import thousands of questions from Word, Excel, and TXT; combine multiple subjects into timed mock exams or non-repeating full-coverage cycles — no ads, no artificial limits."}
               </p>
 
               <div className="flex flex-wrap items-center gap-3 pt-1">
-                <Button size="lg" asChild className="h-11 px-6">
+                <Button size="lg" asChild className="min-h-11 px-6">
                   <Link href="/register">
-                    <span>{vi ? "Tạo tài khoản miễn phí" : "Create free account"}</span>
+                    <span>
+                      {vi ? "Tạo tài khoản miễn phí" : "Create free account"}
+                    </span>
                     <ArrowRight className="size-4" aria-hidden="true" />
                   </Link>
                 </Button>
-                <Button size="lg" variant="outline" asChild className="h-11 px-6">
+                <Button
+                  size="lg"
+                  variant="outline"
+                  asChild
+                  className="min-h-11 px-5"
+                >
+                  <Link href="/exams/new">
+                    <FileCheck2 className="size-4" aria-hidden="true" />
+                    <span>{t("nav.customExam")}</span>
+                  </Link>
+                </Button>
+                <Button
+                  size="lg"
+                  variant="ghost"
+                  asChild
+                  className="min-h-11 px-4"
+                >
                   <Link href="/login">{t("nav.signIn")}</Link>
                 </Button>
               </div>
 
-              <dl className="border-border grid grid-cols-3 gap-4 border-t pt-6">
+              <dl className="border-border grid grid-cols-2 gap-4 border-t pt-6 sm:grid-cols-3">
                 <div>
                   <dt className="text-muted-foreground text-xs font-medium">
                     {vi ? "Quy mô bộ đề" : "Bank scale"}
@@ -213,26 +245,29 @@ export function LandingPage() {
                     6
                   </dd>
                 </div>
-                <div>
+                <div className="col-span-2 sm:col-span-1">
                   <dt className="text-muted-foreground text-xs font-medium">
                     {vi ? "Định dạng nhập/xuất" : "Import formats"}
                   </dt>
-                  <dd className="text-foreground mt-0.5 font-mono text-lg font-bold tabular-nums sm:text-xl">
+                  <dd className="text-foreground mt-0.5 font-mono text-base font-bold whitespace-nowrap sm:text-lg">
                     DOCX · XLSX · TXT
                   </dd>
                 </div>
               </dl>
             </FadeIn>
 
-            {/* Structured Product Architecture Preview */}
-            <FadeIn delay={0.08} className="lg:col-span-5">
+            {/* Structured Product Workflow Preview */}
+            <FadeIn aboveFold className="lg:col-span-5">
               <Card className="border-border shadow-sm">
                 <CardHeader className="border-border border-b pb-4">
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="flex items-center gap-2 text-base">
-                      <GraduationCap className="text-primary size-5" aria-hidden="true" />
+                      <GraduationCap
+                        className="text-primary size-5"
+                        aria-hidden="true"
+                      />
                       <span>
-                        {vi ? "Quy trình ôn thi chuẩn xác" : "Deterministic Study Pipeline"}
+                        {vi ? "Quy trình ôn thi 3 bước" : "3-Step Exam Workflow"}
                       </span>
                     </CardTitle>
                     <Badge variant="success">
@@ -244,24 +279,30 @@ export function LandingPage() {
                   {[
                     {
                       step: "01",
-                      title: vi ? "Nhập đề từ Word, Excel, TXT, Quizlet" : "Import DOCX, XLSX, TXT, Quizlet",
+                      title: vi
+                        ? "Nhập đề từ Word, Excel, TXT, Quizlet"
+                        : "Import DOCX, XLSX, TXT, Quizlet",
                       desc: vi
-                        ? "Tự phát hiện đáp án in đậm, tô sáng, màu chữ, *B. và cảnh báo xung đột để bạn duyệt."
-                        : "Detects bold, highlight, font color, and *B. markers with conflict review before saving.",
+                        ? "Tự phát hiện đáp án in đậm, tô sáng, màu chữ, *B. và báo ngay câu thiếu đáp án để bạn kiểm tra."
+                        : "Detects bold, highlight, font color, and *B. markers with inline review before saving.",
                     },
                     {
                       step: "02",
-                      title: vi ? "Ôn tập thông minh với SM-2" : "Master via SM-2 Spaced Repetition",
+                      title: vi
+                        ? "Ôn tập khoa học theo lịch lặp lại"
+                        : "Master via Spaced Repetition",
                       desc: vi
-                        ? "Flashcards, Learn, Practice, Write và Match đồng bộ tiến độ từng câu hỏi."
+                        ? "Thẻ ghi nhớ, Học sâu, Luyện trắc nghiệm, Gõ đáp án và Ghép cặp đồng bộ tiến độ từng câu hỏi."
                         : "Flashcards, Learn, Practice, Write, and Match track mastery per question.",
                     },
                     {
                       step: "03",
-                      title: vi ? "Thi thử nghiêm túc như thi thật" : "Server-Scored Mock Exams",
+                      title: vi
+                        ? "Thi thử nhiều môn như thi thật"
+                        : "Multi-Subject Timed Mock Exams",
                       desc: vi
-                        ? "Trộn câu hỏi & đáp án theo UUID, lưu tự động và phân tích độ chính xác theo chương."
-                        : "Shuffled options graded by stable UUID, autosaved answers, and chapter breakdown.",
+                        ? "Đảo câu hỏi và đảo đáp án A/B/C/D không bao giờ lệch đáp án, tự lưu bài làm và chấm điểm chi tiết theo môn."
+                        : "Shuffled options always preserve exact grading, with live autosave and subject breakdowns.",
                     },
                   ].map((item) => (
                     <div
@@ -293,13 +334,13 @@ export function LandingPage() {
             <div className="max-w-2xl space-y-2">
               <h2 className="text-foreground text-2xl font-bold tracking-tight sm:text-3xl">
                 {vi
-                  ? "Nhập ngân hàng câu hỏi đa định dạng, minh bạch từng đáp án"
-                  : "Multi-format bulk import with transparent answer detection"}
+                  ? "Nhập ngân hàng câu hỏi đa định dạng, kiểm tra rõ từng đáp án"
+                  : "Multi-format bulk import with clear answer verification"}
               </h2>
               <p className="text-muted-foreground text-sm leading-relaxed sm:text-base">
                 {vi
-                  ? "Trình phân tích 6 bước kiểm tra lỗi định dạng, câu thiếu đáp án và câu trùng lặp trực tiếp trên danh sách ảo hóa trước khi lưu vào thư viện."
-                  : "A 6-step deterministic wizard catches missing answers, formatting conflicts, and duplicates inline on a virtualized preview before committing to your library."}
+                  ? "Trình nhập đề kiểm tra lỗi định dạng, câu thiếu đáp án và câu trùng lặp trực tiếp trên danh sách mượt mà ngay cả với hàng nghìn câu hỏi trước khi lưu vào thư viện."
+                  : "Our step-by-step import wizard catches missing answers, formatting conflicts, and duplicates inline across thousands of questions before saving to your library."}
               </p>
             </div>
 
@@ -329,7 +370,10 @@ export function LandingPage() {
         </section>
 
         {/* 6 Study & Exam Modes */}
-        <section id="modes" className="border-border bg-card border-y py-14 sm:py-20">
+        <section
+          id="modes"
+          className="border-border bg-card border-y py-14 sm:py-20"
+        >
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
             <div className="max-w-2xl space-y-2">
               <h2 className="text-foreground text-2xl font-bold tracking-tight sm:text-3xl">
@@ -402,12 +446,14 @@ export function LandingPage() {
               <CardContent className="space-y-2.5 pt-1">
                 <Lock className="text-primary size-6" aria-hidden="true" />
                 <h3 className="text-foreground text-base font-semibold">
-                  {vi ? "Riêng tư mặc định & Xuất dữ liệu" : "Private by Default & Exportable"}
+                  {vi
+                    ? "Riêng tư mặc định & Toàn quyền dữ liệu"
+                    : "Private by Default & Portable"}
                 </h3>
                 <p className="text-muted-foreground text-sm leading-relaxed">
                   {vi
-                    ? "Mọi học phần mới đều ở chế độ riêng tư với bảo mật RLS. Xuất JSON, CSV, XLSX bất cứ lúc nào."
-                    : "Every new study set starts private with PostgreSQL RLS. Export JSON, CSV, or XLSX anytime."}
+                    ? "Mọi học phần mới đều ở chế độ riêng tư — chỉ bạn mới thấy cho đến khi chia sẻ. Xuất JSON, CSV, XLSX bất cứ lúc nào."
+                    : "Every new study set starts private — visible only to you until shared. Export JSON, CSV, or XLSX anytime."}
                 </p>
               </CardContent>
             </Card>
@@ -436,6 +482,9 @@ export function LandingPage() {
                 </Link>
               </Button>
               <Button size="lg" variant="outline" asChild>
+                <Link href="/exams/new">{t("nav.customExam")}</Link>
+              </Button>
+              <Button size="lg" variant="ghost" asChild>
                 <Link href="/login">{t("nav.signIn")}</Link>
               </Button>
             </div>
@@ -449,16 +498,19 @@ export function LandingPage() {
             <BrandLogo />
             <span className="text-muted-foreground">
               {vi
-                ? "Nền tảng tự học & luyện thi xác định"
-                : "Deterministic personal study & exam prep"}
+                ? "Nền tảng tự học & luyện thi cá nhân"
+                : "Personal study & exam prep workspace"}
             </span>
           </div>
-          <div className="text-muted-foreground flex items-center gap-4">
+          <div className="text-muted-foreground flex flex-wrap items-center gap-4">
             <Link href="/login" className="hover:text-foreground transition-colors">
               {t("nav.signIn")}
             </Link>
             <Link href="/register" className="hover:text-foreground transition-colors">
               {t("nav.signUp")}
+            </Link>
+            <Link href="/exams/new" className="hover:text-foreground transition-colors">
+              {t("nav.customExam")}
             </Link>
             <Link href="/dashboard" className="hover:text-foreground transition-colors">
               {t("nav.dashboard")}

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, ArrowRight, CheckCircle2, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, CheckCircle2, RefreshCw, ScanSearch } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -66,6 +66,8 @@ export interface StepFormatConfigProps {
   onSheetChange: (sheet: string) => void;
   hasHeaderRow: boolean;
   onHasHeaderRowChange: (val: boolean) => void;
+  headerRowCount?: 1 | 2;
+  onHeaderRowCountChange?: (rows: 1 | 2) => void;
   detectedColumns?: string[];
   sampleRows?: string[][];
   columnMapping: ColumnMapping;
@@ -79,6 +81,7 @@ export interface StepFormatConfigProps {
   isParsing: boolean;
   onBack: () => void;
   onNext: () => void;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }
 
 const UNMAPPED_VALUE = "__UNMAPPED__";
@@ -93,6 +96,8 @@ export function StepFormatConfig({
   onSheetChange,
   hasHeaderRow,
   onHasHeaderRowChange,
+  headerRowCount = 1,
+  onHeaderRowCountChange,
   detectedColumns,
   sampleRows,
   columnMapping,
@@ -106,6 +111,7 @@ export function StepFormatConfig({
   isParsing,
   onBack,
   onNext,
+  headingRef,
 }: StepFormatConfigProps) {
   const activeFormat = formatOverride ?? detectedFormat;
   const isTabular =
@@ -129,6 +135,7 @@ export function StepFormatConfig({
   }> = [
     { key: "prompt", labelVi: "Câu hỏi / Mặt trước", labelEn: "Question / Term", required: true },
     { key: "correctAnswer", labelVi: "Đáp án đúng", labelEn: "Correct Answer" },
+    { key: "questionType", labelVi: "Dạng câu hỏi (SC/MC/TF)", labelEn: "Question Type (SC/MC/TF)" },
     { key: "optionA", labelVi: "Lựa chọn A (Option 1)", labelEn: "Option A (Option 1)" },
     { key: "optionB", labelVi: "Lựa chọn B (Option 2)", labelEn: "Option B (Option 2)" },
     { key: "optionC", labelVi: "Lựa chọn C (Option 3)", labelEn: "Option C (Option 3)" },
@@ -148,9 +155,16 @@ export function StepFormatConfig({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <CardTitle>
-              {locale === "en"
-                ? "Step 2: Format Detection & Structure"
-                : "Bước 2: Định dạng & Cấu trúc dữ liệu"}
+              <h2
+                ref={headingRef}
+                data-import-step="2"
+                tabIndex={-1}
+                className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                {locale === "en"
+                  ? "Step 2: Format Detection & Structure"
+                  : "Bước 2: Định dạng & Cấu trúc dữ liệu"}
+              </h2>
             </CardTitle>
             <CardDescription className="mt-1">
               {locale === "en"
@@ -159,7 +173,7 @@ export function StepFormatConfig({
             </CardDescription>
           </div>
           <Badge variant="secondary" className="gap-1.5">
-            <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+            <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
             {locale === "en" ? "Auto-detected:" : "Tự nhận diện:"}{" "}
             {getFormatLabel(detectedFormat, locale)}
           </Badge>
@@ -293,6 +307,35 @@ export function StepFormatConfig({
                     : "Hàng đầu tiên là tiêu đề cột"}
                 </Label>
               </div>
+              {hasHeaderRow &&
+                (activeFormat === "xlsx_generic" || activeFormat === "xlsx_wayground") &&
+                onHeaderRowCountChange && (
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="xlsx-header-rows" className="text-xs text-muted-foreground">
+                      {locale === "en" ? "Header rows:" : "Số hàng tiêu đề:"}
+                    </Label>
+                    <Select
+                      value={String(headerRowCount)}
+                      onValueChange={(v) =>
+                        onHeaderRowCountChange(v === "2" ? 2 : 1)
+                      }
+                    >
+                      <SelectTrigger id="xlsx-header-rows" className="w-44">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">
+                          {locale === "en" ? "1 row (Standard)" : "1 hàng (Chuẩn)"}
+                        </SelectItem>
+                        <SelectItem value="2">
+                          {locale === "en"
+                            ? "2 rows (Merged headers)"
+                            : "2 hàng (Tiêu đề gộp)"}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               {activeFormat === "csv" && (
                 <div className="flex items-center gap-2">
                   <Label htmlFor="csv-delim" className="text-xs text-muted-foreground">
@@ -342,8 +385,8 @@ export function StepFormatConfig({
                           <SelectItem value={UNMAPPED_VALUE}>
                             {locale === "en" ? "— Not mapped —" : "— Không ánh xạ —"}
                           </SelectItem>
-                          {detectedColumns.map((col) => (
-                            <SelectItem key={col} value={col}>
+                          {detectedColumns.map((col, colIdx) => (
+                            <SelectItem key={`${colIdx}-${col}`} value={col}>
                               {col}
                             </SelectItem>
                           ))}
@@ -431,6 +474,7 @@ export interface StepAnswerRuleProps {
   isParsing: boolean;
   onBack: () => void;
   onNext: () => void;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }
 
 export function StepAnswerRule({
@@ -441,6 +485,7 @@ export function StepAnswerRule({
   isParsing,
   onBack,
   onNext,
+  headingRef,
 }: StepAnswerRuleProps) {
   const isDocx = activeFormat === "docx_ooxml";
   const isTabularOrJson =
@@ -458,9 +503,16 @@ export function StepAnswerRule({
     <Card>
       <CardHeader>
         <CardTitle>
-          {locale === "en"
-            ? "Step 3: Answer Detection Rule"
-            : "Bước 3: Chọn quy tắc nhận diện đáp án đúng"}
+          <h2
+            ref={headingRef}
+            data-import-step="3"
+            tabIndex={-1}
+            className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            {locale === "en"
+              ? "Step 3: Answer Detection Rule"
+              : "Bước 3: Chọn quy tắc nhận diện đáp án đúng"}
+          </h2>
         </CardTitle>
         <CardDescription>
           {locale === "en"
@@ -472,7 +524,7 @@ export function StepAnswerRule({
         {isTabularOrJson ? (
           <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm text-foreground">
             <div className="flex items-start gap-3">
-              <Sparkles className="mt-0.5 size-5 shrink-0 text-primary" aria-hidden="true" />
+              <ScanSearch className="mt-0.5 size-5 shrink-0 text-primary" aria-hidden="true" />
               <div>
                 <p className="font-medium">
                   {locale === "en"

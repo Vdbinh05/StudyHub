@@ -1,13 +1,25 @@
 import { z } from "zod";
 import {
+  compactPreviewForTransport,
   ImportSecurityError,
   MAX_IMPORT_FILE_BYTES,
+  MAX_RAW_TEXT_BYTES,
+  normalizeForComparison,
   parseImportInput,
+  validateImportBatch,
 } from "@/lib/import";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
-import { apiError, apiSuccess, handleApiError } from "@/lib/security/errors";
+import {
+  apiError,
+  apiSuccess,
+  handleApiError,
+  parseJsonBody,
+} from "@/lib/security/errors";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
 import type { ImportOptions } from "@/types/import";
+import { fetchExistingQuestionFingerprints } from "../_existing-fingerprints";
+
+const MAX_PARSE_JSON_BYTES = MAX_RAW_TEXT_BYTES + 1024 * 1024; // 11 MB cap for JSON rawText + options
 
 const AnswerRuleSchema = z.object({
   mode: z.enum([
@@ -86,6 +98,7 @@ const ImportOptionsSchema = z
       .optional(),
     sheetName: z.string().max(120).optional(),
     hasHeaderRow: z.boolean().optional(),
+    headerRowCount: z.union([z.literal(1), z.literal(2)]).optional(),
     answerRule: AnswerRuleSchema.optional(),
     columnMapping: ColumnMappingSchema.optional(),
     csvDelimiter: z.string().max(5).optional(),
@@ -106,7 +119,10 @@ const ImportOptionsSchema = z
   .optional();
 
 const JsonParseBodySchema = z.object({
-  rawText: z.string().min(1, "Please provide text content to parse."),
+  rawText: z
+    .string()
+    .min(1, "Please provide text content to parse.")
+    .max(MAX_RAW_TEXT_BYTES, "Pasted text exceeds the 10 MB maximum limit."),
   fileName: z.string().max(200).optional(),
   studySetId: z.string().uuid().optional(),
   options: ImportOptionsSchema,
@@ -169,7 +185,7 @@ export async function POST(request: Request) {
         );
       }
     } else {
-      const rawBody: unknown = await request.json();
+      const rawBody = await parseJsonBody(request, MAX_PARSE_JSON_BYTES);
       const parsed = JsonParseBodySchema.parse(rawBody);
       rawText = parsed.rawText;
       fileName = parsed.fileName ?? "pasted-input.txt";
@@ -177,18 +193,9 @@ export async function POST(request: Request) {
       options = parsed.options;
     }
 
-    // Optional duplicate check against existing questions in the target study set
-    let existingPrompts: string[] = [];
+    // Authorize study set access BEFORE parsing untrusted files
     if (studySetId) {
       await requireStudySetAccess(supabase, studySetId, user.id, "edit");
-      const { data: existingRows } = await supabase
-        .from("questions")
-        .select("prompt")
-        .eq("study_set_id", studySetId)
-        .limit(10_000);
-      if (existingRows) {
-        existingPrompts = existingRows.map((r) => r.prompt);
-      }
     }
 
     const preview = await parseImportInput({
@@ -196,10 +203,41 @@ export async function POST(request: Request) {
       fileName,
       rawText,
       options,
-      existingPrompts,
     });
 
-    return apiSuccess(preview);
+    // Paginated, prompt-prefiltered full-fingerprint duplicate check beyond 1,000 existing rows
+    let finalPreview = preview;
+    if (studySetId && preview.questions.length > 0) {
+      const candidateNormalizedPrompts = new Set(
+        preview.questions
+          .map((q) => normalizeForComparison(q.prompt))
+          .filter(Boolean),
+      );
+      const existing = await fetchExistingQuestionFingerprints(
+        supabase,
+        studySetId,
+        candidateNormalizedPrompts,
+      );
+      if (existing.fingerprints.length > 0) {
+        const globalOnlyIssues = preview.issues.filter(
+          (i) => i.questionIndex === undefined,
+        );
+        const revalidated = validateImportBatch(preview.questions, {
+          existingFingerprints: existing.fingerprints,
+          globalIssues: globalOnlyIssues,
+        });
+        finalPreview = {
+          ...preview,
+          questions: revalidated.questions,
+          issues: revalidated.issues,
+          summary: revalidated.summary,
+          detectedChapters: revalidated.detectedChapters,
+        };
+      }
+    }
+
+    // Strip unused rawSource & option formatting bloat (~38% payload reduction on DOCX)
+    return apiSuccess(compactPreviewForTransport(finalPreview));
   } catch (err) {
     if (err instanceof ImportSecurityError) {
       return apiError(err.code, err.message, err.statusCode);

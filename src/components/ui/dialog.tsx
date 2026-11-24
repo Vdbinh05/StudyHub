@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { X } from "lucide-react";
+import { useOptionalI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 function Dialog({
@@ -53,6 +54,9 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
 }) {
+  const i18n = useOptionalI18n();
+  const closeLabel = i18n ? i18n.t("common.close") : "Đóng";
+
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -68,10 +72,10 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="text-muted-foreground hover:text-foreground hover:bg-secondary absolute top-4 right-4 inline-flex size-7 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="text-muted-foreground hover:text-foreground hover:bg-secondary absolute top-2.5 right-2.5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9 sm:min-w-9"
           >
-            <X className="size-4" />
-            <span className="sr-only">Close</span>
+            <X className="size-4" aria-hidden="true" />
+            <span className="sr-only">{closeLabel}</span>
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Content>

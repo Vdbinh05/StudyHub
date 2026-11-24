@@ -33,6 +33,7 @@ export interface StepSourceInputProps {
   isParsing: boolean;
   errorMessage: string | null;
   onContinue: () => void;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }
 
 const TEMPLATE_LINKS: Array<{
@@ -60,6 +61,7 @@ export function StepSourceInput({
   isParsing,
   errorMessage,
   onContinue,
+  headingRef,
 }: StepSourceInputProps) {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);
@@ -117,9 +119,16 @@ export function StepSourceInput({
       <Card>
         <CardHeader>
           <CardTitle>
-            {locale === "en"
-              ? "Step 1: Choose File or Paste Content"
-              : "Bước 1: Chọn tệp tải lên hoặc dán văn bản"}
+            <h2
+              ref={headingRef}
+              data-import-step="1"
+              tabIndex={-1}
+              className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {locale === "en"
+                ? "Step 1: Choose File or Paste Content"
+                : "Bước 1: Chọn tệp tải lên hoặc dán văn bản"}
+            </h2>
           </CardTitle>
           <CardDescription>
             {locale === "en"
@@ -197,7 +206,7 @@ export function StepSourceInput({
                     {selectedFile.name.endsWith(".xlsx") ||
                     selectedFile.name.endsWith(".csv") ? (
                       <FileSpreadsheet
-                        className="size-5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                        className="size-5 shrink-0 text-success"
                         aria-hidden="true"
                       />
                     ) : selectedFile.name.endsWith(".json") ? (
@@ -207,7 +216,7 @@ export function StepSourceInput({
                       />
                     ) : (
                       <FileType
-                        className="size-5 shrink-0 text-blue-600 dark:text-blue-400"
+                        className="size-5 shrink-0 text-accent-solid"
                         aria-hidden="true"
                       />
                     )}

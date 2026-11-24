@@ -5,6 +5,7 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { paginationQuerySchema, uuidSchema } from "@/lib/validation/common";
 import { createSessionSchema } from "@/lib/validation/learning";
 import type { Json } from "@/types/database";
@@ -56,19 +57,30 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (error) throw error;
 
     const rows = data ?? [];
-    const setIds = Array.from(new Set(rows.map((r) => r.study_set_id)));
-    const { data: sets } =
+    const setIds = Array.from(
+      new Set(
+        rows
+          .map((r) => r.study_set_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+    const sets =
       setIds.length > 0
-        ? await supabase
-            .from("study_sets")
-            .select("id, title, subject, set_type")
-            .in("id", setIds)
-        : { data: [] };
+        ? await fetchInChunks(
+            setIds,
+            async (chunk) =>
+              supabase
+                .from("study_sets")
+                .select("id, title, subject, set_type")
+                .in("id", chunk),
+            SAFE_IN_CHUNK_SIZE,
+          )
+        : [];
 
-    const setMap = new Map((sets ?? []).map((s) => [s.id, s]));
+    const setMap = new Map(sets.map((s) => [s.id, s]));
     const enriched = rows.map((r) => ({
       ...r,
-      study_set: setMap.get(r.study_set_id) ?? null,
+      study_set: r.study_set_id ? (setMap.get(r.study_set_id) ?? null) : null,
     }));
 
     const total = count ?? enriched.length;
@@ -89,13 +101,25 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const body = await parseJsonBody(request);
     const input = createSessionSchema.parse(body);
 
-    await requireStudySetAccess(supabase, input.study_set_id, user.id, "read");
+    const sourceIds = Array.from(
+      new Set([
+        ...(input.study_set_id ? [input.study_set_id] : []),
+        ...(input.source_study_set_ids ?? []),
+      ]),
+    );
+
+    await Promise.all(
+      sourceIds.map((sid) => requireStudySetAccess(supabase, sid, user.id, "read")),
+    );
+
+    const singleSetId = sourceIds.length === 1 ? sourceIds[0] : null;
 
     const { data, error } = await supabase
       .from("study_sessions")
       .insert({
         user_id: user.id,
-        study_set_id: input.study_set_id,
+        study_set_id: singleSetId,
+        source_study_set_ids: sourceIds,
         mode: input.mode,
         status: "in_progress",
         config: input.config as Json,

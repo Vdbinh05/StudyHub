@@ -1,14 +1,21 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import type { ExamAttemptPayload } from "@/lib/supabase/rpc";
+import { rpcSubmitExamAttempt, type ExamAttemptPayload } from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
+import type {
+  ExamChapterBreakdown,
+  ExamSubjectBreakdown,
+  ExamTagBreakdown,
+} from "@/types/domain";
 
 interface RouteContext {
   params: Promise<{ attemptId: string }>;
 }
 
-function buildChapterBreakdown(payload: ExamAttemptPayload) {
+function buildFallbackChapterBreakdown(
+  payload: ExamAttemptPayload,
+): ExamChapterBreakdown[] {
   const answerByQId = new Map(
     (payload.answers ?? []).map((a) => [a.attempt_question_id, a]),
   );
@@ -34,13 +41,9 @@ function buildChapterBreakdown(payload: ExamAttemptPayload) {
       ((ans.selected_option_ids && ans.selected_option_ids.length > 0) ||
         Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0));
 
-    if (!hasAns) {
-      entry.unanswered += 1;
-    } else if (ans.is_correct) {
-      entry.correct += 1;
-    } else {
-      entry.wrong += 1;
-    }
+    if (!hasAns) entry.unanswered += 1;
+    else if (ans.is_correct) entry.correct += 1;
+    else entry.wrong += 1;
     chapterMap.set(key, entry);
   }
 
@@ -73,21 +76,32 @@ export async function POST(
       throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
     }
 
-    // Atomic, FOR UPDATE locked, strictly server-scored & idempotent RPC
-    const { data, error } = await supabase.rpc("submit_exam_attempt", {
-      p_attempt_id: id,
-    });
+    // Atomic, FOR UPDATE locked, strictly server-scored & idempotent V2.0 RPC
+    const { data: gradedPayload, error } = await rpcSubmitExamAttempt(
+      supabase,
+      id,
+    );
 
     if (error) throw error;
-    if (!data) {
+    if (!gradedPayload) {
       throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
     }
 
-    const gradedPayload = data as unknown as ExamAttemptPayload;
+    const subjectBreakdown: ExamSubjectBreakdown[] =
+      gradedPayload.subject_breakdown ?? [];
+    const chapterBreakdown: ExamChapterBreakdown[] =
+      gradedPayload.chapter_breakdown && gradedPayload.chapter_breakdown.length > 0
+        ? gradedPayload.chapter_breakdown
+        : buildFallbackChapterBreakdown(gradedPayload);
+    const tagBreakdown: ExamTagBreakdown[] = gradedPayload.tag_breakdown ?? [];
 
     return apiSuccess({
       ...gradedPayload,
-      chapter_breakdown: buildChapterBreakdown(gradedPayload),
+      sources: gradedPayload.sources ?? [],
+      subject_breakdown: subjectBreakdown,
+      chapter_breakdown: chapterBreakdown,
+      tag_breakdown: tagBreakdown,
+      coverage_cycle: gradedPayload.coverage_cycle ?? null,
     });
   } catch (err) {
     return handleApiError(err);

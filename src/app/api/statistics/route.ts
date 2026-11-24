@@ -2,6 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, handleApiError } from "@/lib/security/errors";
+import {
+  fetchAllPages,
+  fetchInChunks,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
 
 const statsQuerySchema = z.object({
   days: z.coerce.number().int().min(7).max(365).default(30),
@@ -26,7 +31,6 @@ function computeStreaks(activeDates: Set<string>): {
   const cursor = new Date(today);
   const todayKey = cursor.toISOString().slice(0, 10);
   if (!activeDates.has(todayKey)) {
-    // Allow streak to continue if user studied yesterday
     cursor.setUTCDate(cursor.getUTCDate() - 1);
   }
   while (activeDates.has(cursor.toISOString().slice(0, 10))) {
@@ -64,53 +68,59 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const sinceDate = new Date(Date.now() - days * 86_400_000);
     const sinceIso = sinceDate.toISOString();
 
-    const [
-      { data: progressRows, error: progErr },
-      { data: sessionRows, error: sessErr },
-      { data: answerRows, error: ansErr },
-      { data: examRows, error: examErr },
-      { data: setRows, error: setErr },
-    ] = await Promise.all([
-      supabase
-        .from("user_question_progress")
-        .select(
-          "study_set_id, question_id, mastery_level, correct_count, wrong_count, next_review_at",
-        )
-        .eq("user_id", user.id),
-      supabase
-        .from("study_sessions")
-        .select("id, study_set_id, mode, status, completed_items, correct_items, duration_seconds, started_at, completed_at")
-        .eq("user_id", user.id)
-        .gte("started_at", sinceIso)
-        .order("started_at", { ascending: true }),
-      supabase
-        .from("study_session_answers")
-        .select("is_correct, answered_at, study_set_id")
-        .eq("user_id", user.id)
-        .gte("answered_at", sinceIso)
-        .order("answered_at", { ascending: true })
-        .limit(10000),
-      supabase
-        .from("exam_attempts")
-        .select(
-          "id, study_set_id, study_set_title_snapshot, status, total_questions, correct_count, wrong_count, unanswered_count, score_percent, passed, time_spent_seconds, submitted_at, created_at",
-        )
-        .eq("user_id", user.id)
-        .in("status", ["submitted", "expired"])
-        .order("submitted_at", { ascending: true })
-        .limit(200),
-      supabase
-        .from("study_sets")
-        .select("id, title, subject, question_count")
-        .eq("owner_id", user.id)
-        .eq("is_archived", false),
-    ]);
-
-    if (progErr) throw progErr;
-    if (sessErr) throw sessErr;
-    if (ansErr) throw ansErr;
-    if (examErr) throw examErr;
-    if (setErr) throw setErr;
+    // SH-005 & SH-036: Paginate all analytics sources and strictly honor `?days=` on exams too!
+    const [progressRows, sessionRows, answerRows, examRows, setRows] =
+      await Promise.all([
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("user_question_progress")
+            .select(
+              "study_set_id, question_id, mastery_level, correct_count, wrong_count, next_review_at",
+            )
+            .eq("user_id", user.id)
+            .range(from, to),
+        ),
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("study_sessions")
+            .select(
+              "id, study_set_id, mode, status, completed_items, correct_items, duration_seconds, started_at, completed_at",
+            )
+            .eq("user_id", user.id)
+            .gte("started_at", sinceIso)
+            .order("started_at", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("study_session_answers")
+            .select("is_correct, answered_at, study_set_id")
+            .eq("user_id", user.id)
+            .gte("answered_at", sinceIso)
+            .order("answered_at", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("exam_attempts")
+            .select(
+              "id, study_set_id, study_set_title_snapshot, status, total_questions, answered_count, correct_count, wrong_count, unanswered_count, score_percent, passed, time_spent_seconds, submitted_at, created_at",
+            )
+            .eq("user_id", user.id)
+            .in("status", ["submitted", "expired"])
+            .gte("submitted_at", sinceIso)
+            .order("submitted_at", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllPages(async (from, to) =>
+          supabase
+            .from("study_sets")
+            .select("id, title, subject, question_count")
+            .eq("owner_id", user.id)
+            .eq("is_archived", false)
+            .range(from, to),
+        ),
+      ]);
 
     const nowIso = new Date().toISOString();
     const masteryDistribution = {
@@ -124,15 +134,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     let totalWrong = 0;
     let dueCount = 0;
 
+    const ownedSetIds = new Set(setRows.map((s) => s.id));
+    let ownedTrackedCount = 0;
+
     const setStatsMap = new Map<
       string,
       { correct: number; wrong: number; mastered: number; totalTracked: number }
     >();
 
-    for (const p of progressRows ?? []) {
+    for (const p of progressRows) {
       masteryDistribution[p.mastery_level] += 1;
       totalCorrect += p.correct_count;
       totalWrong += p.wrong_count;
+      if (ownedSetIds.has(p.study_set_id)) {
+        ownedTrackedCount += 1;
+      }
       if (p.next_review_at && p.next_review_at <= nowIso) {
         dueCount += 1;
       }
@@ -150,17 +166,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       setStatsMap.set(p.study_set_id, entry);
     }
 
-    const totalOwnedQuestions = (setRows ?? []).reduce(
+    const totalOwnedQuestions = setRows.reduce(
       (sum, s) => sum + s.question_count,
       0,
     );
-    const untracked = Math.max(
-      0,
-      totalOwnedQuestions - (progressRows ?? []).length,
-    );
+    const untracked = Math.max(0, totalOwnedQuestions - ownedTrackedCount);
     masteryDistribution.new += untracked;
 
-    // Daily activity series over requested range
+    // Daily activity series over requested range (includes BOTH sessions & exams!)
     const dailyMap = new Map<
       string,
       {
@@ -189,9 +202,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const activeDates = new Set<string>();
     let totalStudySeconds = 0;
 
-    for (const s of sessionRows ?? []) {
+    for (const s of sessionRows) {
       const key = toDateKey(s.started_at);
-      activeDates.add(key);
+      if (s.completed_items > 0) activeDates.add(key);
       totalStudySeconds += s.duration_seconds;
       const bucket = dailyMap.get(key);
       if (bucket) {
@@ -200,7 +213,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    for (const a of answerRows ?? []) {
+    for (const a of answerRows) {
       const key = toDateKey(a.answered_at);
       activeDates.add(key);
       const bucket = dailyMap.get(key);
@@ -210,7 +223,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    for (const e of examRows ?? []) {
+    for (const e of examRows) {
       const ts = e.submitted_at ?? e.created_at;
       const key = toDateKey(ts);
       activeDates.add(key);
@@ -218,14 +231,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const bucket = dailyMap.get(key);
       if (bucket) {
         bucket.exams += 1;
+        bucket.answers += e.answered_count;
+        bucket.correct += e.correct_count;
         bucket.study_seconds += e.time_spent_seconds;
       }
     }
 
     const streaks = computeStreaks(activeDates);
 
-    // Performance by study set & weak topics
-    const setTitleMap = new Map((setRows ?? []).map((s) => [s.id, s]));
+    // Fetch titles for any shared sets present in progress
+    const setTitleMap = new Map(setRows.map((s) => [s.id, s]));
+    const missingSetIds = Array.from(setStatsMap.keys()).filter(
+      (id) => !setTitleMap.has(id),
+    );
+    if (missingSetIds.length > 0) {
+      const extraSets = await fetchInChunks(
+        missingSetIds,
+        async (chunk) =>
+          supabase
+            .from("study_sets")
+            .select("id, title, subject, question_count")
+            .in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      );
+      for (const s of extraSets) {
+        setTitleMap.set(s.id, s);
+      }
+    }
+
     const performanceBySet = Array.from(setStatsMap.entries())
       .map(([setId, stat]) => {
         const info = setTitleMap.get(setId);
@@ -247,43 +280,49 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       })
       .sort((a, b) => a.accuracy_percent - b.accuracy_percent);
 
-    // Weak chapters from questions with wrong_count > 0
-    const weakQuestionIds = (progressRows ?? [])
-      .filter((p) => p.wrong_count > 0)
-      .map((p) => p.question_id)
-      .slice(0, 500);
+    // SH-036: Compute true chapter accuracy across ALL tracked questions (not just wrong_count > 0!)
+    // and keep null chapter as `null` instead of generating broken `?chapter=General` links!
+    const allTrackedQuestionIds = progressRows
+      .filter((p) => p.correct_count + p.wrong_count > 0)
+      .map((p) => p.question_id);
 
     const weakChapters: Array<{
       study_set_id: string;
       study_set_title: string;
-      chapter: string;
+      chapter: string | null;
       wrong_count: number;
       correct_count: number;
       accuracy_percent: number;
     }> = [];
 
-    if (weakQuestionIds.length > 0) {
-      const { data: weakQuestions } = await supabase
-        .from("questions")
-        .select("id, study_set_id, chapter")
-        .in("id", weakQuestionIds);
+    if (allTrackedQuestionIds.length > 0) {
+      const trackedQuestions = await fetchInChunks(
+        allTrackedQuestionIds,
+        async (chunk) =>
+          supabase
+            .from("questions")
+            .select("id, study_set_id, chapter")
+            .in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      );
 
-      const qMetaMap = new Map((weakQuestions ?? []).map((q) => [q.id, q]));
+      const qMetaMap = new Map(trackedQuestions.map((q) => [q.id, q]));
       const chapterAgg = new Map<
         string,
         {
           study_set_id: string;
-          chapter: string;
+          chapter: string | null;
           wrong_count: number;
           correct_count: number;
         }
       >();
 
-      for (const p of progressRows ?? []) {
+      for (const p of progressRows) {
+        if (p.correct_count + p.wrong_count === 0) continue;
         const qm = qMetaMap.get(p.question_id);
         if (!qm) continue;
-        const chapter = qm.chapter?.trim() || "General";
-        const key = `${qm.study_set_id}::${chapter}`;
+        const chapter = qm.chapter?.trim() || null;
+        const key = `${qm.study_set_id}::${chapter ?? "__none__"}`;
         const agg = chapterAgg.get(key) ?? {
           study_set_id: qm.study_set_id,
           chapter,
@@ -296,6 +335,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
 
       for (const agg of chapterAgg.values()) {
+        if (agg.wrong_count === 0) continue;
         const total = agg.correct_count + agg.wrong_count;
         weakChapters.push({
           ...agg,
@@ -324,8 +364,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         due_for_review: dueCount,
         overall_accuracy_percent: overallAccuracy,
         total_study_seconds: totalStudySeconds,
-        total_sessions: (sessionRows ?? []).length,
-        total_exams: (examRows ?? []).length,
+        total_sessions: sessionRows.length,
+        total_exams: examRows.length,
         ...streaks,
       },
       mastery_distribution: masteryDistribution,
@@ -334,7 +374,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         accuracy_percent:
           d.answers > 0 ? Math.round((d.correct / d.answers) * 10000) / 100 : 0,
       })),
-      exam_score_trend: (examRows ?? []).map((e) => ({
+      exam_score_trend: examRows.map((e) => ({
         id: e.id,
         study_set_id: e.study_set_id,
         title: e.study_set_title_snapshot,

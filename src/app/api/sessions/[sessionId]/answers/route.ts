@@ -50,65 +50,81 @@ export async function POST(
       throw new AppError("NOT_FOUND", "Question not found.", 404);
     }
 
-    // Deterministic server-side grading if caller didn't explicitly supply self-assessed is_correct
-    let isCorrect = input.is_correct;
+    // SH-012 / SEC-023: Verify the answered question belongs to this session's study set(s)
+    const allowedSets = new Set<string>([
+      ...(session.study_set_id ? [session.study_set_id] : []),
+      ...(session.source_study_set_ids ?? []),
+    ]);
+    if (allowedSets.size > 0 && !allowedSets.has(question.study_set_id)) {
+      throw new AppError(
+        "INVALID_REFERENCE",
+        "Question does not belong to this study session.",
+        400,
+      );
+    }
 
-    if (isCorrect === undefined) {
-      if (
-        question.question_type === "single_choice" ||
-        question.question_type === "multiple_choice" ||
-        question.question_type === "true_false"
-      ) {
-        const { data: options, error: optErr } = await supabase
-          .from("question_options")
-          .select("id, is_correct")
-          .eq("question_id", question.id);
-        if (optErr) throw optErr;
+    // Server-authoritative deterministic grading for objective choice questions
+    const isChoiceQuestion =
+      question.question_type === "single_choice" ||
+      question.question_type === "multiple_choice" ||
+      question.question_type === "true_false";
 
-        const correctIds = (options ?? [])
-          .filter((o) => o.is_correct)
-          .map((o) => o.id)
-          .sort();
-        const selectedIds = Array.from(new Set(input.selected_option_ids)).sort();
+    let isCorrect: boolean;
 
-        isCorrect =
-          correctIds.length > 0 &&
-          correctIds.length === selectedIds.length &&
-          correctIds.every((cid, idx) => cid === selectedIds[idx]);
-      } else if (input.self_rating) {
-        isCorrect = input.self_rating !== "again";
-      } else if (input.typed_answer !== undefined && input.typed_answer !== null) {
-        const { data: accepted, error: accErr } = await supabase
-          .from("question_accepted_answers")
-          .select("answer_text, normalized_answer, match_mode")
-          .eq("question_id", question.id);
-        if (accErr) throw accErr;
+    if (isChoiceQuestion && input.selected_option_ids.length > 0) {
+      const { data: options, error: optErr } = await supabase
+        .from("question_options")
+        .select("id, is_correct")
+        .eq("question_id", question.id)
+        .eq("study_set_id", question.study_set_id);
+      if (optErr) throw optErr;
 
-        if (accepted && accepted.length > 0) {
-          isCorrect = accepted.some((acc) => {
-            const normUser = normalizeAnswerText(
-              input.typed_answer ?? "",
-              acc.match_mode,
-            );
-            const normAcc = normalizeAnswerText(acc.answer_text, acc.match_mode);
-            return normUser.length > 0 && normUser === normAcc;
-          });
-        } else if (question.back_text) {
+      const correctIds = (options ?? [])
+        .filter((o) => o.is_correct)
+        .map((o) => o.id)
+        .sort();
+      const selectedIds = Array.from(new Set(input.selected_option_ids)).sort();
+
+      isCorrect =
+        correctIds.length > 0 &&
+        correctIds.length === selectedIds.length &&
+        correctIds.every((cid, idx) => cid === selectedIds[idx]);
+    } else if (input.is_correct !== undefined) {
+      isCorrect = input.is_correct;
+    } else if (input.self_rating) {
+      isCorrect = input.self_rating !== "again";
+    } else if (input.typed_answer !== undefined && input.typed_answer !== null) {
+      const { data: accepted, error: accErr } = await supabase
+        .from("question_accepted_answers")
+        .select("answer_text, normalized_answer, match_mode")
+        .eq("question_id", question.id)
+        .eq("study_set_id", question.study_set_id);
+      if (accErr) throw accErr;
+
+      if (accepted && accepted.length > 0) {
+        isCorrect = accepted.some((acc) => {
           const normUser = normalizeAnswerText(
-            input.typed_answer,
-            "ignore_diacritics",
+            input.typed_answer ?? "",
+            acc.match_mode,
           );
-          const normBack = normalizeAnswerText(
-            question.back_text,
-            "ignore_diacritics",
-          );
-          isCorrect = normUser.length > 0 && normUser === normBack;
-        } else {
-          isCorrect = false;
-        }
+          const normAcc = normalizeAnswerText(acc.answer_text, acc.match_mode);
+          return normUser.length > 0 && normUser === normAcc;
+        });
+      } else if (question.back_text) {
+        const normUser = normalizeAnswerText(
+          input.typed_answer,
+          "ignore_diacritics",
+        );
+        const normBack = normalizeAnswerText(
+          question.back_text,
+          "ignore_diacritics",
+        );
+        isCorrect = normUser.length > 0 && normUser === normBack;
       } else {
         isCorrect = false;
       }
+    } else {
+      isCorrect = false;
     }
 
     const { data: answerRow, error: ansErr } = await supabase
@@ -129,12 +145,27 @@ export async function POST(
 
     if (ansErr) throw ansErr;
 
-    // Update running session counters
+    // Recompute exact completed & correct counts from study_session_answers to avoid RMW lost updates
+    const [{ count: completedCount }, { count: correctCount }] =
+      await Promise.all([
+        supabase
+          .from("study_session_answers")
+          .select("id", { count: "exact", head: true })
+          .eq("session_id", session.id)
+          .eq("user_id", user.id),
+        supabase
+          .from("study_session_answers")
+          .select("id", { count: "exact", head: true })
+          .eq("session_id", session.id)
+          .eq("user_id", user.id)
+          .eq("is_correct", true),
+      ]);
+
     const { error: updSessErr } = await supabase
       .from("study_sessions")
       .update({
-        completed_items: session.completed_items + 1,
-        correct_items: session.correct_items + (isCorrect ? 1 : 0),
+        completed_items: completedCount ?? session.completed_items + 1,
+        correct_items: correctCount ?? session.correct_items + (isCorrect ? 1 : 0),
       })
       .eq("id", session.id)
       .eq("user_id", user.id);

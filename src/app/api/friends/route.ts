@@ -7,6 +7,7 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
+import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { createFriendRequestSchema } from "@/lib/validation/social";
 
 export async function GET(): Promise<NextResponse> {
@@ -21,7 +22,11 @@ export async function GET(): Promise<NextResponse> {
 
     if (error) throw error;
 
-    const friendships = rows ?? [];
+    // SH-002 / SEC-006: Hide blocks initiated by the other user from the blocked user's payload
+    const friendships = (rows ?? []).filter(
+      (f) => f.status !== "blocked" || f.blocked_by === user.id,
+    );
+
     const otherIds = Array.from(
       new Set(
         friendships.map((f) =>
@@ -30,15 +35,20 @@ export async function GET(): Promise<NextResponse> {
       ),
     );
 
-    const { data: profiles } =
+    const profiles =
       otherIds.length > 0
-        ? await supabase
-            .from("profiles")
-            .select("id, display_name, username, avatar_url, bio")
-            .in("id", otherIds)
-        : { data: [] };
+        ? await fetchInChunks(
+            otherIds,
+            async (chunk) =>
+              supabase
+                .from("profiles")
+                .select("id, display_name, username, avatar_url, bio")
+                .in("id", chunk),
+            SAFE_IN_CHUNK_SIZE,
+          )
+        : [];
 
-    const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
+    const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
     const enriched = friendships.map((f) => {
       const otherId =
@@ -51,6 +61,7 @@ export async function GET(): Promise<NextResponse> {
     });
 
     return apiSuccess({
+      current_user_id: user.id,
       friends: enriched.filter((f) => f.status === "accepted"),
       incoming_requests: enriched.filter(
         (f) => f.status === "pending" && f.direction === "incoming",
@@ -58,7 +69,9 @@ export async function GET(): Promise<NextResponse> {
       outgoing_requests: enriched.filter(
         (f) => f.status === "pending" && f.direction === "outgoing",
       ),
-      blocked: enriched.filter((f) => f.status === "blocked"),
+      blocked: enriched.filter(
+        (f) => f.status === "blocked" && f.blocked_by === user.id,
+      ),
     });
   } catch (err) {
     return handleApiError(err);
@@ -104,7 +117,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Check existing relationship in either direction
     const { data: existing, error: exErr } = await supabase
       .from("friendships")
       .select("*")
@@ -133,8 +145,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           403,
         );
       }
-      // If previously declined, remove old declined row so a fresh pending request can be sent
-      await supabase.from("friendships").delete().eq("id", existing.id);
+      const { error: delOldErr } = await supabase
+        .from("friendships")
+        .delete()
+        .eq("id", existing.id);
+      if (delOldErr) throw delOldErr;
     }
 
     const { data, error } = await supabase

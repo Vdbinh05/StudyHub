@@ -30,7 +30,7 @@ import type {
   ParsedOption,
   ParsedQuestion,
 } from "@/types/import";
-import { getDetectionSourceBadge } from "./import-copy";
+import { getDetectionSourceBadge, getQuestionTypeLabel } from "./import-copy";
 
 export type PreviewFilterTab =
   | "all"
@@ -58,11 +58,12 @@ export function VirtualizedPreviewList({
 }: VirtualizedPreviewListProps) {
   const [filterTab, setFilterTab] = React.useState<PreviewFilterTab>("all");
   const [searchQuery, setSearchQuery] = React.useState("");
+  const deferredSearchQuery = React.useDeferredValue(searchQuery);
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const scrollParentRef = React.useRef<HTMLDivElement | null>(null);
 
   const filteredQuestions = React.useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
+    const query = deferredSearchQuery.trim().toLowerCase();
     return questions.filter((q) => {
       const hasError = q.issues.some((i) => i.severity === "error");
       const hasWarning = q.issues.some((i) => i.severity === "warning");
@@ -79,7 +80,7 @@ export function VirtualizedPreviewList({
       }
       return true;
     });
-  }, [questions, filterTab, searchQuery]);
+  }, [questions, filterTab, deferredSearchQuery]);
 
   // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
@@ -206,10 +207,10 @@ export function VirtualizedPreviewList({
         </div>
       )}
 
-      {/* Filter Tabs + Search */}
+      {/* Filter Toolbar + Search */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div
-          role="tablist"
+          role="toolbar"
           aria-label={locale === "en" ? "Filter parsed questions" : "Lọc câu hỏi đã phân tích"}
           className="flex flex-wrap gap-1.5"
         >
@@ -217,8 +218,7 @@ export function VirtualizedPreviewList({
             <button
               key={tab.id}
               type="button"
-              role="tab"
-              aria-selected={filterTab === tab.id}
+              aria-pressed={filterTab === tab.id}
               onClick={() => setFilterTab(tab.id)}
               className={cn(
                 "inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -308,7 +308,7 @@ export function VirtualizedPreviewList({
                       hasError
                         ? "border-destructive/50"
                         : hasWarning
-                          ? "border-amber-500/50"
+                          ? "border-warning/50"
                           : "border-border",
                     )}
                   >
@@ -324,7 +324,7 @@ export function VirtualizedPreviewList({
                           </Badge>
                         )}
                         <Badge variant="secondary" className="text-xs">
-                          {q.questionType}
+                          {getQuestionTypeLabel(q.questionType, locale)}
                         </Badge>
                         {q.detectedBy.map((src) => (
                           <Badge
@@ -338,7 +338,7 @@ export function VirtualizedPreviewList({
                         {q.isDuplicate && (
                           <Badge
                             variant="outline"
-                            className="gap-1 border-amber-500/50 text-amber-700 dark:text-amber-400"
+                            className="gap-1 border-warning/50 bg-warning-subtle text-warning-subtle-foreground"
                           >
                             <Copy className="size-3" aria-hidden="true" />
                             {locale === "en" ? "Duplicate" : "Trùng lặp"}
@@ -407,8 +407,8 @@ export function VirtualizedPreviewList({
                             className={cn(
                               "flex items-start gap-2 rounded-lg px-3 py-2 text-xs",
                               issue.severity === "error"
-                                ? "bg-destructive/10 text-destructive"
-                                : "bg-amber-500/10 text-amber-800 dark:text-amber-300",
+                                ? "bg-destructive-subtle text-destructive-subtle-foreground"
+                                : "bg-warning-subtle text-warning-subtle-foreground",
                             )}
                           >
                             {issue.severity === "error" ? (
@@ -425,6 +425,7 @@ export function VirtualizedPreviewList({
                     {/* Inline Edit Mode vs Read Preview Mode */}
                     {isEditing ? (
                       <InlineQuestionEditor
+                        key={q.tempId}
                         locale={locale}
                         question={q}
                         onUpdateQuestion={onUpdateQuestion}
@@ -441,8 +442,8 @@ export function VirtualizedPreviewList({
                         </p>
 
                         {q.questionType === "flashcard" ? (
-                          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-foreground">
-                            <span className="mr-2 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                          <div className="rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-sm text-foreground">
+                            <span className="mr-2 text-xs font-semibold text-success-subtle-foreground">
                               {locale === "en" ? "Back:" : "Mặt sau:"}
                             </span>
                             <span className="whitespace-pre-wrap">
@@ -464,7 +465,7 @@ export function VirtualizedPreviewList({
                                   className={cn(
                                     "flex items-start gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-colors",
                                     opt.isCorrect
-                                      ? "border-emerald-500/50 bg-emerald-500/10 font-medium text-emerald-900 dark:text-emerald-200"
+                                      ? "border-success/50 bg-success-subtle font-medium text-success-subtle-foreground"
                                       : "border-border bg-background text-foreground",
                                     allowInlineEdit &&
                                       "cursor-pointer hover:border-primary/50",
@@ -474,7 +475,7 @@ export function VirtualizedPreviewList({
                                     className={cn(
                                       "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
                                       opt.isCorrect
-                                        ? "bg-emerald-600 text-white"
+                                        ? "bg-success text-success-foreground"
                                         : "bg-muted text-muted-foreground",
                                     )}
                                   >
@@ -527,9 +528,9 @@ function SummaryKpi({
     <div
       className={cn(
         "rounded-xl border p-3",
-        tone === "success" && "border-emerald-500/30 bg-emerald-500/5",
-        tone === "warning" && "border-amber-500/30 bg-amber-500/5",
-        tone === "error" && "border-destructive/30 bg-destructive/5",
+        tone === "success" && "border-success/30 bg-success-subtle",
+        tone === "warning" && "border-warning/30 bg-warning-subtle",
+        tone === "error" && "border-destructive/30 bg-destructive-subtle",
         tone === "neutral" && "border-border bg-card",
       )}
     >
@@ -537,9 +538,9 @@ function SummaryKpi({
       <p
         className={cn(
           "mt-1 text-xl font-semibold tabular-nums",
-          tone === "success" && "text-emerald-700 dark:text-emerald-400",
-          tone === "warning" && "text-amber-700 dark:text-amber-400",
-          tone === "error" && "text-destructive",
+          tone === "success" && "text-success-subtle-foreground",
+          tone === "warning" && "text-warning-subtle-foreground",
+          tone === "error" && "text-destructive-subtle-foreground",
           tone === "neutral" && "text-foreground",
         )}
       >
@@ -548,6 +549,16 @@ function SummaryKpi({
     </div>
   );
 }
+
+interface InlineDraft {
+  prompt: string;
+  chapter: string;
+  explanation: string;
+  backText: string;
+  optionContents: Record<string, string>;
+}
+
+const INLINE_EDIT_DEBOUNCE_MS = 220;
 
 function InlineQuestionEditor({
   locale,
@@ -563,11 +574,102 @@ function InlineQuestionEditor({
   ) => void;
   onToggleOptionCorrect: (q: ParsedQuestion, optionId: string) => void;
 }) {
+  const [draft, setDraft] = React.useState<InlineDraft>(() => ({
+    prompt: question.prompt,
+    chapter: question.chapter ?? "",
+    explanation: question.explanation ?? "",
+    backText: question.backText ?? "",
+    optionContents: Object.fromEntries(
+      question.options.map((o) => [o.id, o.content]),
+    ),
+  }));
+
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDraftRef = React.useRef<InlineDraft | null>(null);
+  const onUpdateRef = React.useRef(onUpdateQuestion);
+  const tempIdRef = React.useRef(question.tempId);
+
+  React.useEffect(() => {
+    onUpdateRef.current = onUpdateQuestion;
+    tempIdRef.current = question.tempId;
+  }, [onUpdateQuestion, question.tempId]);
+
+  const commitDraft = React.useCallback((next: InlineDraft) => {
+    pendingDraftRef.current = null;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    onUpdateRef.current(tempIdRef.current, (prev) => ({
+      ...prev,
+      prompt: next.prompt,
+      chapter: next.chapter || null,
+      explanation: next.explanation || null,
+      backText: prev.questionType === "flashcard" ? next.backText : prev.backText,
+      acceptedAnswers:
+        prev.questionType === "flashcard"
+          ? next.backText.trim()
+            ? [{ answerText: next.backText.trim(), matchMode: "case_insensitive" }]
+            : []
+          : prev.acceptedAnswers,
+      options: prev.options.map((o) =>
+        Object.prototype.hasOwnProperty.call(next.optionContents, o.id)
+          ? { ...o, content: next.optionContents[o.id] }
+          : o,
+      ),
+    }));
+  }, []);
+
+  const scheduleCommit = React.useCallback(
+    (next: InlineDraft) => {
+      pendingDraftRef.current = next;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+      timerRef.current = setTimeout(() => {
+        if (pendingDraftRef.current) {
+          commitDraft(pendingDraftRef.current);
+        }
+      }, INLINE_EDIT_DEBOUNCE_MS);
+    },
+    [commitDraft],
+  );
+
+  const flushPending = React.useCallback(() => {
+    if (pendingDraftRef.current) {
+      commitDraft(pendingDraftRef.current);
+    }
+  }, [commitDraft]);
+
+  React.useEffect(() => {
+    return () => {
+      if (pendingDraftRef.current) {
+        commitDraft(pendingDraftRef.current);
+      } else if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [commitDraft]);
+
+  const updateDraft = (updater: (prev: InlineDraft) => InlineDraft) => {
+    setDraft((prev) => {
+      const next = updater(prev);
+      scheduleCommit(next);
+      return next;
+    });
+  };
+
   const addOption = () => {
+    flushPending();
+    const newId = crypto.randomUUID();
+    setDraft((prev) => ({
+      ...prev,
+      optionContents: { ...prev.optionContents, [newId]: "" },
+    }));
     onUpdateQuestion(question.tempId, (prev) => {
       const nextLabel = String.fromCharCode(65 + prev.options.length);
       const newOpt: ParsedOption = {
-        id: crypto.randomUUID(),
+        id: newId,
         label: nextLabel,
         content: "",
         isCorrect: false,
@@ -578,6 +680,12 @@ function InlineQuestionEditor({
   };
 
   const removeOption = (optId: string) => {
+    flushPending();
+    setDraft((prev) => {
+      const nextMap = { ...prev.optionContents };
+      delete nextMap[optId];
+      return { ...prev, optionContents: nextMap };
+    });
     onUpdateQuestion(question.tempId, (prev) => ({
       ...prev,
       options: prev.options
@@ -596,13 +704,12 @@ function InlineQuestionEditor({
           <Textarea
             id={`edit-prompt-${question.tempId}`}
             rows={2}
-            value={question.prompt}
-            onChange={(e) =>
-              onUpdateQuestion(question.tempId, (prev) => ({
-                ...prev,
-                prompt: e.target.value,
-              }))
-            }
+            value={draft.prompt}
+            onBlur={flushPending}
+            onChange={(e) => {
+              const value = e.target.value;
+              updateDraft((prev) => ({ ...prev, prompt: value }));
+            }}
           />
         </div>
 
@@ -612,13 +719,12 @@ function InlineQuestionEditor({
           </Label>
           <Input
             id={`edit-chapter-${question.tempId}`}
-            value={question.chapter ?? ""}
-            onChange={(e) =>
-              onUpdateQuestion(question.tempId, (prev) => ({
-                ...prev,
-                chapter: e.target.value || null,
-              }))
-            }
+            value={draft.chapter}
+            onBlur={flushPending}
+            onChange={(e) => {
+              const value = e.target.value;
+              updateDraft((prev) => ({ ...prev, chapter: value }));
+            }}
           />
         </div>
 
@@ -628,13 +734,12 @@ function InlineQuestionEditor({
           </Label>
           <Input
             id={`edit-explanation-${question.tempId}`}
-            value={question.explanation ?? ""}
-            onChange={(e) =>
-              onUpdateQuestion(question.tempId, (prev) => ({
-                ...prev,
-                explanation: e.target.value || null,
-              }))
-            }
+            value={draft.explanation}
+            onBlur={flushPending}
+            onChange={(e) => {
+              const value = e.target.value;
+              updateDraft((prev) => ({ ...prev, explanation: value }));
+            }}
           />
         </div>
       </div>
@@ -647,16 +752,12 @@ function InlineQuestionEditor({
           <Textarea
             id={`edit-back-${question.tempId}`}
             rows={2}
-            value={question.backText ?? ""}
-            onChange={(e) =>
-              onUpdateQuestion(question.tempId, (prev) => ({
-                ...prev,
-                backText: e.target.value,
-                acceptedAnswers: e.target.value.trim()
-                  ? [{ answerText: e.target.value.trim(), matchMode: "case_insensitive" }]
-                  : [],
-              }))
-            }
+            value={draft.backText}
+            onBlur={flushPending}
+            onChange={(e) => {
+              const value = e.target.value;
+              updateDraft((prev) => ({ ...prev, backText: value }));
+            }}
           />
         </div>
       ) : (
@@ -679,22 +780,25 @@ function InlineQuestionEditor({
               <Checkbox
                 id={`opt-check-${opt.id}`}
                 checked={opt.isCorrect}
-                onCheckedChange={() => onToggleOptionCorrect(question, opt.id)}
+                onCheckedChange={() => {
+                  flushPending();
+                  onToggleOptionCorrect(question, opt.id);
+                }}
                 aria-label={`${locale === "en" ? "Mark correct" : "Đánh dấu đúng"} ${opt.label}`}
               />
               <span className="w-5 text-xs font-semibold text-muted-foreground">
                 {opt.label}.
               </span>
               <Input
-                value={opt.content}
-                onChange={(e) =>
-                  onUpdateQuestion(question.tempId, (prev) => ({
+                value={draft.optionContents[opt.id] ?? opt.content}
+                onBlur={flushPending}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  updateDraft((prev) => ({
                     ...prev,
-                    options: prev.options.map((o) =>
-                      o.id === opt.id ? { ...o, content: e.target.value } : o,
-                    ),
-                  }))
-                }
+                    optionContents: { ...prev.optionContents, [opt.id]: value },
+                  }));
+                }}
                 className="flex-1"
               />
               {question.options.length > 2 && (

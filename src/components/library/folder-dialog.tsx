@@ -4,7 +4,7 @@ import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch } from "@/components/layout/api-client";
+import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -57,8 +57,10 @@ function FolderDialogForm({
   const queryClient = useQueryClient();
 
   const [name, setName] = React.useState(folder?.name ?? "");
+  const [nameError, setNameError] = React.useState<string | null>(null);
   const [description, setDescription] = React.useState(folder?.description ?? "");
   const [color, setColor] = React.useState(folder?.color ?? "indigo");
+  const nameInputRef = React.useRef<HTMLInputElement>(null);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -94,13 +96,20 @@ function FolderDialogForm({
       onOpenChange(false);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim()) {
+      setNameError(
+        vi ? "Vui lòng nhập tên thư mục." : "Please enter a folder name.",
+      );
+      nameInputRef.current?.focus();
+      return;
+    }
+    setNameError(null);
     mutation.mutate();
   };
 
@@ -121,19 +130,36 @@ function FolderDialogForm({
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="folder-name">
               {vi ? "Tên thư mục" : "Folder name"}
             </Label>
             <Input
+              ref={nameInputRef}
               id="folder-name"
               required
               maxLength={120}
+              aria-invalid={Boolean(nameError)}
+              aria-describedby={nameError ? "folder-name-error" : undefined}
               placeholder={vi ? "VD: Giải tích 1, IELTS Reading..." : "e.g., Biology 101, Midterm Prep"}
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (nameError && e.target.value.trim()) {
+                  setNameError(null);
+                }
+              }}
             />
+            {nameError && (
+              <p
+                id="folder-name-error"
+                role="alert"
+                className="text-destructive text-xs font-medium"
+              >
+                {nameError}
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -151,7 +177,7 @@ function FolderDialogForm({
 
           <div className="space-y-2">
             <Label>{vi ? "Màu nhận diện" : "Accent color"}</Label>
-            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={vi ? "Chọn màu thư mục" : "Folder color"}>
+            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={vi ? "Chọn màu thư mục" : "Folder color"}>
               {FOLDER_COLORS.map((swatch) => (
                 <button
                   key={swatch.id}
@@ -160,12 +186,17 @@ function FolderDialogForm({
                   aria-checked={color === swatch.id}
                   aria-label={swatch.id}
                   onClick={() => setColor(swatch.id)}
-                  className={cn(
-                    "size-7 rounded-full transition-transform",
-                    swatch.className,
-                    color === swatch.id && "ring-ring scale-110 ring-2 ring-offset-2",
-                  )}
-                />
+                  className="focus-visible:ring-ring inline-flex size-10 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-9"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "size-6 rounded-full transition-transform",
+                      swatch.className,
+                      color === swatch.id && "ring-ring scale-110 ring-2 ring-offset-2",
+                    )}
+                  />
+                </button>
               ))}
             </div>
           </div>
@@ -178,7 +209,7 @@ function FolderDialogForm({
             >
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={!name.trim() || mutation.isPending}>
+            <Button type="submit" disabled={mutation.isPending}>
               {mutation.isPending && (
                 <Loader2 className="size-4 animate-spin" aria-hidden="true" />
               )}

@@ -18,7 +18,11 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -57,18 +61,25 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
-import { tryCreateClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import type {
   AnswerMatchMode,
   DifficultyLevel,
   Folder,
+  MemberRole,
   Question,
   QuestionType,
   StudySet,
   StudySetType,
+  Tag,
   Visibility,
 } from "@/types/domain";
+
+interface StudySetEditorDetail extends StudySet {
+  role?: MemberRole;
+  chapters?: Array<string | { name: string; count: number }>;
+  tags?: Tag[];
+}
 
 interface EditableOption {
   /** Preserves existing UUID on edit; omitted for brand-new options */
@@ -100,6 +111,14 @@ interface QuestionDraft {
   accepted_answers: EditableAcceptedAnswer[];
 }
 
+interface UploadedImageResponse {
+  path: string;
+  signedUrl: string;
+  proxyUrl?: string;
+  mimeType: string;
+  size: number;
+}
+
 const ALLOWED_IMAGE_MIME = new Set([
   "image/png",
   "image/jpeg",
@@ -107,6 +126,12 @@ const ALLOWED_IMAGE_MIME = new Set([
   "image/gif",
 ]);
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function clampInt(raw: string, min: number, max: number, fallback: number): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
 
 function createEmptyDraft(defaultType: QuestionType = "single_choice"): QuestionDraft {
   return {
@@ -176,12 +201,24 @@ export function QuestionEditorView({ setId }: { setId: string }) {
   const vi = locale === "vi";
   const router = useRouter();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const [search, setSearch] = React.useState("");
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
+  const [chapterFilter, setChapterFilter] = React.useState("all");
+  const [difficultyFilter, setDifficultyFilter] = React.useState<"all" | DifficultyLevel>("all");
+  const [typeFilter, setTypeFilter] = React.useState<"all" | QuestionType>("all");
+  const [tagFilter, setTagFilter] = React.useState("all");
   const [page, setPage] = React.useState(1);
+
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [bulkChapter, setBulkChapter] = React.useState("");
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = React.useState(false);
+  const [deletingQuestion, setDeletingQuestion] = React.useState<{
+    id: string;
+    num: number;
+    prompt: string;
+  } | null>(null);
 
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [draft, setDraft] = React.useState<QuestionDraft>(() => createEmptyDraft());
@@ -194,22 +231,32 @@ export function QuestionEditorView({ setId }: { setId: string }) {
   const [setFolderId, setSetFolderId] = React.useState("none");
   const [setType, setSetType] = React.useState<StudySetType>("multiple_choice");
   const [setVisibility, setSetVisibility] = React.useState<Visibility>("private");
-  const [setDuration, setSetDuration] = React.useState(45);
-  const [setPassThreshold, setSetPassThreshold] = React.useState(70);
+  const [durationDraft, setDurationDraft] = React.useState("45");
+  const [passDraft, setPassDraft] = React.useState("70");
   const [deleteSetOpen, setDeleteSetOpen] = React.useState(false);
 
   const listParentRef = React.useRef<HTMLDivElement>(null);
 
-  const setQuery = useQuery<StudySet>({
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  const setQuery = useQuery<StudySetEditorDetail>({
     queryKey: ["study-set", setId],
+    enabled: configured,
     queryFn: async () => {
-      const res = await apiFetch<StudySet>(`/api/sets/${setId}`);
+      const res = await apiFetch<StudySetEditorDetail>(`/api/sets/${setId}`);
       return res.data;
     },
   });
 
   const foldersQuery = useQuery<Folder[]>({
     queryKey: ["folders"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<Folder[]>("/api/folders");
       return Array.isArray(res.data) ? res.data : [];
@@ -217,12 +264,26 @@ export function QuestionEditorView({ setId }: { setId: string }) {
   });
 
   const questionsQuery = useQuery<{ items: Question[]; total: number }>({
-    queryKey: ["editor-questions", setId, page, search.trim()],
+    queryKey: [
+      "editor-questions",
+      setId,
+      page,
+      debouncedSearch,
+      chapterFilter,
+      difficultyFilter,
+      typeFilter,
+      tagFilter,
+    ],
+    enabled: configured && Boolean(setQuery.data),
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("pageSize", "500");
-      if (search.trim()) params.set("search", search.trim());
+      if (debouncedSearch) params.set("search", debouncedSearch);
+      if (chapterFilter !== "all") params.set("chapter", chapterFilter);
+      if (difficultyFilter !== "all") params.set("difficulty", difficultyFilter);
+      if (typeFilter !== "all") params.set("questionType", typeFilter);
+      if (tagFilter !== "all") params.set("tagId", tagFilter);
       const res = await apiFetch<Question[]>(
         `/api/sets/${setId}/questions?${params.toString()}`,
       );
@@ -240,8 +301,8 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     setSetFolderId(s.folder_id ?? "none");
     setSetType(s.set_type);
     setSetVisibility(s.visibility);
-    setSetDuration(s.default_exam_duration_minutes);
-    setSetPassThreshold(s.default_pass_threshold);
+    setDurationDraft(String(s.default_exam_duration_minutes));
+    setPassDraft(String(s.default_pass_threshold));
   }, [setQuery.data]);
 
   const saveQuestionMutation = useMutation({
@@ -312,7 +373,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       toast.success(vi ? "Đã lưu câu hỏi." : "Question saved.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -323,13 +384,14 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       });
     },
     onSuccess: () => {
+      setDeletingQuestion(null);
       queryClient.invalidateQueries({ queryKey: ["editor-questions", setId] });
       queryClient.invalidateQueries({ queryKey: ["set-questions", setId] });
       queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
       toast.success(vi ? "Đã xóa câu hỏi." : "Question deleted.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -351,7 +413,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       toast.success(vi ? "Đã cập nhật hàng loạt." : "Bulk update applied.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -372,24 +434,32 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       toast.success(vi ? "Đã xóa các câu hỏi đã chọn." : "Selected questions deleted.");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
+  const isOwner =
+    setQuery.data?.role === "owner" || setQuery.data?.role === undefined;
+
   const updateSetMutation = useMutation({
     mutationFn: async () => {
+      const durationMinutes = clampInt(durationDraft, 1, 300, 45);
+      const passThreshold = clampInt(passDraft, 1, 100, 70);
+      const payload: Record<string, unknown> = {
+        title: setTitle.trim(),
+        subject: setSubject.trim() || null,
+        description: setDescription.trim() || null,
+        set_type: setType,
+        default_exam_duration_minutes: durationMinutes,
+        default_pass_threshold: passThreshold,
+      };
+      if (isOwner) {
+        payload.folder_id = setFolderId === "none" ? null : setFolderId;
+        payload.visibility = setVisibility;
+      }
       await apiFetch(`/api/sets/${setId}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          title: setTitle.trim(),
-          subject: setSubject.trim() || null,
-          description: setDescription.trim() || null,
-          folder_id: setFolderId === "none" ? null : setFolderId,
-          set_type: setType,
-          visibility: setVisibility,
-          default_exam_duration_minutes: Math.max(1, Math.min(300, setDuration)),
-          default_pass_threshold: Math.max(1, Math.min(100, setPassThreshold)),
-        }),
+        body: JSON.stringify(payload),
       });
     },
     onSuccess: () => {
@@ -398,7 +468,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       toast.success(t("settings.savedSuccess"));
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
@@ -412,10 +482,11 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       router.push("/library");
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
+  // Server-validated upload via POST /api/uploads/image (fixes SH-019 & eliminates direct Supabase client import per SH-039)
   const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -436,45 +507,29 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       return;
     }
 
-    const supabase = tryCreateClient();
-    if (!supabase) {
-      toast.error(
-        vi ? "Supabase chưa được cấu hình." : "Supabase is not configured.",
-      );
-      return;
-    }
-
     setUploadingImage(true);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
-        toast.error(vi ? "Vui lòng đăng nhập lại." : "Please sign in again.");
-        return;
-      }
-      const ext = file.name.split(".").pop()?.toLowerCase() || "png";
-      const safeExt = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext) ? ext : "png";
-      const path = `${user.id}/${setId}/${crypto.randomUUID()}.${safeExt}`;
-      const { error: uploadErr } = await supabase.storage
-        .from("study-media")
-        .upload(path, file, { contentType: file.type, upsert: false });
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("purpose", "question");
+      formData.append("studySetId", setId);
 
-      if (uploadErr) {
-        toast.error(uploadErr.message);
-        return;
+      const res = await apiFetch<UploadedImageResponse>("/api/uploads/image", {
+        method: "POST",
+        body: formData,
+      });
+      const resolvedUrl =
+        res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
+      if (!resolvedUrl) {
+        throw new Error(t("common.errorGeneric"));
       }
-
-      const { data: publicUrlData } = supabase.storage
-        .from("study-media")
-        .getPublicUrl(path);
       setDraft((prev) => ({
         ...prev,
-        prompt_image_url: publicUrlData.publicUrl,
+        prompt_image_url: resolvedUrl,
       }));
-      toast.success(vi ? "Đã tải ảnh lên." : "Image uploaded.");
-    } catch {
-      toast.error(t("common.errorGeneric"));
+      toast.success(vi ? "Đã tải ảnh lên thành công." : "Image uploaded successfully.");
+    } catch (err) {
+      toast.error(getFriendlyErrorMessage(err, locale));
     } finally {
       setUploadingImage(false);
     }
@@ -487,6 +542,31 @@ export function QuestionEditorView({ setId }: { setId: string }) {
   const totalCount = questionsQuery.data?.total ?? questions.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / 500));
 
+  const availableChapters = React.useMemo(() => {
+    const discovered = new Set<string>();
+    for (const ch of setQuery.data?.chapters ?? []) {
+      const name = typeof ch === "string" ? ch : ch.name;
+      if (name) discovered.add(name);
+    }
+    for (const q of questions) {
+      if (q.chapter) discovered.add(q.chapter);
+    }
+    return Array.from(discovered);
+  }, [setQuery.data?.chapters, questions]);
+
+  const availableTags = React.useMemo(() => {
+    const tagMap = new Map<string, Tag>();
+    for (const tag of setQuery.data?.tags ?? []) {
+      tagMap.set(tag.id, tag);
+    }
+    for (const q of questions) {
+      for (const tag of q.tags ?? []) {
+        tagMap.set(tag.id, tag);
+      }
+    }
+    return Array.from(tagMap.values());
+  }, [setQuery.data?.tags, questions]);
+
   // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: questions.length,
@@ -494,6 +574,21 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     estimateSize: () => 92,
     overscan: 8,
   });
+
+  if (!configured) {
+    return (
+      <EmptyState
+        icon={AlertCircle}
+        title={vi ? "Không thể mở trình chỉnh sửa" : "Editor unavailable"}
+        description={t("common.serviceUnavailableDesc")}
+        action={
+          <Button asChild variant="outline">
+            <Link href="/library">{t("library.title")}</Link>
+          </Button>
+        }
+      />
+    );
+  }
 
   if (setQuery.isLoading) {
     return <Skeleton className="h-96 w-full rounded-xl" />;
@@ -504,11 +599,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
       <EmptyState
         icon={AlertCircle}
         title={vi ? "Không thể mở trình chỉnh sửa" : "Cannot open editor"}
-        description={
-          setQuery.error instanceof Error
-            ? setQuery.error.message
-            : t("common.errorGeneric")
-        }
+        description={getFriendlyErrorMessage(setQuery.error, locale)}
         action={
           <Button asChild>
             <Link href="/library">{t("library.title")}</Link>
@@ -522,6 +613,13 @@ export function QuestionEditorView({ setId }: { setId: string }) {
     draft.question_type === "single_choice" ||
     draft.question_type === "multiple_choice" ||
     draft.question_type === "true_false";
+
+  const hasActiveFilters =
+    Boolean(debouncedSearch) ||
+    chapterFilter !== "all" ||
+    difficultyFilter !== "all" ||
+    typeFilter !== "all" ||
+    tagFilter !== "all";
 
   const handleSaveDraft = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -546,12 +644,23 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         vi ? "Thẻ Flashcard cần nội dung mặt sau." : "Flashcards require back text.",
       );
       return;
+    } else if (
+      draft.question_type === "short_answer" &&
+      !draft.accepted_answers.some((a) => a.answer_text.trim().length > 0) &&
+      !draft.back_text.trim()
+    ) {
+      toast.error(
+        vi
+          ? "Câu trả lời ngắn cần ít nhất 1 đáp án chấp nhận."
+          : "Short-answer questions require at least one accepted answer.",
+      );
+      return;
     }
     saveQuestionMutation.mutate(draft);
   };
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={`${t("common.edit")}: ${setQuery.data.title}`}
         breadcrumbs={[
@@ -600,22 +709,157 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
         {/* Questions Tab */}
         <TabsContent value="questions" className="mt-4 space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="relative flex-1 sm:max-w-sm">
-              <Search
-                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                aria-hidden="true"
-              />
-              <Input
-                type="search"
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <search className="relative min-w-56 flex-1 sm:max-w-xs">
+                <Search
+                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                  aria-hidden="true"
+                />
+                <Input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={vi ? "Tìm câu hỏi..." : "Search questions..."}
+                  aria-label={vi ? "Tìm câu hỏi" : "Search questions"}
+                  className="pl-9"
+                />
+              </search>
+
+              {/* Chapter filter (SH-033) */}
+              {availableChapters.length > 0 && (
+                <Select
+                  value={chapterFilter}
+                  onValueChange={(v) => {
+                    setChapterFilter(v);
+                    setPage(1);
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-44"
+                    aria-label={vi ? "Lọc theo chương" : "Filter by chapter"}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      {vi ? "Tất cả chương" : "All chapters"}
+                    </SelectItem>
+                    {availableChapters.map((ch) => (
+                      <SelectItem key={ch} value={ch}>
+                        {ch}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+
+              {/* Difficulty filter (SH-033) */}
+              <Select
+                value={difficultyFilter}
+                onValueChange={(v) => {
+                  setDifficultyFilter(v as "all" | DifficultyLevel);
                   setPage(1);
                 }}
-                placeholder={vi ? "Tìm câu hỏi..." : "Search questions..."}
-                className="pl-9"
-              />
+              >
+                <SelectTrigger
+                  className="w-36"
+                  aria-label={vi ? "Lọc theo độ khó" : "Filter by difficulty"}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    {vi ? "Mọi độ khó" : "All difficulties"}
+                  </SelectItem>
+                  <SelectItem value="easy">{t("difficulty.easy")}</SelectItem>
+                  <SelectItem value="medium">{t("difficulty.medium")}</SelectItem>
+                  <SelectItem value="hard">{t("difficulty.hard")}</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* Question Type filter (SH-033) */}
+              <Select
+                value={typeFilter}
+                onValueChange={(v) => {
+                  setTypeFilter(v as "all" | QuestionType);
+                  setPage(1);
+                }}
+              >
+                <SelectTrigger
+                  className="w-40"
+                  aria-label={vi ? "Lọc theo dạng câu" : "Filter by question type"}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    {vi ? "Mọi dạng câu" : "All types"}
+                  </SelectItem>
+                  <SelectItem value="single_choice">
+                    {t("questionType.single_choice")}
+                  </SelectItem>
+                  <SelectItem value="multiple_choice">
+                    {t("questionType.multiple_choice")}
+                  </SelectItem>
+                  <SelectItem value="true_false">
+                    {t("questionType.true_false")}
+                  </SelectItem>
+                  <SelectItem value="flashcard">
+                    {t("questionType.flashcard")}
+                  </SelectItem>
+                  <SelectItem value="short_answer">
+                    {t("questionType.short_answer")}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* Tag filter (SH-033) */}
+              {availableTags.length > 0 && (
+                <Select
+                  value={tagFilter}
+                  onValueChange={(v) => {
+                    setTagFilter(v);
+                    setPage(1);
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-40"
+                    aria-label={vi ? "Lọc theo thẻ" : "Filter by tag"}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      {vi ? "Tất cả thẻ" : "All tags"}
+                    </SelectItem>
+                    {availableTags.map((tag) => (
+                      <SelectItem key={tag.id} value={tag.id}>
+                        {tag.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+
+              {hasActiveFilters && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setSearch("");
+                    setDebouncedSearch("");
+                    setChapterFilter("all");
+                    setDifficultyFilter("all");
+                    setTypeFilter("all");
+                    setTagFilter("all");
+                    setPage(1);
+                  }}
+                >
+                  {t("common.reset")}
+                </Button>
+              )}
             </div>
 
             {selectedIds.size > 0 && (
@@ -627,7 +871,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   value={bulkChapter}
                   onChange={(e) => setBulkChapter(e.target.value)}
                   placeholder={vi ? "Gán chương..." : "Assign chapter..."}
-                  className="bg-card h-8 w-36 text-xs"
+                  className="bg-card h-8 w-40 text-xs"
                 />
                 <Button
                   size="sm"
@@ -654,22 +898,50 @@ export function QuestionEditorView({ setId }: { setId: string }) {
           ) : questions.length === 0 ? (
             <EmptyState
               icon={Plus}
-              title={vi ? "Chưa có câu hỏi nào" : "No questions yet"}
+              title={
+                hasActiveFilters
+                  ? vi
+                    ? "Không tìm thấy câu hỏi phù hợp"
+                    : "No matching questions"
+                  : vi
+                    ? "Chưa có câu hỏi nào"
+                    : "No questions yet"
+              }
               description={
-                vi
-                  ? "Bấm \"Thêm câu hỏi\" để tạo câu trắc nghiệm hoặc flashcard, hoặc dùng công cụ Nhập từ file."
-                  : "Click \"Add question\" to author a new multiple-choice question or flashcard, or bulk import from a file."
+                hasActiveFilters
+                  ? vi
+                    ? "Thử đặt lại bộ lọc hoặc thay đổi từ khóa tìm kiếm."
+                    : "Try clearing filters or adjusting your search keywords."
+                  : vi
+                    ? "Bấm \"Thêm câu hỏi\" để tạo câu trắc nghiệm hoặc flashcard, hoặc dùng công cụ Nhập từ file."
+                    : "Click \"Add question\" to author a new multiple-choice question or flashcard, or bulk import from a file."
               }
               action={
-                <Button
-                  onClick={() => {
-                    setDraft(createEmptyDraft());
-                    setEditorOpen(true);
-                  }}
-                >
-                  <Plus className="size-4" aria-hidden="true" />
-                  <span>{vi ? "Thêm câu hỏi" : "Add question"}</span>
-                </Button>
+                hasActiveFilters ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setSearch("");
+                      setDebouncedSearch("");
+                      setChapterFilter("all");
+                      setDifficultyFilter("all");
+                      setTypeFilter("all");
+                      setTagFilter("all");
+                    }}
+                  >
+                    {t("common.reset")}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => {
+                      setDraft(createEmptyDraft());
+                      setEditorOpen(true);
+                    }}
+                  >
+                    <Plus className="size-4" aria-hidden="true" />
+                    <span>{vi ? "Thêm câu hỏi" : "Add question"}</span>
+                  </Button>
+                )
               }
             />
           ) : (
@@ -733,7 +1005,12 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                                 {q.prompt}
                               </p>
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                <Badge variant="secondary">{q.question_type}</Badge>
+                                <Badge variant="secondary">
+                                  {t(`questionType.${q.question_type}`)}
+                                </Badge>
+                                <Badge variant="outline">
+                                  {t(`difficulty.${q.difficulty}`)}
+                                </Badge>
                                 {q.chapter && (
                                   <Badge variant="outline">{q.chapter}</Badge>
                                 )}
@@ -753,7 +1030,13 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                               size="icon-sm"
                               className="text-destructive hover:bg-destructive-subtle"
                               aria-label={`${t("common.delete")} #${globalNum}`}
-                              onClick={() => deleteQuestionMutation.mutate(q.id)}
+                              onClick={() =>
+                                setDeletingQuestion({
+                                  id: q.id,
+                                  num: globalNum,
+                                  prompt: q.prompt,
+                                })
+                              }
                             >
                               <Trash2 className="size-4" aria-hidden="true" />
                             </Button>
@@ -828,24 +1111,26 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                       onChange={(e) => setSetSubject(e.target.value)}
                     />
                   </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="edit-set-folder">{t("nav.folders")}</Label>
-                    <Select value={setFolderId} onValueChange={setSetFolderId}>
-                      <SelectTrigger id="edit-set-folder">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">
-                          {vi ? "Không thuộc thư mục" : "No folder"}
-                        </SelectItem>
-                        {(foldersQuery.data ?? []).map((f) => (
-                          <SelectItem key={f.id} value={f.id}>
-                            {f.name}
+                  {isOwner && (
+                    <div className="space-y-1.5">
+                      <Label htmlFor="edit-set-folder">{t("nav.folders")}</Label>
+                      <Select value={setFolderId} onValueChange={setSetFolderId}>
+                        <SelectTrigger id="edit-set-folder">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">
+                            {vi ? "Không thuộc thư mục" : "No folder"}
                           </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                          {(foldersQuery.data ?? []).map((f) => (
+                            <SelectItem key={f.id} value={f.id}>
+                              {f.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-1.5">
@@ -868,31 +1153,33 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                       </SelectContent>
                     </Select>
                   </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="edit-set-vis">{vi ? "Hiển thị" : "Visibility"}</Label>
-                    <Select
-                      value={setVisibility}
-                      onValueChange={(v) => setSetVisibility(v as Visibility)}
-                    >
-                      <SelectTrigger id="edit-set-vis">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="private">
-                          {t("library.visibilityPrivate")}
-                        </SelectItem>
-                        <SelectItem value="shared">
-                          {t("library.visibilityShared")}
-                        </SelectItem>
-                        <SelectItem value="unlisted">
-                          {t("library.visibilityUnlisted")}
-                        </SelectItem>
-                        <SelectItem value="public">
-                          {t("library.visibilityPublic")}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                  {isOwner && (
+                    <div className="space-y-1.5">
+                      <Label htmlFor="edit-set-vis">{vi ? "Hiển thị" : "Visibility"}</Label>
+                      <Select
+                        value={setVisibility}
+                        onValueChange={(v) => setSetVisibility(v as Visibility)}
+                      >
+                        <SelectTrigger id="edit-set-vis">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="private">
+                            {t("library.visibilityPrivate")}
+                          </SelectItem>
+                          <SelectItem value="shared">
+                            {t("library.visibilityShared")}
+                          </SelectItem>
+                          <SelectItem value="unlisted">
+                            {t("library.visibilityUnlisted")}
+                          </SelectItem>
+                          <SelectItem value="public">
+                            {t("library.visibilityPublic")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="edit-set-desc">{vi ? "Mô tả" : "Description"}</Label>
@@ -908,36 +1195,52 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                     <Label htmlFor="edit-set-dur">{t("exam.timeLimitMinutes")}</Label>
                     <Input
                       id="edit-set-dur"
-                      type="number"
-                      min={1}
-                      max={300}
-                      value={setDuration}
-                      onChange={(e) => setSetDuration(Number(e.target.value) || 45)}
+                      type="text"
+                      inputMode="numeric"
+                      value={durationDraft}
+                      onChange={(e) =>
+                        setDurationDraft(e.target.value.replace(/[^0-9]/g, ""))
+                      }
+                      onBlur={() =>
+                        setDurationDraft(String(clampInt(durationDraft, 1, 300, 45)))
+                      }
                     />
                   </div>
                   <div className="space-y-1.5">
                     <Label htmlFor="edit-set-pass">{t("exam.passThreshold")}</Label>
                     <Input
                       id="edit-set-pass"
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={setPassThreshold}
-                      onChange={(e) => setSetPassThreshold(Number(e.target.value) || 70)}
+                      type="text"
+                      inputMode="numeric"
+                      value={passDraft}
+                      onChange={(e) =>
+                        setPassDraft(e.target.value.replace(/[^0-9]/g, ""))
+                      }
+                      onBlur={() =>
+                        setPassDraft(String(clampInt(passDraft, 1, 100, 70)))
+                      }
                     />
                   </div>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="text-destructive border-destructive/30 hover:bg-destructive-subtle"
-                    onClick={() => setDeleteSetOpen(true)}
-                  >
-                    <Trash2 className="size-4" aria-hidden="true" />
-                    <span>{vi ? "Xóa học phần" : "Delete study set"}</span>
-                  </Button>
+                  {isOwner ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="text-destructive border-destructive/30 hover:bg-destructive-subtle"
+                      onClick={() => setDeleteSetOpen(true)}
+                    >
+                      <Trash2 className="size-4" aria-hidden="true" />
+                      <span>{vi ? "Xóa học phần" : "Delete study set"}</span>
+                    </Button>
+                  ) : (
+                    <span className="text-muted-foreground text-xs">
+                      {vi
+                        ? "Chỉ chủ sở hữu học phần mới có thể đổi quyền hiển thị hoặc xóa học phần."
+                        : "Only the set owner can change visibility, folder, or delete this study set."}
+                    </span>
+                  )}
                   <Button type="submit" disabled={updateSetMutation.isPending}>
                     {updateSetMutation.isPending ? (
                       <Loader2 className="size-4 animate-spin" aria-hidden="true" />
@@ -955,7 +1258,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
 
       {/* Add / Edit Single Question Dialog */}
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
-        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent className="max-h-[90dvh] overflow-y-auto overscroll-contain sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
               {draft.id
@@ -968,8 +1271,8 @@ export function QuestionEditorView({ setId }: { setId: string }) {
             </DialogTitle>
             <DialogDescription>
               {vi
-                ? "UUID của các phương án cũ được giữ nguyên để không làm sai lệch thống kê."
-                : "Existing option UUIDs are preserved to keep grading and history consistent."}
+                ? "Các phương án cũ giữ nguyên mã định danh để không làm sai lệch thống kê và bài thi trước đó."
+                : "Existing answer choices retain stable identifiers so past exam stats remain accurate."}
             </DialogDescription>
           </DialogHeader>
 
@@ -981,27 +1284,42 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   value={draft.question_type}
                   onValueChange={(val) => {
                     const nextType = val as QuestionType;
-                    setDraft((prev) => ({
-                      ...prev,
-                      question_type: nextType,
-                      options:
-                        nextType === "true_false"
-                          ? [
-                              {
-                                id: prev.options[0]?.id,
-                                localKey: prev.options[0]?.localKey ?? "tf-0",
-                                content: prev.options[0]?.content || (vi ? "Đúng" : "True"),
-                                is_correct: true,
-                              },
-                              {
-                                id: prev.options[1]?.id,
-                                localKey: prev.options[1]?.localKey ?? "tf-1",
-                                content: prev.options[1]?.content || (vi ? "Sai" : "False"),
-                                is_correct: false,
-                              },
-                            ]
-                          : prev.options,
-                    }));
+                    setDraft((prev) => {
+                      if (nextType === "true_false") {
+                        return {
+                          ...prev,
+                          question_type: nextType,
+                          options: [
+                            {
+                              id: prev.options[0]?.id,
+                              localKey: prev.options[0]?.localKey ?? "tf-0",
+                              content: prev.options[0]?.content || (vi ? "Đúng" : "True"),
+                              is_correct: true,
+                            },
+                            {
+                              id: prev.options[1]?.id,
+                              localKey: prev.options[1]?.localKey ?? "tf-1",
+                              content: prev.options[1]?.content || (vi ? "Sai" : "False"),
+                              is_correct: false,
+                            },
+                          ],
+                        };
+                      }
+                      // Collapse multiple correct flags when switching to single_choice (fixes QB-03)
+                      if (nextType === "single_choice") {
+                        const firstCorrectIdx = prev.options.findIndex((o) => o.is_correct);
+                        const keepIdx = firstCorrectIdx >= 0 ? firstCorrectIdx : 0;
+                        return {
+                          ...prev,
+                          question_type: nextType,
+                          options: prev.options.map((o, idx) => ({
+                            ...o,
+                            is_correct: idx === keepIdx,
+                          })),
+                        };
+                      }
+                      return { ...prev, question_type: nextType };
+                    });
                   }}
                 >
                   <SelectTrigger id="q-type">
@@ -1009,17 +1327,19 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="single_choice">
-                      {vi ? "Trắc nghiệm 1 đáp án" : "Single choice"}
+                      {t("questionType.single_choice")}
                     </SelectItem>
                     <SelectItem value="multiple_choice">
-                      {vi ? "Trắc nghiệm nhiều đáp án" : "Multiple choice"}
+                      {t("questionType.multiple_choice")}
                     </SelectItem>
                     <SelectItem value="true_false">
-                      {vi ? "Đúng / Sai" : "True / False"}
+                      {t("questionType.true_false")}
                     </SelectItem>
-                    <SelectItem value="flashcard">Flashcard</SelectItem>
+                    <SelectItem value="flashcard">
+                      {t("questionType.flashcard")}
+                    </SelectItem>
                     <SelectItem value="short_answer">
-                      {vi ? "Trả lời ngắn" : "Short answer"}
+                      {t("questionType.short_answer")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -1049,9 +1369,9 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="easy">{vi ? "Dễ" : "Easy"}</SelectItem>
-                    <SelectItem value="medium">{vi ? "Trung bình" : "Medium"}</SelectItem>
-                    <SelectItem value="hard">{vi ? "Khó" : "Hard"}</SelectItem>
+                    <SelectItem value="easy">{t("difficulty.easy")}</SelectItem>
+                    <SelectItem value="medium">{t("difficulty.medium")}</SelectItem>
+                    <SelectItem value="hard">{t("difficulty.hard")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1079,10 +1399,12 @@ export function QuestionEditorView({ setId }: { setId: string }) {
               />
             </div>
 
-            {/* Optional Image Upload / URL */}
+            {/* Optional Image Upload via POST /api/uploads/image */}
             <div className="space-y-1.5">
               <Label htmlFor="q-image-url">
-                {vi ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)" : "Optional image (PNG/JPG/WebP ≤ 5MB)"}
+                {vi
+                  ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)"
+                  : "Optional image (PNG/JPG/WebP ≤ 5MB)"}
               </Label>
               <div className="flex gap-2">
                 <Input
@@ -1094,7 +1416,13 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                     setDraft((prev) => ({ ...prev, prompt_image_url: e.target.value }))
                   }
                 />
-                <Button type="button" variant="outline" size="sm" asChild disabled={uploadingImage}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  asChild
+                  disabled={uploadingImage}
+                >
                   <label className="cursor-pointer">
                     {uploadingImage ? (
                       <Loader2 className="size-4 animate-spin" aria-hidden="true" />
@@ -1119,7 +1447,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                 <div className="flex items-center justify-between">
                   <Label>
                     {vi
-                      ? "Các phương án (bấm nút tròn/ô vuông để đánh dấu đáp án đúng)"
+                      ? "Các phương án (bấm nút chữ cái để chọn đáp án đúng)"
                       : "Options (toggle correct answer)"}
                   </Label>
                   {draft.options.length < 6 && draft.question_type !== "true_false" && (
@@ -1170,7 +1498,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                           aria-pressed={opt.is_correct}
                           aria-label={`${vi ? "Đánh dấu đáp án đúng" : "Mark correct"} ${letter}`}
                           className={cn(
-                            "flex size-9 shrink-0 items-center justify-center rounded-lg border font-mono text-xs font-bold transition-colors",
+                            "flex size-10 shrink-0 items-center justify-center rounded-lg border font-mono text-xs font-bold transition-colors",
                             opt.is_correct
                               ? "border-success bg-success text-success-foreground"
                               : "border-border bg-secondary text-muted-foreground hover:text-foreground",
@@ -1264,7 +1592,10 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                   </div>
 
                   {draft.accepted_answers.map((ans, idx) => (
-                    <div key={ans.localKey} className="flex flex-col gap-2 sm:flex-row">
+                    <div
+                      key={ans.localKey}
+                      className="flex flex-col gap-2 sm:flex-row sm:items-center"
+                    >
                       <Input
                         value={ans.answer_text}
                         placeholder={vi ? "Đáp án chấp nhận..." : "Accepted answer..."}
@@ -1309,6 +1640,24 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                           </SelectItem>
                         </SelectContent>
                       </Select>
+                      {draft.accepted_answers.length > 1 && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`${t("common.delete")} ${idx + 1}`}
+                          onClick={() =>
+                            setDraft((prev) => ({
+                              ...prev,
+                              accepted_answers: prev.accepted_answers.filter(
+                                (_, i) => i !== idx,
+                              ),
+                            }))
+                          }
+                        >
+                          <Trash2 className="size-4" aria-hidden="true" />
+                        </Button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1374,6 +1723,44 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         </DialogContent>
       </Dialog>
 
+      {/* Single Question Delete Confirmation (fixes SH-037 / L-01) */}
+      <AlertDialog
+        open={Boolean(deletingQuestion)}
+        onOpenChange={(open) => !open && setDeletingQuestion(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {vi
+                ? `Xóa câu hỏi #${deletingQuestion?.num ?? ""}?`
+                : `Delete question #${deletingQuestion?.num ?? ""}?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deletingQuestion?.prompt
+                ? `${deletingQuestion.prompt.slice(0, 140)}${deletingQuestion.prompt.length > 140 ? "…" : ""}`
+                : vi
+                  ? "Hành động này không thể hoàn tác. Lịch sử bài thi cũ vẫn được bảo toàn."
+                  : "This cannot be undone. Past exam attempt snapshots remain immutable."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteQuestionMutation.isPending}
+              onClick={() =>
+                deletingQuestion && deleteQuestionMutation.mutate(deletingQuestion.id)
+              }
+            >
+              {deleteQuestionMutation.isPending && (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              )}
+              <span>{t("common.delete")}</span>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Bulk Delete Confirm */}
       <AlertDialog
         open={bulkDeleteConfirmOpen}
@@ -1393,7 +1780,7 @@ export function QuestionEditorView({ setId }: { setId: string }) {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => bulkDeleteMutation.mutate()}
@@ -1404,28 +1791,30 @@ export function QuestionEditorView({ setId }: { setId: string }) {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Delete Set Confirm */}
-      <AlertDialog open={deleteSetOpen} onOpenChange={setDeleteSetOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {vi ? "Xóa học phần này?" : "Delete this study set?"}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("library.deleteSetConfirm")}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => deleteSetMutation.mutate()}
-            >
-              {t("common.delete")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Delete Set Confirm (Owner-only) */}
+      {isOwner && (
+        <AlertDialog open={deleteSetOpen} onOpenChange={setDeleteSetOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {vi ? "Xóa học phần này?" : "Delete this study set?"}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {t("library.deleteSetConfirm")}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel autoFocus>{t("common.cancel")}</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={() => deleteSetMutation.mutate()}
+              >
+                {t("common.delete")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </FadeIn>
   );
 }

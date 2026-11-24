@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { motion, type HTMLMotionProps } from "motion/react";
+import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 
 /**
  * StudyHub Motion Design Constants
@@ -15,18 +15,32 @@ export const MOTION_TIMINGS = {
   flip: 0.32,
 } as const;
 
-interface FadeInProps extends HTMLMotionProps<"div"> {
+interface FadeInProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  children?: React.ReactNode;
   delay?: number;
   yOffset?: number;
+  /** Keep SSR initial paint visible (opacity: 1) for above-the-fold heroes to protect LCP. */
+  aboveFold?: boolean;
 }
 
 export function FadeIn({
   children,
   delay = 0,
   yOffset = 8,
+  aboveFold = false,
   className,
   ...props
 }: FadeInProps) {
+  const prefersReduced = useReducedMotion();
+
+  if (aboveFold || prefersReduced) {
+    return (
+      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, y: yOffset }}
@@ -40,7 +54,8 @@ export function FadeIn({
   );
 }
 
-interface ScaleInProps extends HTMLMotionProps<"div"> {
+interface ScaleInProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  children?: React.ReactNode;
   delay?: number;
 }
 
@@ -50,6 +65,16 @@ export function ScaleIn({
   className,
   ...props
 }: ScaleInProps) {
+  const prefersReduced = useReducedMotion();
+
+  if (prefersReduced) {
+    return (
+      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.97 }}
@@ -63,7 +88,8 @@ export function ScaleIn({
   );
 }
 
-interface StaggerListProps extends HTMLMotionProps<"div"> {
+interface StaggerListProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  children?: React.ReactNode;
   staggerDelay?: number;
 }
 
@@ -73,6 +99,16 @@ export function StaggerList({
   className,
   ...props
 }: StaggerListProps) {
+  const prefersReduced = useReducedMotion();
+
+  if (prefersReduced) {
+    return (
+      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <motion.div
       initial="hidden"
@@ -93,11 +129,25 @@ export function StaggerList({
   );
 }
 
+interface StaggerItemProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  children?: React.ReactNode;
+}
+
 export function StaggerItem({
   children,
   className,
   ...props
-}: HTMLMotionProps<"div">) {
+}: StaggerItemProps) {
+  const prefersReduced = useReducedMotion();
+
+  if (prefersReduced) {
+    return (
+      <div className={className} {...(props as React.HTMLAttributes<HTMLDivElement>)}>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <motion.div
       variants={{

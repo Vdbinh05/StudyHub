@@ -1,9 +1,26 @@
 import type {
+  AllocationStrategy,
+  CoverageCycle,
+  DifficultyLevel,
   ExamAttempt,
   ExamAttemptAnswer,
+  ExamAttemptSource,
+  ExamChapterBreakdown,
+  ExamEligiblePool,
+  ExamFilterConfig,
+  ExamPreset,
+  ExamPreviewResult,
+  ExamQuestionType,
   ExamSnapshotQuestion,
+  ExamSourceInput,
+  ExamStatus,
+  ExamSubjectBreakdown,
+  ExamTagBreakdown,
+  Folder,
   MasteryLevel,
+  PracticePoolResponse,
   Question,
+  SelectionPolicy,
   SelfRating,
   SessionStatus,
   StudyMode,
@@ -18,6 +35,7 @@ export interface ApiEnvelope<T> {
     total?: number;
     page?: number;
     pageSize?: number;
+    hasMore?: boolean;
   };
 }
 
@@ -96,9 +114,39 @@ export function isEditableEventTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Determine whether keyboard focus is currently on an interactive control (button, link, etc.)
+ * so global `Enter`/`Space` listeners do not hijack native activation (LM-06).
+ */
+export function isInteractiveControlTarget(target: EventTarget | null): boolean {
+  if (isEditableEventTarget(target)) return true;
+  if (!target || typeof HTMLElement === "undefined") return false;
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "BUTTON" || tag === "A" || tag === "SUMMARY") {
+    return true;
+  }
+  const role = target.getAttribute("role");
+  if (
+    role === "button" ||
+    role === "link" ||
+    role === "menuitem" ||
+    role === "option" ||
+    role === "tab" ||
+    role === "switch" ||
+    role === "checkbox" ||
+    role === "radio"
+  ) {
+    return true;
+  }
+  return Boolean(target.closest("button, a, [role='button'], [role='menuitem']"));
+}
+
+/**
  * Validate safe image URLs before rendering `<img src>` (blocks javascript:, data:text/html, vbscript:).
  */
-export function isSafeDisplayImageUrl(url: string | null | undefined): url is string {
+export function isSafeDisplayImageUrl(
+  url: string | null | undefined,
+): url is string {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
@@ -112,7 +160,7 @@ export function isSafeDisplayImageUrl(url: string | null | undefined): url is st
 }
 
 // ============================================================================
-// Study Sets & Questions
+// Folders, Study Sets & Questions (Chunk-Safe Paginated Loaders — SH-005 / SH-025)
 // ============================================================================
 
 export interface StudySetDetailResponse {
@@ -132,29 +180,57 @@ export async function fetchStudySet(setId: string): Promise<StudySet> {
   return data as StudySet;
 }
 
-export async function fetchAccessibleSets(): Promise<StudySet[]> {
-  const res = await requestJson<StudySet[] | { sets: StudySet[] }>(
-    "/api/sets?page=1&pageSize=100",
-  );
+export async function fetchAccessibleSets(maxPages = 20): Promise<StudySet[]> {
+  const pageSize = 100;
+  const all: StudySet[] = [];
+  let page = 1;
+
+  while (page <= maxPages) {
+    const res = await requestJson<StudySet[] | { sets: StudySet[] }>(
+      `/api/sets?page=${page}&pageSize=${pageSize}`,
+    );
+    const items = Array.isArray(res.data)
+      ? res.data
+      : res.data && typeof res.data === "object" && "sets" in res.data
+        ? res.data.sets
+        : [];
+    all.push(...items);
+    const total = res.meta?.total;
+    if (
+      items.length < pageSize ||
+      (typeof total === "number" && all.length >= total)
+    ) {
+      break;
+    }
+    page += 1;
+  }
+
+  return all;
+}
+
+export async function fetchAccessibleFolders(): Promise<Folder[]> {
+  const res = await requestJson<Folder[] | { folders: Folder[] }>("/api/folders");
   if (Array.isArray(res.data)) return res.data;
-  if (res.data && typeof res.data === "object" && "sets" in res.data) {
-    return res.data.sets;
+  if (res.data && typeof res.data === "object" && "folders" in res.data) {
+    return res.data.folders;
   }
   return [];
 }
 
 /**
- * Fetch all questions for a study set using paginated chunks (max 500/page) up to `maxQuestions`.
+ * Fetch questions for a study set in safe `pageSize=100` chunks (<=400 options/call,
+ * strictly immune to PostgREST's 1,000-row cap — fixes SH-005 & SH-025).
  */
 export async function fetchStudySetQuestions(
   setId: string,
-  maxQuestions: number = 2000,
+  maxQuestions: number = 10_000,
 ): Promise<Question[]> {
-  const pageSize = 500;
+  const pageSize = 100;
   const all: Question[] = [];
   let page = 1;
+  const maxPages = Math.ceil(Math.max(1, maxQuestions) / pageSize) + 1;
 
-  while (all.length < maxQuestions) {
+  while (all.length < maxQuestions && page <= maxPages) {
     const res = await requestJson<Question[] | { questions: Question[] }>(
       `/api/sets/${encodeURIComponent(setId)}/questions?page=${page}&pageSize=${pageSize}`,
     );
@@ -165,7 +241,10 @@ export async function fetchStudySetQuestions(
         : [];
     all.push(...items);
     const total = res.meta?.total;
-    if (items.length < pageSize || (typeof total === "number" && all.length >= total)) {
+    if (
+      items.length < pageSize ||
+      (typeof total === "number" && all.length >= total)
+    ) {
       break;
     }
     page += 1;
@@ -175,18 +254,41 @@ export async function fetchStudySetQuestions(
 }
 
 // ============================================================================
-// Progress & Starred
+// Progress & Starred (Paginated — fixes SH-025 caps)
 // ============================================================================
 
 export async function fetchSetProgress(
   studySetId: string,
+  maxItems: number = 10_000,
 ): Promise<UserQuestionProgress[]> {
-  const res = await requestJson<
-    UserQuestionProgress[] | { progress: UserQuestionProgress[] }
-  >(`/api/progress?studySetId=${encodeURIComponent(studySetId)}&page=1&pageSize=500`);
-  if (Array.isArray(res.data)) return res.data;
-  if (res.data && "progress" in res.data) return res.data.progress;
-  return [];
+  const pageSize = 500;
+  const all: UserQuestionProgress[] = [];
+  let page = 1;
+  const maxPages = Math.ceil(maxItems / pageSize) + 1;
+
+  while (all.length < maxItems && page <= maxPages) {
+    const res = await requestJson<
+      UserQuestionProgress[] | { progress: UserQuestionProgress[] }
+    >(
+      `/api/progress?studySetId=${encodeURIComponent(studySetId)}&page=${page}&pageSize=${pageSize}`,
+    );
+    const items = Array.isArray(res.data)
+      ? res.data
+      : res.data && "progress" in res.data
+        ? res.data.progress
+        : [];
+    all.push(...items);
+    const total = res.meta?.total;
+    if (
+      items.length < pageSize ||
+      (typeof total === "number" && all.length >= total)
+    ) {
+      break;
+    }
+    page += 1;
+  }
+
+  return all.slice(0, maxItems);
 }
 
 export interface UpsertProgressPayload {
@@ -219,9 +321,9 @@ export interface DueQuestionItem {
 
 export async function fetchDueQuestions(
   studySetId?: string,
-  limit: number = 100,
+  limit: number = 200,
 ): Promise<DueQuestionItem[]> {
-  const params = new URLSearchParams({ limit: String(limit) });
+  const params = new URLSearchParams({ limit: String(Math.min(200, limit)) });
   if (studySetId) params.set("studySetId", studySetId);
   const res = await requestJson<DueQuestionItem[] | { items: DueQuestionItem[] }>(
     `/api/progress/due?${params.toString()}`,
@@ -242,46 +344,72 @@ export interface StarredQuestionItem {
 
 export async function fetchStarredQuestions(
   studySetId?: string,
+  maxItems: number = 2000,
 ): Promise<StarredQuestionItem[]> {
-  const params = new URLSearchParams({ page: "1", pageSize: "200" });
-  if (studySetId) params.set("studySetId", studySetId);
-  const res = await requestJson<unknown>(`/api/starred?${params.toString()}`);
-  const rawList: unknown[] = Array.isArray(res.data)
-    ? res.data
-    : res.data && typeof res.data === "object" && "items" in res.data
-      ? ((res.data as { items?: unknown[] }).items ?? [])
-      : [];
+  const pageSize = 200;
+  const all: StarredQuestionItem[] = [];
+  let page = 1;
+  const maxPages = Math.ceil(maxItems / pageSize) + 1;
 
-  return rawList
-    .map((entry): StarredQuestionItem | null => {
-      if (!entry || typeof entry !== "object") return null;
-      const obj = entry as Record<string, unknown>;
-      // Shape from GET /api/starred: { starred_at, study_set, question }
-      if ("question" in obj && obj.question && typeof obj.question === "object") {
-        const q = obj.question as Question;
-        const studySetObj = obj.study_set as { id?: string; title?: string } | null | undefined;
-        return {
-          question_id: (obj.question_id as string | undefined) ?? q.id,
-          study_set_id:
-            (obj.study_set_id as string | undefined) ??
-            studySetObj?.id ??
-            q.study_set_id,
-          created_at:
-            (obj.created_at as string | undefined) ??
-            (obj.starred_at as string | undefined) ??
-            q.created_at,
-          study_set_title:
-            (obj.study_set_title as string | undefined) ?? studySetObj?.title,
-          question: q,
-          progress: (obj.progress as UserQuestionProgress | null | undefined) ?? null,
-        };
-      }
-      if ("question_id" in obj) {
-        return obj as unknown as StarredQuestionItem;
-      }
-      return null;
-    })
-    .filter((item): item is StarredQuestionItem => item !== null);
+  while (all.length < maxItems && page <= maxPages) {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (studySetId) params.set("studySetId", studySetId);
+    const res = await requestJson<unknown>(`/api/starred?${params.toString()}`);
+    const rawList: unknown[] = Array.isArray(res.data)
+      ? res.data
+      : res.data && typeof res.data === "object" && "items" in res.data
+        ? ((res.data as { items?: unknown[] }).items ?? [])
+        : [];
+
+    const mapped = rawList
+      .map((entry): StarredQuestionItem | null => {
+        if (!entry || typeof entry !== "object") return null;
+        const obj = entry as Record<string, unknown>;
+        if ("question" in obj && obj.question && typeof obj.question === "object") {
+          const q = obj.question as Question;
+          const studySetObj = obj.study_set as
+            | { id?: string; title?: string }
+            | null
+            | undefined;
+          return {
+            question_id: (obj.question_id as string | undefined) ?? q.id,
+            study_set_id:
+              (obj.study_set_id as string | undefined) ??
+              studySetObj?.id ??
+              q.study_set_id,
+            created_at:
+              (obj.created_at as string | undefined) ??
+              (obj.starred_at as string | undefined) ??
+              q.created_at,
+            study_set_title:
+              (obj.study_set_title as string | undefined) ?? studySetObj?.title,
+            question: q,
+            progress:
+              (obj.progress as UserQuestionProgress | null | undefined) ?? null,
+          };
+        }
+        if ("question_id" in obj) {
+          return obj as unknown as StarredQuestionItem;
+        }
+        return null;
+      })
+      .filter((item): item is StarredQuestionItem => item !== null);
+
+    all.push(...mapped);
+    const total = res.meta?.total;
+    if (
+      rawList.length < pageSize ||
+      (typeof total === "number" && all.length >= total)
+    ) {
+      break;
+    }
+    page += 1;
+  }
+
+  return all.slice(0, maxItems);
 }
 
 export async function toggleStarQuestion(
@@ -339,11 +467,12 @@ export async function fetchMistakes(
   const qs = new URLSearchParams();
   if (params.studySetId) qs.set("studySetId", params.studySetId);
   if (params.chapter) qs.set("chapter", params.chapter);
-  if (params.minWrongCount) qs.set("minWrongCount", String(params.minWrongCount));
+  if (params.minWrongCount)
+    qs.set("minWrongCount", String(params.minWrongCount));
   qs.set("includeResolved", params.includeResolved ? "true" : "false");
   if (params.days) qs.set("days", String(params.days));
   qs.set("page", String(params.page ?? 1));
-  qs.set("pageSize", String(params.pageSize ?? 100));
+  qs.set("pageSize", String(Math.min(200, params.pageSize ?? 100)));
 
   const res = await requestJson<unknown>(`/api/mistakes?${qs.toString()}`);
   const rawList: unknown[] = Array.isArray(res.data)
@@ -356,11 +485,13 @@ export async function fetchMistakes(
     .map((entry): MistakeItem | null => {
       if (!entry || typeof entry !== "object") return null;
       const obj = entry as Record<string, unknown>;
-      // Shape from GET /api/mistakes: { progress, resolved, is_starred, last_wrong_answer, study_set, question }
       if ("progress" in obj && obj.progress && "question" in obj && obj.question) {
         const prog = obj.progress as UserQuestionProgress;
         const q = obj.question as Question;
-        const studySetObj = obj.study_set as { id?: string; title?: string } | null | undefined;
+        const studySetObj = obj.study_set as
+          | { id?: string; title?: string }
+          | null
+          | undefined;
         const lastWrong = obj.last_wrong_answer as
           | {
               selected_option_ids?: string[];
@@ -406,11 +537,12 @@ export async function resolveMistake(questionId: string): Promise<void> {
 }
 
 // ============================================================================
-// Study Sessions
+// Study Sessions & V2.0 Custom Subset Practice
 // ============================================================================
 
 export async function createStudySession(payload: {
-  study_set_id: string;
+  study_set_id: string | null;
+  source_study_set_ids?: string[];
   mode: StudyMode;
   config?: Record<string, unknown>;
   total_items?: number;
@@ -419,6 +551,7 @@ export async function createStudySession(payload: {
     method: "POST",
     body: JSON.stringify({
       study_set_id: payload.study_set_id,
+      source_study_set_ids: payload.source_study_set_ids,
       mode: payload.mode,
       config: payload.config ?? {},
       total_items: payload.total_items ?? 0,
@@ -480,23 +613,97 @@ export async function updateStudySession(
   return res.data;
 }
 
+export interface PracticePoolRequest {
+  sources: ExamSourceInput[];
+  mode: StudyMode;
+  count?: number | null;
+  selection_policy?: SelectionPolicy;
+  shuffle_questions?: boolean;
+  filters?: ExamFilterConfig;
+  create_session?: boolean;
+}
+
+export async function fetchPracticeQuestionPool(
+  payload: PracticePoolRequest,
+): Promise<PracticePoolResponse> {
+  const res = await requestJson<PracticePoolResponse>("/api/practice/questions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
 // ============================================================================
-// Examination Engine
+// Examination Engine (V1.0 + V2.0 Universal Custom Exams)
 // ============================================================================
 
+export interface ExamEligibleRequest {
+  folder_ids?: string[];
+  study_set_ids?: string[];
+  sources?: ExamSourceInput[];
+  include_subfolders?: boolean;
+  selection_policy?: SelectionPolicy;
+  filters?: ExamFilterConfig;
+}
+
+export async function fetchExamEligiblePool(
+  payload: ExamEligibleRequest,
+): Promise<ExamEligiblePool> {
+  const res = await requestJson<ExamEligiblePool>("/api/exams/eligible", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export interface ExamPreviewRequest {
+  sources: ExamSourceInput[];
+  requested_question_count: number;
+  allocation_strategy: AllocationStrategy;
+  selection_policy: SelectionPolicy;
+  full_coverage_mode?: boolean;
+  questions_per_exam?: number;
+  duration_limit_seconds?: number | null;
+  pass_threshold?: number;
+  filters?: ExamFilterConfig;
+}
+
+export async function previewExamConfig(
+  payload: ExamPreviewRequest,
+): Promise<ExamPreviewResult> {
+  const res = await requestJson<ExamPreviewResult>("/api/exams/preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
 export interface CreateExamPayload {
-  study_set_id: string;
+  // V1.0 backwards-compatible fields
+  study_set_id?: string | null;
   additional_study_set_ids?: string[];
+  // V2.0 universal multi-subject fields
+  sources?: ExamSourceInput[];
+  preset_id?: string | null;
   title?: string;
   question_count: number;
+  allocation_strategy?: AllocationStrategy;
+  selection_policy?: SelectionPolicy;
   duration_limit_seconds?: number | null;
   shuffle_questions?: boolean;
   shuffle_options?: boolean;
+  show_subject_names?: boolean;
+  show_chapter_names?: boolean;
+  allow_navigation?: boolean;
+  allow_mark_for_review?: boolean;
+  auto_submit_on_expire?: boolean;
+  show_review_after_submit?: boolean;
   pass_threshold?: number;
   chapters?: string[];
   tag_ids?: string[];
-  difficulties?: ("easy" | "medium" | "hard")[];
-  question_types?: ("single_choice" | "multiple_choice" | "true_false" | "short_answer")[];
+  difficulties?: DifficultyLevel[];
+  question_types?: ExamQuestionType[];
+  filters?: ExamFilterConfig;
   only_starred?: boolean;
   only_unmastered?: boolean;
   only_mistakes?: boolean;
@@ -505,18 +712,23 @@ export interface CreateExamPayload {
 
 export interface ExamAttemptPayload {
   attempt: ExamAttempt;
+  sources?: ExamAttemptSource[];
   questions: ExamSnapshotQuestion[];
   answers: ExamAttemptAnswer[];
+  subject_breakdown?: ExamSubjectBreakdown[];
+  chapter_breakdown?: ExamChapterBreakdown[];
+  tag_breakdown?: ExamTagBreakdown[];
+  coverage_cycle?: CoverageCycle | null;
   server_now?: string;
   remaining_seconds?: number | null;
 }
 
 export async function listExams(params: {
   studySetId?: string;
-  status?: "in_progress" | "submitted" | "expired";
+  status?: ExamStatus;
   page?: number;
   pageSize?: number;
-}): Promise<ExamAttempt[]> {
+} = {}): Promise<ExamAttempt[]> {
   const qs = new URLSearchParams();
   if (params.studySetId) qs.set("studySetId", params.studySetId);
   if (params.status) qs.set("status", params.status);
@@ -555,21 +767,43 @@ export interface ExamAnswerSaveItem {
   selected_option_ids: string[];
   typed_answer?: string | null;
   is_flagged: boolean;
+  client_seq?: number;
 }
 
+export interface SaveExamAnswersResult {
+  saved?: ExamAttemptAnswer[];
+  stale_ignored_ids?: string[];
+  answered_count?: number;
+  server_now?: string;
+  remaining_seconds?: number | null;
+}
+
+const EXAM_AUTOSAVE_CHUNK_SIZE = 150;
+
+/**
+ * Chunked (`<=150` items/request) exam answer autosave with monotonic `client_seq`.
+ * Prevents HTTP 400 data loss when resyncing >200 offline answers on 250–1,000Q exams (SH-010).
+ */
 export async function saveExamAnswers(
   attemptId: string,
   items: ExamAnswerSaveItem[],
-): Promise<void> {
-  if (items.length === 0) return;
-  const body = items.length === 1 ? items[0] : { answers: items };
-  await requestJson<unknown>(
-    `/api/exams/${encodeURIComponent(attemptId)}/answers`,
-    {
-      method: "PUT",
-      body: JSON.stringify(body),
-    },
-  );
+): Promise<SaveExamAnswersResult> {
+  if (items.length === 0) return {};
+
+  let lastResult: SaveExamAnswersResult = {};
+  for (let i = 0; i < items.length; i += EXAM_AUTOSAVE_CHUNK_SIZE) {
+    const chunk = items.slice(i, i + EXAM_AUTOSAVE_CHUNK_SIZE);
+    const body = chunk.length === 1 ? chunk[0] : { answers: chunk };
+    const res = await requestJson<SaveExamAnswersResult>(
+      `/api/exams/${encodeURIComponent(attemptId)}/answers`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    );
+    lastResult = res.data ?? {};
+  }
+  return lastResult;
 }
 
 export async function submitExamAttempt(
@@ -579,6 +813,211 @@ export async function submitExamAttempt(
     `/api/exams/${encodeURIComponent(attemptId)}/submit`,
     {
       method: "POST",
+    },
+  );
+  return res.data;
+}
+
+// ============================================================================
+// V2.0 Exam Presets (Private, Config-Only)
+// ============================================================================
+
+export interface CreateExamPresetPayload {
+  name: string;
+  description?: string | null;
+  is_favorite?: boolean;
+  sources: ExamSourceInput[];
+  requested_question_count: number | null;
+  allocation_strategy: AllocationStrategy;
+  selection_policy: SelectionPolicy;
+  full_coverage_mode?: boolean;
+  duration_limit_seconds?: number | null;
+  pass_threshold?: number;
+  shuffle_questions?: boolean;
+  shuffle_options?: boolean;
+  show_subject_names?: boolean;
+  show_chapter_names?: boolean;
+  allow_navigation?: boolean;
+  allow_mark_for_review?: boolean;
+  auto_submit_on_expire?: boolean;
+  show_review_after_submit?: boolean;
+  filters?: ExamFilterConfig;
+}
+
+export async function listExamPresets(params?: {
+  favoritesOnly?: boolean;
+  search?: string;
+}): Promise<ExamPreset[]> {
+  const qs = new URLSearchParams({ page: "1", pageSize: "50" });
+  if (params?.favoritesOnly) qs.set("favoritesOnly", "true");
+  if (params?.search?.trim()) qs.set("search", params.search.trim());
+  const res = await requestJson<ExamPreset[] | { presets: ExamPreset[] }>(
+    `/api/exam-presets?${qs.toString()}`,
+  );
+  if (Array.isArray(res.data)) return res.data;
+  if (res.data && "presets" in res.data) return res.data.presets;
+  return [];
+}
+
+export async function fetchExamPreset(id: string): Promise<ExamPreset> {
+  const res = await requestJson<ExamPreset>(
+    `/api/exam-presets/${encodeURIComponent(id)}`,
+  );
+  return res.data;
+}
+
+export async function createExamPreset(
+  payload: CreateExamPresetPayload,
+): Promise<ExamPreset> {
+  const res = await requestJson<ExamPreset>("/api/exam-presets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function updateExamPreset(
+  id: string,
+  payload: Partial<CreateExamPresetPayload>,
+): Promise<ExamPreset> {
+  const res = await requestJson<ExamPreset>(
+    `/api/exam-presets/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  return res.data;
+}
+
+export async function deleteExamPreset(id: string): Promise<void> {
+  await requestJson<unknown>(`/api/exam-presets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function duplicateExamPreset(
+  id: string,
+  name?: string,
+): Promise<ExamPreset> {
+  const res = await requestJson<ExamPreset>(
+    `/api/exam-presets/${encodeURIComponent(id)}/duplicate`,
+    {
+      method: "POST",
+      body: JSON.stringify(name ? { name } : {}),
+    },
+  );
+  return res.data;
+}
+
+// ============================================================================
+// V2.0 Full Coverage Cycles
+// ============================================================================
+
+export interface CreateCoverageCyclePayload {
+  title: string;
+  sources: ExamSourceInput[];
+  filters?: ExamFilterConfig;
+  allocation_strategy: AllocationStrategy;
+  questions_per_exam: number;
+  duration_limit_seconds?: number | null;
+  pass_threshold?: number;
+  shuffle_options?: boolean;
+  show_subject_names?: boolean;
+  show_chapter_names?: boolean;
+  allow_navigation?: boolean;
+  allow_mark_for_review?: boolean;
+  auto_submit_on_expire?: boolean;
+  show_review_after_submit?: boolean;
+  preset_id?: string | null;
+  start_first_exam?: boolean;
+}
+
+export async function listCoverageCycles(
+  status?: "active" | "completed" | "archived",
+): Promise<CoverageCycle[]> {
+  const qs = new URLSearchParams();
+  if (status) qs.set("status", status);
+  const query = qs.toString();
+  const res = await requestJson<CoverageCycle[] | { cycles: CoverageCycle[] }>(
+    `/api/coverage-cycles${query ? `?${query}` : ""}`,
+  );
+  if (Array.isArray(res.data)) return res.data;
+  if (res.data && "cycles" in res.data) return res.data.cycles;
+  return [];
+}
+
+export async function createCoverageCycleApi(
+  payload: CreateCoverageCyclePayload,
+): Promise<{
+  cycle: CoverageCycle;
+  first_exam?: ExamAttemptPayload | null;
+}> {
+  const res = await requestJson<
+    | { cycle: CoverageCycle; first_exam?: ExamAttemptPayload | null }
+    | CoverageCycle
+  >("/api/coverage-cycles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (res.data && "cycle" in res.data) {
+    return res.data;
+  }
+  return { cycle: res.data as CoverageCycle, first_exam: null };
+}
+
+export async function fetchCoverageCycle(id: string): Promise<CoverageCycle> {
+  const res = await requestJson<CoverageCycle>(
+    `/api/coverage-cycles/${encodeURIComponent(id)}`,
+  );
+  return res.data;
+}
+
+export async function deleteCoverageCycle(id: string): Promise<void> {
+  await requestJson<unknown>(`/api/coverage-cycles/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function issueCoverageNextExam(
+  cycleId: string,
+): Promise<ExamAttemptPayload> {
+  const res = await requestJson<ExamAttemptPayload>(
+    `/api/coverage-cycles/${encodeURIComponent(cycleId)}/next-exam`,
+    { method: "POST" },
+  );
+  return res.data;
+}
+
+export async function discardCoverageActiveExam(
+  cycleId: string,
+): Promise<CoverageCycle> {
+  const res = await requestJson<
+    | {
+        discarded?: boolean;
+        discarded_attempt_id?: string | null;
+        released_questions?: number;
+        cycle: CoverageCycle;
+      }
+    | CoverageCycle
+  >(`/api/coverage-cycles/${encodeURIComponent(cycleId)}/discard-active`, {
+    method: "POST",
+  });
+  if (res.data && "cycle" in res.data && res.data.cycle) {
+    return res.data.cycle;
+  }
+  return res.data as CoverageCycle;
+}
+
+export async function restartCoverageCycleApi(
+  cycleId: string,
+  options?: { refresh_pool?: boolean; force_discard_active?: boolean },
+): Promise<CoverageCycle> {
+  const res = await requestJson<CoverageCycle>(
+    `/api/coverage-cycles/${encodeURIComponent(cycleId)}/restart`,
+    {
+      method: "POST",
+      body: JSON.stringify(options ?? {}),
     },
   );
   return res.data;

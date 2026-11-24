@@ -1,17 +1,24 @@
 import type {
+  AllocationStrategy,
   AnswerMatchMode,
+  CoverageAttemptStatus,
+  CoverageCycleStatus,
+  CoverageQuestionState,
   DifficultyLevel,
   ExamAcceptedAnswerSnapshot,
   ExamConfig,
   ExamQuestionType,
   ExamSnapshotOption,
+  ExamSourceType,
   ExamStatus,
+  ExamTagSnapshot,
   FriendshipStatus,
   ImportJobStatus,
   Locale,
   MasteryLevel,
   MemberRole,
   QuestionType,
+  SelectionPolicy,
   SelfRating,
   SessionStatus,
   SharePermission,
@@ -23,7 +30,7 @@ import type {
 import type { ImportFormat } from "./import";
 
 /**
- * Typed Supabase PostgreSQL schema matching all 20 canonical tables in `docs/DATABASE.md`.
+ * Typed Supabase PostgreSQL schema matching all 26 canonical tables in migrations `0001`–`0005`.
  * Compatible with `@supabase/supabase-js` v2 generic client typing.
  */
 
@@ -181,6 +188,7 @@ export interface Database {
           default_exam_duration_minutes: number;
           default_pass_threshold: number;
           is_archived: boolean;
+          is_favorite: boolean;
           last_studied_at: string | null;
           created_at: string;
           updated_at: string;
@@ -199,6 +207,7 @@ export interface Database {
           default_exam_duration_minutes?: number;
           default_pass_threshold?: number;
           is_archived?: boolean;
+          is_favorite?: boolean;
           last_studied_at?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -215,6 +224,7 @@ export interface Database {
           default_exam_duration_minutes?: number;
           default_pass_threshold?: number;
           is_archived?: boolean;
+          is_favorite?: boolean;
           last_studied_at?: string | null;
           updated_at?: string;
         };
@@ -241,6 +251,7 @@ export interface Database {
           study_set_id: string;
           user_id: string;
           role: MemberRole;
+          allow_clone: boolean;
           invited_by: string | null;
           created_at: string;
         };
@@ -249,11 +260,13 @@ export interface Database {
           study_set_id: string;
           user_id: string;
           role?: MemberRole;
+          allow_clone?: boolean;
           invited_by?: string | null;
           created_at?: string;
         };
         Update: {
           role?: MemberRole;
+          allow_clone?: boolean;
         };
         Relationships: [
           {
@@ -655,7 +668,8 @@ export interface Database {
         Row: {
           id: string;
           user_id: string;
-          study_set_id: string;
+          study_set_id: string | null;
+          source_study_set_ids: string[];
           mode: StudyMode;
           status: SessionStatus;
           config: Json;
@@ -670,7 +684,8 @@ export interface Database {
         Insert: {
           id?: string;
           user_id: string;
-          study_set_id: string;
+          study_set_id?: string | null;
+          source_study_set_ids?: string[];
           mode: StudyMode;
           status?: SessionStatus;
           config?: Json;
@@ -773,6 +788,362 @@ export interface Database {
           },
         ];
       };
+      exam_presets: {
+        Row: {
+          id: string;
+          user_id: string;
+          name: string;
+          description: string | null;
+          is_favorite: boolean;
+          requested_question_count: number | null;
+          allocation_strategy: AllocationStrategy;
+          selection_policy: SelectionPolicy;
+          full_coverage_mode: boolean;
+          duration_limit_seconds: number | null;
+          pass_threshold: number;
+          shuffle_questions: boolean;
+          shuffle_options: boolean;
+          show_subject_names: boolean;
+          show_chapter_names: boolean;
+          allow_navigation: boolean;
+          allow_mark_for_review: boolean;
+          auto_submit_on_expire: boolean;
+          show_review_after_submit: boolean;
+          filters: Json;
+          use_count: number;
+          last_used_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          name: string;
+          description?: string | null;
+          is_favorite?: boolean;
+          requested_question_count?: number | null;
+          allocation_strategy?: AllocationStrategy;
+          selection_policy?: SelectionPolicy;
+          full_coverage_mode?: boolean;
+          duration_limit_seconds?: number | null;
+          pass_threshold?: number;
+          shuffle_questions?: boolean;
+          shuffle_options?: boolean;
+          show_subject_names?: boolean;
+          show_chapter_names?: boolean;
+          allow_navigation?: boolean;
+          allow_mark_for_review?: boolean;
+          auto_submit_on_expire?: boolean;
+          show_review_after_submit?: boolean;
+          filters?: Json;
+          use_count?: number;
+          last_used_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          name?: string;
+          description?: string | null;
+          is_favorite?: boolean;
+          requested_question_count?: number | null;
+          allocation_strategy?: AllocationStrategy;
+          selection_policy?: SelectionPolicy;
+          full_coverage_mode?: boolean;
+          duration_limit_seconds?: number | null;
+          pass_threshold?: number;
+          shuffle_questions?: boolean;
+          shuffle_options?: boolean;
+          show_subject_names?: boolean;
+          show_chapter_names?: boolean;
+          allow_navigation?: boolean;
+          allow_mark_for_review?: boolean;
+          auto_submit_on_expire?: boolean;
+          show_review_after_submit?: boolean;
+          filters?: Json;
+          use_count?: number;
+          last_used_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "exam_presets_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      exam_preset_sources: {
+        Row: {
+          id: string;
+          preset_id: string;
+          source_type: ExamSourceType;
+          study_set_id: string | null;
+          folder_id: string | null;
+          include_subfolders: boolean;
+          custom_count: number | null;
+          custom_percentage: number | null;
+          sort_order: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          preset_id: string;
+          source_type: ExamSourceType;
+          study_set_id?: string | null;
+          folder_id?: string | null;
+          include_subfolders?: boolean;
+          custom_count?: number | null;
+          custom_percentage?: number | null;
+          sort_order?: number;
+          created_at?: string;
+        };
+        Update: {
+          source_type?: ExamSourceType;
+          study_set_id?: string | null;
+          folder_id?: string | null;
+          include_subfolders?: boolean;
+          custom_count?: number | null;
+          custom_percentage?: number | null;
+          sort_order?: number;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "exam_preset_sources_preset_id_fkey";
+            columns: ["preset_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_presets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "exam_preset_sources_study_set_id_fkey";
+            columns: ["study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "exam_preset_sources_folder_id_fkey";
+            columns: ["folder_id"];
+            isOneToOne: false;
+            referencedRelation: "folders";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      coverage_cycles: {
+        Row: {
+          id: string;
+          user_id: string;
+          preset_id: string | null;
+          title: string;
+          status: CoverageCycleStatus;
+          source_snapshot: Json;
+          filter_snapshot: Json;
+          allocation_strategy: AllocationStrategy;
+          questions_per_exam: number;
+          total_questions: number;
+          assigned_count: number;
+          answered_count: number;
+          completed_count: number;
+          active_attempt_id: string | null;
+          cycle_number: number;
+          started_at: string;
+          completed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          preset_id?: string | null;
+          title: string;
+          status?: CoverageCycleStatus;
+          source_snapshot?: Json;
+          filter_snapshot?: Json;
+          allocation_strategy?: AllocationStrategy;
+          questions_per_exam: number;
+          total_questions: number;
+          assigned_count?: number;
+          answered_count?: number;
+          completed_count?: number;
+          active_attempt_id?: string | null;
+          cycle_number?: number;
+          started_at?: string;
+          completed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          title?: string;
+          status?: CoverageCycleStatus;
+          source_snapshot?: Json;
+          filter_snapshot?: Json;
+          allocation_strategy?: AllocationStrategy;
+          questions_per_exam?: number;
+          total_questions?: number;
+          assigned_count?: number;
+          answered_count?: number;
+          completed_count?: number;
+          active_attempt_id?: string | null;
+          cycle_number?: number;
+          completed_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "coverage_cycles_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycles_preset_id_fkey";
+            columns: ["preset_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_presets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycles_active_attempt_id_fkey";
+            columns: ["active_attempt_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_attempts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      coverage_cycle_questions: {
+        Row: {
+          id: string;
+          cycle_id: string;
+          user_id: string;
+          question_id: string | null;
+          source_study_set_id: string | null;
+          source_subject_title: string;
+          pool_order: number;
+          state: CoverageQuestionState;
+          assigned_attempt_id: string | null;
+          completed_attempt_id: string | null;
+          was_answered: boolean;
+          last_is_correct: boolean | null;
+          times_assigned: number;
+          assigned_at: string | null;
+          completed_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          cycle_id: string;
+          user_id: string;
+          question_id?: string | null;
+          source_study_set_id?: string | null;
+          source_subject_title: string;
+          pool_order: number;
+          state?: CoverageQuestionState;
+          assigned_attempt_id?: string | null;
+          completed_attempt_id?: string | null;
+          was_answered?: boolean;
+          last_is_correct?: boolean | null;
+          times_assigned?: number;
+          assigned_at?: string | null;
+          completed_at?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          pool_order?: number;
+          state?: CoverageQuestionState;
+          assigned_attempt_id?: string | null;
+          completed_attempt_id?: string | null;
+          was_answered?: boolean;
+          last_is_correct?: boolean | null;
+          times_assigned?: number;
+          assigned_at?: string | null;
+          completed_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "coverage_cycle_questions_cycle_id_fkey";
+            columns: ["cycle_id"];
+            isOneToOne: false;
+            referencedRelation: "coverage_cycles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycle_questions_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycle_questions_question_id_fkey";
+            columns: ["question_id"];
+            isOneToOne: false;
+            referencedRelation: "questions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      coverage_cycle_attempts: {
+        Row: {
+          id: string;
+          cycle_id: string;
+          attempt_id: string;
+          user_id: string;
+          sequence_number: number;
+          status: CoverageAttemptStatus;
+          assigned_question_count: number;
+          answered_question_count: number;
+          completed_question_count: number;
+          discarded_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          cycle_id: string;
+          attempt_id: string;
+          user_id: string;
+          sequence_number: number;
+          status?: CoverageAttemptStatus;
+          assigned_question_count: number;
+          answered_question_count?: number;
+          completed_question_count?: number;
+          discarded_at?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          status?: CoverageAttemptStatus;
+          answered_question_count?: number;
+          completed_question_count?: number;
+          discarded_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "coverage_cycle_attempts_cycle_id_fkey";
+            columns: ["cycle_id"];
+            isOneToOne: false;
+            referencedRelation: "coverage_cycles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycle_attempts_attempt_id_fkey";
+            columns: ["attempt_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_attempts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "coverage_cycle_attempts_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       exam_attempts: {
         Row: {
           id: string;
@@ -795,6 +1166,18 @@ export interface Database {
           expires_at: string | null;
           submitted_at: string | null;
           created_at: string;
+          allocation_strategy: AllocationStrategy;
+          selection_policy: SelectionPolicy;
+          requested_question_count: number | null;
+          show_subject_names: boolean;
+          show_chapter_names: boolean;
+          allow_navigation: boolean;
+          allow_mark_for_review: boolean;
+          auto_submit_on_expire: boolean;
+          show_review_after_submit: boolean;
+          coverage_cycle_id: string | null;
+          preset_id: string | null;
+          is_multi_subject: boolean;
         };
         Insert: {
           id?: string;
@@ -817,6 +1200,18 @@ export interface Database {
           expires_at?: string | null;
           submitted_at?: string | null;
           created_at?: string;
+          allocation_strategy?: AllocationStrategy;
+          selection_policy?: SelectionPolicy;
+          requested_question_count?: number | null;
+          show_subject_names?: boolean;
+          show_chapter_names?: boolean;
+          allow_navigation?: boolean;
+          allow_mark_for_review?: boolean;
+          auto_submit_on_expire?: boolean;
+          show_review_after_submit?: boolean;
+          coverage_cycle_id?: string | null;
+          preset_id?: string | null;
+          is_multi_subject?: boolean;
         };
         Update: {
           status?: ExamStatus;
@@ -844,6 +1239,69 @@ export interface Database {
             referencedRelation: "study_sets";
             referencedColumns: ["id"];
           },
+          {
+            foreignKeyName: "exam_attempts_coverage_cycle_id_fkey";
+            columns: ["coverage_cycle_id"];
+            isOneToOne: false;
+            referencedRelation: "coverage_cycles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "exam_attempts_preset_id_fkey";
+            columns: ["preset_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_presets";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      exam_attempt_sources: {
+        Row: {
+          id: string;
+          attempt_id: string;
+          user_id: string;
+          source_type: ExamSourceType;
+          study_set_id: string | null;
+          folder_id: string | null;
+          subject_title_snapshot: string;
+          eligible_count: number;
+          requested_count: number | null;
+          requested_percentage: number | null;
+          allocated_count: number;
+          sort_order: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          attempt_id: string;
+          user_id: string;
+          source_type?: ExamSourceType;
+          study_set_id?: string | null;
+          folder_id?: string | null;
+          subject_title_snapshot: string;
+          eligible_count?: number;
+          requested_count?: number | null;
+          requested_percentage?: number | null;
+          allocated_count?: number;
+          sort_order?: number;
+          created_at?: string;
+        };
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "exam_attempt_sources_attempt_id_fkey";
+            columns: ["attempt_id"];
+            isOneToOne: false;
+            referencedRelation: "exam_attempts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "exam_attempt_sources_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
         ];
       };
       exam_attempt_questions: {
@@ -853,7 +1311,10 @@ export interface Database {
           question_id: string | null;
           position: number;
           question_type: ExamQuestionType;
+          source_study_set_id: string | null;
+          source_subject_title: string | null;
           chapter_snapshot: string | null;
+          tags_snapshot: ExamTagSnapshot[];
           prompt_snapshot: string;
           prompt_image_url_snapshot: string | null;
           explanation_snapshot: string | null;
@@ -868,7 +1329,10 @@ export interface Database {
           question_id?: string | null;
           position: number;
           question_type: ExamQuestionType;
+          source_study_set_id?: string | null;
+          source_subject_title?: string | null;
           chapter_snapshot?: string | null;
+          tags_snapshot?: ExamTagSnapshot[];
           prompt_snapshot: string;
           prompt_image_url_snapshot?: string | null;
           explanation_snapshot?: string | null;
@@ -893,6 +1357,13 @@ export interface Database {
             referencedRelation: "questions";
             referencedColumns: ["id"];
           },
+          {
+            foreignKeyName: "exam_attempt_questions_source_study_set_id_fkey";
+            columns: ["source_study_set_id"];
+            isOneToOne: false;
+            referencedRelation: "study_sets";
+            referencedColumns: ["id"];
+          },
         ];
       };
       exam_attempt_answers: {
@@ -905,6 +1376,7 @@ export interface Database {
           typed_answer: string | null;
           is_flagged: boolean;
           is_correct: boolean | null;
+          client_seq: number;
           updated_at: string;
         };
         Insert: {
@@ -916,6 +1388,7 @@ export interface Database {
           typed_answer?: string | null;
           is_flagged?: boolean;
           is_correct?: boolean | null;
+          client_seq?: number;
           updated_at?: string;
         };
         Update: {
@@ -923,6 +1396,7 @@ export interface Database {
           typed_answer?: string | null;
           is_flagged?: boolean;
           is_correct?: boolean | null;
+          client_seq?: number;
           updated_at?: string;
         };
         Relationships: [
@@ -955,6 +1429,7 @@ export interface Database {
           requester_id: string;
           addressee_id: string;
           status: FriendshipStatus;
+          blocked_by: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -963,11 +1438,13 @@ export interface Database {
           requester_id: string;
           addressee_id: string;
           status?: FriendshipStatus;
+          blocked_by?: string | null;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
           status?: FriendshipStatus;
+          blocked_by?: string | null;
           updated_at?: string;
         };
         Relationships: [
@@ -981,6 +1458,13 @@ export interface Database {
           {
             foreignKeyName: "friendships_addressee_id_fkey";
             columns: ["addressee_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "friendships_blocked_by_fkey";
+            columns: ["blocked_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
             referencedColumns: ["id"];
@@ -1068,8 +1552,153 @@ export interface Database {
         Args: { p_set_id: string; p_user_id: string };
         Returns: boolean;
       };
+      get_my_profile: {
+        Args: Record<string, never>;
+        Returns: Json;
+      };
+      resolve_deduped_study_sets: {
+        Args: {
+          p_folder_ids: string[];
+          p_study_set_ids: string[];
+          p_include_subfolders?: boolean;
+        };
+        Returns: Array<{
+          study_set_id: string;
+          title: string;
+          subject: string | null;
+          question_count: number;
+        }>;
+      };
+      get_exam_eligible_pool: {
+        Args: {
+          p_folder_ids: string[];
+          p_study_set_ids: string[];
+          p_include_subfolders?: boolean;
+          p_filters?: Json;
+          p_selection_policy?: string;
+        };
+        Returns: Json;
+      };
+      create_exam_attempt_v2: {
+        Args: {
+          p_title_snapshot: string;
+          p_primary_study_set_id: string | null;
+          p_sources: Json;
+          p_selected_items: Json;
+          p_config: Json;
+          p_duration_limit_seconds: number | null;
+          p_pass_threshold: number;
+          p_allocation_strategy?: string;
+          p_selection_policy?: string;
+          p_requested_question_count?: number | null;
+          p_show_subject_names?: boolean;
+          p_show_chapter_names?: boolean;
+          p_allow_navigation?: boolean;
+          p_allow_mark_for_review?: boolean;
+          p_auto_submit_on_expire?: boolean;
+          p_show_review_after_submit?: boolean;
+          p_preset_id?: string | null;
+          p_coverage_cycle_id?: string | null;
+        };
+        Returns: Json;
+      };
+      save_exam_attempt_answers: {
+        Args: {
+          p_attempt_id: string;
+          p_answers: Json;
+        };
+        Returns: Json;
+      };
       submit_exam_attempt: {
         Args: { p_attempt_id: string };
+        Returns: Json;
+      };
+      get_exam_attempt_detail: {
+        Args: { p_attempt_id: string };
+        Returns: Json;
+      };
+      create_coverage_cycle: {
+        Args: {
+          p_title: string;
+          p_source_snapshot: Json;
+          p_filter_snapshot: Json;
+          p_allocation_strategy: string;
+          p_questions_per_exam: number;
+          p_pool_items: Json;
+          p_preset_id?: string | null;
+        };
+        Returns: Json;
+      };
+      issue_coverage_cycle_next_exam: {
+        Args: {
+          p_cycle_id: string;
+          p_selected_items: Json;
+          p_sources: Json;
+          p_title_snapshot: string;
+          p_config: Json;
+          p_duration_limit_seconds: number | null;
+          p_pass_threshold: number;
+          p_show_subject_names?: boolean;
+          p_show_chapter_names?: boolean;
+          p_allow_navigation?: boolean;
+          p_allow_mark_for_review?: boolean;
+          p_auto_submit_on_expire?: boolean;
+          p_show_review_after_submit?: boolean;
+        };
+        Returns: Json;
+      };
+      discard_coverage_cycle_active_exam: {
+        Args: { p_cycle_id: string };
+        Returns: Json;
+      };
+      restart_coverage_cycle: {
+        Args: {
+          p_cycle_id: string;
+          p_new_pool_items?: Json | null;
+          p_force_discard_active?: boolean;
+        };
+        Returns: Json;
+      };
+      get_coverage_cycle_subject_progress: {
+        Args: {
+          p_cycle_ids: string[];
+        };
+        Returns: Array<{
+          cycle_id: string;
+          study_set_id: string | null;
+          subject_title: string;
+          total: number;
+          completed: number;
+          assigned: number;
+          remaining: number;
+        }>;
+      };
+      clone_study_set: {
+        Args: {
+          p_source_set_id: string;
+          p_title?: string | null;
+          p_folder_id?: string | null;
+        };
+        Returns: Json;
+      };
+      get_practice_question_pool: {
+        Args: {
+          p_folder_ids: string[];
+          p_study_set_ids: string[];
+          p_include_subfolders?: boolean;
+          p_filters?: Json;
+          p_selection_policy?: string;
+          p_count?: number | null;
+          p_shuffle?: boolean;
+        };
+        Returns: Json;
+      };
+      preview_share_link: {
+        Args: { p_token: string };
+        Returns: Json;
+      };
+      redeem_share_link: {
+        Args: { p_token: string };
         Returns: Json;
       };
       find_profile_by_username_or_email: {

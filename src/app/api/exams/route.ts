@@ -1,4 +1,3 @@
-import { randomInt } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
@@ -8,59 +7,22 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/security/rate-limit";
-import { rpcCreateExamAttempt } from "@/lib/supabase/rpc";
+import {
+  computeSubjectAllocations,
+  cryptoShuffle,
+  extractSourceIds,
+  fetchEligibleCandidates,
+  selectQuestionsByPolicy,
+  stripPreSubmitQuestions,
+} from "@/lib/supabase/exam-engine";
+import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
+import { rpcCreateExamAttemptV2 } from "@/lib/supabase/rpc";
 import { createExamSchema, listExamsQuerySchema } from "@/lib/validation/exams";
 import type {
-  ExamAcceptedAnswerSnapshot,
-  ExamQuestionType,
-  ExamSnapshotOption,
-  ExamSnapshotQuestion,
+  ExamFilterConfig,
+  ExamSourceInput,
+  SelectionPolicy,
 } from "@/types/domain";
-
-const EXAM_ELIGIBLE_TYPES: ExamQuestionType[] = [
-  "single_choice",
-  "multiple_choice",
-  "true_false",
-  "short_answer",
-];
-
-function cryptoShuffle<T>(items: T[]): T[] {
-  const arr = [...items];
-  for (let i = arr.length - 1; i > 0; i -= 1) {
-    const j = randomInt(0, i + 1);
-    const tmp = arr[i];
-    arr[i] = arr[j];
-    arr[j] = tmp;
-  }
-  return arr;
-}
-
-/**
- * Defense-in-depth sanitizer: strips all answer keys and explanations before
- * returning an in-progress exam payload to the client.
- */
-function sanitizeInProgressQuestions(
-  questions: ExamSnapshotQuestion[],
-): ExamSnapshotQuestion[] {
-  return questions.map((q) => ({
-    id: q.id,
-    attempt_id: q.attempt_id,
-    question_id: q.question_id,
-    position: q.position,
-    question_type: q.question_type,
-    chapter_snapshot: q.chapter_snapshot,
-    prompt_snapshot: q.prompt_snapshot,
-    prompt_image_url_snapshot: q.prompt_image_url_snapshot,
-    options_snapshot: (q.options_snapshot ?? []).map((opt) => ({
-      id: opt.id,
-      label: opt.label,
-      content: opt.content,
-      image_url: opt.image_url ?? null,
-      position: opt.position,
-    })),
-    created_at: q.created_at,
-  }));
-}
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
@@ -112,210 +74,324 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const body = await parseJsonBody(request);
     const input = createExamSchema.parse(body);
 
-    const primaryAccess = await requireStudySetAccess(
-      supabase,
-      input.study_set_id,
-      user.id,
-      "read",
-    );
-
-    const setIds = Array.from(
-      new Set([input.study_set_id, ...(input.additional_study_set_ids ?? [])]),
-    );
-
-    for (const extraId of setIds) {
-      if (extraId !== input.study_set_id) {
-        await requireStudySetAccess(supabase, extraId, user.id, "read");
+    // Resolve sources (supports V1 study_set_id + additional_study_set_ids OR V2 sources[])
+    const normalizedSources: ExamSourceInput[] = [];
+    if (input.sources && input.sources.length > 0) {
+      normalizedSources.push(...input.sources);
+    } else {
+      if (input.study_set_id) {
+        normalizedSources.push({
+          source_type: "study_set",
+          id: input.study_set_id,
+          include_subfolders: true,
+        });
       }
-    }
-
-    const allowedTypes: ExamQuestionType[] =
-      input.question_types && input.question_types.length > 0
-        ? input.question_types
-        : EXAM_ELIGIBLE_TYPES;
-
-    let qQuery = supabase
-      .from("questions")
-      .select("*")
-      .in("study_set_id", setIds)
-      .in("question_type", allowedTypes);
-
-    if (input.chapters && input.chapters.length > 0) {
-      qQuery = qQuery.in("chapter", input.chapters);
-    }
-    if (input.difficulties && input.difficulties.length > 0) {
-      qQuery = qQuery.in("difficulty", input.difficulties);
-    }
-    if (input.question_ids && input.question_ids.length > 0) {
-      qQuery = qQuery.in("id", input.question_ids);
-    }
-
-    const { data: candidates, error: qErr } = await qQuery.order("position", {
-      ascending: true,
-    });
-    if (qErr) throw qErr;
-
-    let pool = candidates ?? [];
-
-    if (pool.length > 0 && input.tag_ids && input.tag_ids.length > 0) {
-      const { data: tagRows, error: tagErr } = await supabase
-        .from("question_tags")
-        .select("question_id")
-        .in("study_set_id", setIds)
-        .in("tag_id", input.tag_ids);
-      if (tagErr) throw tagErr;
-      const taggedSet = new Set((tagRows ?? []).map((r) => r.question_id));
-      pool = pool.filter((q) => taggedSet.has(q.id));
-    }
-
-    if (pool.length > 0 && input.only_starred) {
-      const { data: starRows, error: starErr } = await supabase
-        .from("starred_questions")
-        .select("question_id")
-        .eq("user_id", user.id)
-        .in("study_set_id", setIds);
-      if (starErr) throw starErr;
-      const starSet = new Set((starRows ?? []).map((r) => r.question_id));
-      pool = pool.filter((q) => starSet.has(q.id));
-    }
-
-    if (pool.length > 0 && (input.only_unmastered || input.only_mistakes)) {
-      const { data: progRows, error: progErr } = await supabase
-        .from("user_question_progress")
-        .select("question_id, mastery_level, wrong_count")
-        .eq("user_id", user.id)
-        .in("study_set_id", setIds);
-      if (progErr) throw progErr;
-
-      const progMap = new Map((progRows ?? []).map((p) => [p.question_id, p]));
-      if (input.only_unmastered) {
-        pool = pool.filter((q) => progMap.get(q.id)?.mastery_level !== "mastered");
-      }
-      if (input.only_mistakes) {
-        pool = pool.filter((q) => {
-          const p = progMap.get(q.id);
-          return p !== undefined && p.wrong_count > 0 && p.mastery_level !== "mastered";
+      for (const extraId of input.additional_study_set_ids ?? []) {
+        normalizedSources.push({
+          source_type: "study_set",
+          id: extraId,
+          include_subfolders: true,
         });
       }
     }
 
-    if (pool.length === 0) {
+    // If V1 primary study_set_id was provided, read its defaults for fallback title/duration/passThreshold
+    let primaryStudySet: Awaited<ReturnType<typeof requireStudySetAccess>>["studySet"] | null =
+      null;
+    if (input.study_set_id) {
+      const access = await requireStudySetAccess(
+        supabase,
+        input.study_set_id,
+        user.id,
+        "read",
+      );
+      primaryStudySet = access.studySet;
+    }
+
+    // Merge V1 top-level filters & V2 nested `filters`
+    const filters: ExamFilterConfig = {
+      chapters: input.filters?.chapters ?? input.chapters,
+      tag_ids: input.filters?.tag_ids ?? input.tag_ids,
+      difficulties: input.filters?.difficulties ?? input.difficulties,
+      question_types: input.filters?.question_types ?? input.question_types,
+    };
+
+    // Map V1 boolean toggles onto canonical V2 SelectionPolicy if selection_policy wasn't set
+    const selectionPolicy: SelectionPolicy =
+      input.selection_policy ??
+      (input.only_starred
+        ? "starred_only"
+        : input.only_mistakes
+          ? "incorrect_only"
+          : "random");
+
+    const {
+      folderIds,
+      studySetIds,
+      includeSubfolders,
+      customCountsBySet,
+      customPercentagesBySet,
+    } = extractSourceIds(normalizedSources);
+
+    const { dedupedSets, candidates: initialCandidates, recentQuestionIds } =
+      await fetchEligibleCandidates({
+        supabase,
+        userId: user.id,
+        folderIds,
+        studySetIds,
+        includeSubfolders,
+        filters,
+        selectionPolicy,
+        explicitQuestionIds: input.question_ids,
+      });
+
+    let candidates = initialCandidates;
+    if (input.only_unmastered) {
+      candidates = candidates.filter((c) => c.mastery_level !== "mastered");
+    }
+
+    if (candidates.length === 0) {
       throw new AppError(
         "BAD_REQUEST",
-        "No exam-eligible questions matched the selected filters.",
+        "No exam-eligible questions matched the selected sources and filters.",
         400,
       );
     }
 
-    const ordered = input.shuffle_questions ? cryptoShuffle(pool) : pool;
-    const selected = ordered.slice(0, Math.min(input.question_count, ordered.length));
-    const selectedIds = selected.map((q) => q.id);
-
-    const [
-      { data: options, error: optErr },
-      { data: accepted, error: accErr },
-    ] = await Promise.all([
-      supabase
-        .from("question_options")
-        .select("*")
-        .in("question_id", selectedIds)
-        .order("position", { ascending: true }),
-      supabase
-        .from("question_accepted_answers")
-        .select("*")
-        .in("question_id", selectedIds),
-    ]);
-
-    if (optErr) throw optErr;
-    if (accErr) throw accErr;
-
-    const optionsMap = new Map<string, typeof options>();
-    for (const o of options ?? []) {
-      const list = optionsMap.get(o.question_id) ?? [];
-      list.push(o);
-      optionsMap.set(o.question_id, list);
+    // Group candidates by subject (`study_set_id`)
+    const bySubject = new Map<string, typeof candidates>();
+    for (const c of candidates) {
+      const arr = bySubject.get(c.study_set_id) ?? [];
+      arr.push(c);
+      bySubject.set(c.study_set_id, arr);
     }
 
-    const acceptedMap = new Map<string, typeof accepted>();
-    for (const a of accepted ?? []) {
-      const list = acceptedMap.get(a.question_id) ?? [];
-      list.push(a);
-      acceptedMap.set(a.question_id, list);
+    // Build subject metadata list (includes sets discovered from explicit question_ids)
+    const setMetaMap = new Map(dedupedSets.map((s) => [s.study_set_id, s]));
+    const missingSetIds = Array.from(bySubject.keys()).filter(
+      (id) => !setMetaMap.has(id),
+    );
+    if (missingSetIds.length > 0) {
+      const extraSets = await fetchInChunks(
+        missingSetIds,
+        async (chunk) =>
+          supabase.from("study_sets").select("id, title, subject").in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      );
+      for (const s of extraSets) {
+        setMetaMap.set(s.id, {
+          study_set_id: s.id,
+          title: s.title,
+          subject: s.subject,
+        });
+      }
     }
 
-    const displayLabels = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    const orderedSubjects = Array.from(bySubject.keys())
+      .map((id) => {
+        const meta = setMetaMap.get(id);
+        return {
+          study_set_id: id,
+          title: meta?.title ?? "Study Set",
+          eligible_count: bySubject.get(id)?.length ?? 0,
+          custom_count: customCountsBySet.get(id) ?? null,
+          custom_percentage: customPercentagesBySet.get(id) ?? null,
+        };
+      })
+      .sort((a, b) => a.title.localeCompare(b.title));
 
-    const snapshotQuestions = selected.map((q) => {
-      const rawOpts = optionsMap.get(q.id) ?? [];
-      const arrangedOpts = input.shuffle_options
-        ? cryptoShuffle(rawOpts)
-        : rawOpts;
+    const isV2Request = Boolean(input.sources && input.sources.length > 0);
+    const requestedCount =
+      input.requested_question_count ??
+      input.question_count ??
+      (isV2Request ? candidates.length : Math.min(30, candidates.length));
 
-      const optionsSnapshot: ExamSnapshotOption[] = arrangedOpts.map((opt, idx) => ({
-        id: opt.id,
-        label: displayLabels[idx] ?? opt.label,
-        content: opt.content,
-        image_url: opt.image_url ?? null,
-        position: idx,
-      }));
+    // In V2 mode, NEVER silently reduce requestedCount > available!
+    // In V1 mode with explicit question_ids, honor exact pool length.
+    const effectiveRequestedCount = isV2Request
+      ? requestedCount
+      : Math.min(requestedCount, candidates.length);
 
-      const correctOptionIds = rawOpts
-        .filter((opt) => opt.is_correct)
-        .map((opt) => opt.id);
+    const allocation = computeSubjectAllocations({
+      subjects: orderedSubjects,
+      requestedCount: effectiveRequestedCount,
+      strategy: input.allocation_strategy,
+    });
 
-      const acceptedSnapshot: ExamAcceptedAnswerSnapshot[] = (
-        acceptedMap.get(q.id) ?? []
-      ).map((acc) => ({
-        answer_text: acc.answer_text,
-        normalized_answer: acc.normalized_answer,
-        match_mode: acc.match_mode,
-      }));
+    if (!allocation.valid) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        allocation.errors[0]?.message ?? "Invalid exam allocation configuration.",
+        400,
+        allocation.errors,
+      );
+    }
 
+    // Sample questions strictly without replacement
+    let chosen: typeof candidates = [];
+    const actualCountBySet = new Map<string, number>();
+
+    if (input.allocation_strategy === "global_random") {
+      const { selected } = selectQuestionsByPolicy(
+        candidates,
+        allocation.actualCount,
+        selectionPolicy,
+        recentQuestionIds,
+      );
+      chosen = selected;
+      for (const q of chosen) {
+        actualCountBySet.set(
+          q.study_set_id,
+          (actualCountBySet.get(q.study_set_id) ?? 0) + 1,
+        );
+      }
+    } else {
+      for (const slot of allocation.allocations) {
+        if (slot.allocated_count <= 0) continue;
+        const subjectPool = bySubject.get(slot.study_set_id) ?? [];
+        const { selected } = selectQuestionsByPolicy(
+          subjectPool,
+          slot.allocated_count,
+          selectionPolicy,
+          recentQuestionIds,
+        );
+        chosen.push(...selected);
+        actualCountBySet.set(slot.study_set_id, selected.length);
+      }
+    }
+
+    if (input.shuffle_questions) {
+      chosen = cryptoShuffle(chosen);
+    }
+
+    if (chosen.length === 0) {
+      throw new AppError(
+        "BAD_REQUEST",
+        "No questions could be selected for this exam.",
+        400,
+      );
+    }
+
+    // If shuffle_options is ON, compute cryptographic option UUID orders in chunks (<= 100 Qs)
+    // Actual option text & is_correct are resolved EXCLUSIVELY inside PostgreSQL (SH-013 / SEC-004)!
+    const selectedIds = chosen.map((c) => c.id);
+    const optionOrderByQ = new Map<string, string[]>();
+
+    if (input.shuffle_options) {
+      const optRows = await fetchInChunks(
+        selectedIds,
+        async (chunk) =>
+          supabase
+            .from("question_options")
+            .select("id, question_id, position")
+            .in("question_id", chunk)
+            .order("position", { ascending: true }),
+        SAFE_IN_CHUNK_SIZE,
+      );
+
+      const grouped = new Map<string, string[]>();
+      for (const row of optRows) {
+        const arr = grouped.get(row.question_id) ?? [];
+        arr.push(row.id);
+        grouped.set(row.question_id, arr);
+      }
+
+      for (const [qId, optIds] of grouped.entries()) {
+        optionOrderByQ.set(qId, cryptoShuffle(optIds));
+      }
+    }
+
+    const selectedItemsPayload = chosen.map((q) => ({
+      question_id: q.id,
+      ...(optionOrderByQ.has(q.id)
+        ? { option_ids_order: optionOrderByQ.get(q.id) }
+        : {}),
+    }));
+
+    const sourcesPayload = orderedSubjects.map((s) => {
+      const alloc = allocation.allocations.find(
+        (a) => a.study_set_id === s.study_set_id,
+      );
       return {
-        question_id: q.id,
-        question_type: q.question_type,
-        chapter_snapshot: q.chapter,
-        prompt_snapshot: q.prompt,
-        prompt_image_url_snapshot: q.prompt_image_url,
-        explanation_snapshot: q.explanation,
-        options_snapshot: optionsSnapshot,
-        correct_option_ids: correctOptionIds,
-        accepted_answers_snapshot: acceptedSnapshot,
+        source_type: "study_set",
+        study_set_id: s.study_set_id,
+        subject_title_snapshot: s.title,
+        eligible_count: s.eligible_count,
+        requested_count: alloc?.requested_count ?? null,
+        requested_percentage: alloc?.requested_percentage ?? null,
+        allocated_count: actualCountBySet.get(s.study_set_id) ?? 0,
       };
     });
 
+    // Preserve explicit `null` for unlimited time! Only inherit V1 default when omitted on single-set V1 calls.
     const durationLimitSeconds =
       input.duration_limit_seconds !== undefined
         ? input.duration_limit_seconds
-        : primaryAccess.studySet.default_exam_duration_minutes * 60;
+        : !isV2Request && primaryStudySet
+          ? primaryStudySet.default_exam_duration_minutes * 60
+          : null;
 
     const passThreshold =
-      input.pass_threshold ?? primaryAccess.studySet.default_pass_threshold;
+      input.pass_threshold ?? primaryStudySet?.default_pass_threshold ?? 70;
 
-    const titleSnapshot = input.title ?? primaryAccess.studySet.title;
+    const titleSnapshot =
+      input.title ??
+      (orderedSubjects.length === 1
+        ? orderedSubjects[0].title
+        : primaryStudySet
+          ? `${primaryStudySet.title} (+${orderedSubjects.length - 1})`
+          : `Custom Exam (${orderedSubjects.length} subjects)`);
 
     const examConfig = {
-      question_count: snapshotQuestions.length,
+      question_count: chosen.length,
       duration_limit_seconds: durationLimitSeconds,
       shuffle_questions: input.shuffle_questions,
       shuffle_options: input.shuffle_options,
       pass_threshold: passThreshold,
-      chapters: input.chapters,
-      tag_ids: input.tag_ids,
-      difficulties: input.difficulties,
+      chapters: filters.chapters,
+      tag_ids: filters.tag_ids,
+      difficulties: filters.difficulties,
+      question_types: filters.question_types,
       only_starred: input.only_starred,
       only_unmastered: input.only_unmastered,
       only_mistakes: input.only_mistakes,
+      allocation_strategy: input.allocation_strategy,
+      selection_policy: selectionPolicy,
+      show_subject_names: input.show_subject_names,
+      show_chapter_names: input.show_chapter_names,
+      allow_navigation: input.allow_navigation,
+      allow_mark_for_review: input.allow_mark_for_review,
+      auto_submit_on_expire: input.auto_submit_on_expire,
+      show_review_after_submit: input.show_review_after_submit,
+      additional_study_set_ids: input.additional_study_set_ids,
+      sources: normalizedSources,
+      preset_id: input.preset_id ?? null,
     };
 
-    const { data: created, error: rpcErr } = await rpcCreateExamAttempt(supabase, {
-      p_study_set_id: input.study_set_id,
-      p_title_snapshot: titleSnapshot,
-      p_config: examConfig,
-      p_duration_limit_seconds: durationLimitSeconds,
-      p_pass_threshold: passThreshold,
-      p_questions: snapshotQuestions,
-    });
+    const { data: created, error: rpcErr } = await rpcCreateExamAttemptV2(
+      supabase,
+      {
+        p_title_snapshot: titleSnapshot,
+        p_primary_study_set_id:
+          orderedSubjects.length === 1 ? orderedSubjects[0].study_set_id : null,
+        p_sources: sourcesPayload,
+        p_selected_items: selectedItemsPayload,
+        p_config: examConfig,
+        p_duration_limit_seconds: durationLimitSeconds,
+        p_pass_threshold: passThreshold,
+        p_allocation_strategy: input.allocation_strategy,
+        p_selection_policy: selectionPolicy,
+        p_requested_question_count: requestedCount,
+        p_show_subject_names: input.show_subject_names,
+        p_show_chapter_names: input.show_chapter_names,
+        p_allow_navigation: input.allow_navigation,
+        p_allow_mark_for_review: input.allow_mark_for_review,
+        p_auto_submit_on_expire: input.auto_submit_on_expire,
+        p_show_review_after_submit: input.show_review_after_submit,
+        p_preset_id: input.preset_id ?? null,
+        p_coverage_cycle_id: null,
+      },
+    );
 
     if (rpcErr) throw rpcErr;
     if (!created) {
@@ -323,20 +399,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const serverNow = created.server_now ?? new Date().toISOString();
-    const remainingSeconds = created.attempt.expires_at
-      ? Math.max(
-          0,
-          Math.floor(
-            (Date.parse(created.attempt.expires_at) - Date.parse(serverNow)) /
-              1000,
-          ),
-        )
-      : null;
+    const remainingSeconds =
+      created.remaining_seconds !== undefined
+        ? created.remaining_seconds
+        : created.attempt.expires_at
+          ? Math.max(
+              0,
+              Math.floor(
+                (Date.parse(created.attempt.expires_at) - Date.parse(serverNow)) /
+                  1000,
+              ),
+            )
+          : null;
 
     return apiSuccess(
       {
         attempt: created.attempt,
-        questions: sanitizeInProgressQuestions(created.questions),
+        sources: created.sources ?? [],
+        questions: stripPreSubmitQuestions(created.questions),
         answers: [],
         server_now: serverNow,
         remaining_seconds: remainingSeconds,

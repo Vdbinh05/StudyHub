@@ -8,6 +8,7 @@ import {
   AlertCircle,
   ArrowRight,
   BookOpen,
+  BookOpenCheck,
   CheckCircle2,
   Clock,
   FileCheck2,
@@ -25,6 +26,8 @@ import {
   ApiError,
   formatRelativeTime,
   formatShortDate,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { FadeIn } from "@/components/motion";
@@ -107,7 +110,8 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
             0,
         ) || 0,
       ),
-    streakDays: Number(kpi.streakDays ?? kpi.streak_days ?? 0) || 0,
+    streakDays:
+      Number(kpi.streakDays ?? kpi.streak_days ?? kpi.current_streak_days ?? 0) || 0,
     dailyGoal: Number(kpi.dailyGoal ?? kpi.daily_goal ?? 20) || 20,
     todayAnswered:
       Number(kpi.todayAnswered ?? kpi.today_answers ?? kpi.today_answered ?? 0) || 0,
@@ -128,14 +132,57 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
 export function DashboardView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
+  const configured = isSupabaseConfiguredClient();
 
   const { data, isLoading, error, refetch } = useQuery<DashboardSummary>({
     queryKey: ["dashboard"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<unknown>("/api/dashboard");
       return parseDashboardResponse(res.data);
     },
   });
+
+  // Deduplicated calm state when backend isn't configured (AppShell already displays the single setup banner)
+  if (!configured) {
+    return (
+      <FadeIn aboveFold className="space-y-6">
+        <div className="space-y-1">
+          <h1 className="text-foreground text-2xl font-bold tracking-tight sm:text-[1.75rem]">
+            {t("nav.dashboard")}
+          </h1>
+          <p className="text-muted-foreground text-sm">
+            {vi
+              ? "Không gian tổng quan tiến độ học tập, bộ câu hỏi và thi thử của bạn."
+              : "Your overview for study sets, daily progress, and custom mock exams."}
+          </p>
+        </div>
+
+        <EmptyState
+          icon={BookOpen}
+          title={vi ? "Sẵn sàng bắt đầu học tập" : "Ready to start studying"}
+          description={
+            vi
+              ? "Khi máy chủ dữ liệu sẵn sàng, bạn có thể đăng nhập để đồng bộ thư viện câu hỏi, lịch sử thi thử và thống kê."
+              : "Once the study database is connected, sign in to sync your question banks, mock exams, and analytics."
+          }
+          action={
+            <Button asChild>
+              <Link href="/exams/new">
+                <FileCheck2 className="size-4" aria-hidden="true" />
+                <span>{t("exam.customBuilderTitle")}</span>
+              </Link>
+            </Button>
+          }
+          secondaryAction={
+            <Button asChild variant="outline">
+              <Link href="/login">{t("nav.signIn")}</Link>
+            </Button>
+          }
+        />
+      </FadeIn>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -162,9 +209,6 @@ export function DashboardView() {
 
   if (error) {
     const isUnauth = error instanceof ApiError && error.status === 401;
-    const isUnconfigured =
-      error instanceof ApiError &&
-      (error.status === 503 || error.code === "SUPABASE_NOT_CONFIGURED");
     return (
       <EmptyState
         icon={AlertCircle}
@@ -173,15 +217,11 @@ export function DashboardView() {
             ? vi
               ? "Vui lòng đăng nhập để xem tổng quan"
               : "Sign in to view your dashboard"
-            : isUnconfigured
-              ? vi
-                ? "Chưa kết nối cơ sở dữ liệu Supabase"
-                : "Supabase is not configured"
-              : vi
-                ? "Không thể tải dữ liệu tổng quan"
-                : "Unable to load dashboard"
+            : vi
+              ? "Không thể tải dữ liệu tổng quan"
+              : "Unable to load dashboard"
         }
-        description={error instanceof Error ? error.message : t("common.errorGeneric")}
+        description={getFriendlyErrorMessage(error, locale)}
         action={
           isUnauth ? (
             <Button asChild>
@@ -202,7 +242,7 @@ export function DashboardView() {
       : 0;
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       {/* Compact Header & Quick Actions */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0 space-y-1">
@@ -232,13 +272,19 @@ export function DashboardView() {
 
         <div className="flex flex-wrap items-center gap-2">
           <Button asChild size="sm">
+            <Link href="/exams/new">
+              <FileCheck2 className="size-4" aria-hidden="true" />
+              <span>{t("nav.customExam")}</span>
+            </Link>
+          </Button>
+          <Button asChild size="sm" variant="outline">
             <Link href="/sets/new">
               <Plus className="size-4" aria-hidden="true" />
               <span>{t("library.newSet")}</span>
             </Link>
           </Button>
           <Button asChild size="sm" variant="outline">
-            <Link href="/library?action=import">
+            <Link href="/import">
               <Upload className="size-4" aria-hidden="true" />
               <span>{t("library.importSet")}</span>
             </Link>
@@ -366,6 +412,45 @@ export function DashboardView() {
         </Card>
       </div>
 
+      {/* V2.0 Custom Exam Builder & Full Coverage Quick Launch Card */}
+      <Card>
+        <CardContent className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="bg-primary/10 text-primary flex size-10 shrink-0 items-center justify-center rounded-lg">
+              <FileCheck2 className="size-5" aria-hidden="true" />
+            </div>
+            <div className="space-y-0.5">
+              <h2 className="text-foreground text-base font-semibold">
+                {t("exam.customBuilderTitle")}
+              </h2>
+              <p className="text-muted-foreground text-xs leading-relaxed sm:text-sm">
+                {t("exam.customBuilderSubtitle")}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <Button asChild size="sm">
+              <Link href="/exams/new">
+                <FileCheck2 className="size-4" aria-hidden="true" />
+                <span>{vi ? "Tạo đề thi mới" : "Build exam"}</span>
+              </Link>
+            </Button>
+            <Button asChild size="sm" variant="outline">
+              <Link href="/exams">
+                <Layers className="size-4" aria-hidden="true" />
+                <span>{t("nav.examsHub")}</span>
+              </Link>
+            </Button>
+            <Button asChild size="sm" variant="outline">
+              <Link href="/practice">
+                <BookOpenCheck className="size-4" aria-hidden="true" />
+                <span>{t("nav.practice")}</span>
+              </Link>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Empty State for Brand-New Users */}
       {summary.totalSets === 0 ? (
         <EmptyState
@@ -386,8 +471,9 @@ export function DashboardView() {
           }
           secondaryAction={
             <Button variant="outline" asChild>
-              <Link href="/library">
-                <span>{t("library.title")}</span>
+              <Link href="/import">
+                <Upload className="size-4" aria-hidden="true" />
+                <span>{t("library.importSet")}</span>
               </Link>
             </Button>
           }
@@ -427,7 +513,7 @@ export function DashboardView() {
                   <Button asChild size="sm">
                     <Link href={`/sets/${summary.continueSet.id}/practice`}>
                       <Play className="size-3.5" aria-hidden="true" />
-                      <span>{vi ? "Luyện trắc nghiệm" : "Practice"}</span>
+                      <span>{t("study.practice")}</span>
                     </Link>
                   </Button>
                   <Button asChild size="sm" variant="outline">
@@ -437,7 +523,7 @@ export function DashboardView() {
                     </Link>
                   </Button>
                   <Button asChild size="sm" variant="outline">
-                    <Link href={`/sets/${summary.continueSet.id}/test`}>
+                    <Link href={`/exams/new?setId=${summary.continueSet.id}`}>
                       <FileCheck2 className="size-3.5" aria-hidden="true" />
                       <span>{t("study.exam")}</span>
                     </Link>
@@ -480,11 +566,13 @@ export function DashboardView() {
                       {vi ? "Điểm thi thử gần đây" : "Recent Exam Scores"}
                     </CardTitle>
                     <CardDescription>
-                      {vi ? "Bấm vào lượt thi để xem chi tiết." : "Open any attempt for full review."}
+                      {vi
+                        ? "Bấm vào lượt thi để tiếp tục hoặc xem kết quả."
+                        : "Open any attempt to resume or review results."}
                     </CardDescription>
                   </div>
                   <Button variant="ghost" size="sm" asChild>
-                    <Link href="/history">{vi ? "Lịch sử" : "History"}</Link>
+                    <Link href="/history">{t("nav.history")}</Link>
                   </Button>
                 </div>
               </CardHeader>
@@ -496,13 +584,16 @@ export function DashboardView() {
                 ) : (
                   <ul className="divide-border divide-y">
                     {summary.recentExams.slice(0, 5).map((attempt) => {
-                      const resultHref = attempt.study_set_id
-                        ? `/sets/${attempt.study_set_id}/results/${attempt.id}`
-                        : "/history";
+                      const isInProgress = attempt.status === "in_progress";
+                      const targetHref = isInProgress
+                        ? `/exams/${attempt.id}`
+                        : attempt.study_set_id
+                          ? `/sets/${attempt.study_set_id}/results/${attempt.id}`
+                          : `/exams/${attempt.id}/results`;
                       return (
                         <li key={attempt.id} className="py-2.5 first:pt-0 last:pb-0">
                           <Link
-                            href={resultHref}
+                            href={targetHref}
                             className="hover:bg-secondary/60 flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 transition-colors"
                           >
                             <div className="min-w-0">
@@ -511,23 +602,44 @@ export function DashboardView() {
                               </p>
                               <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
                                 <Clock className="size-3" aria-hidden="true" />
-                                <span>{formatShortDate(attempt.submitted_at ?? attempt.created_at, locale)}</span>
+                                <span>
+                                  {formatShortDate(
+                                    attempt.submitted_at ?? attempt.created_at,
+                                    locale,
+                                  )}
+                                </span>
                               </p>
                             </div>
                             <div className="flex shrink-0 items-center gap-2">
-                              <span className="font-mono text-sm font-semibold tabular-nums">
-                                {Math.round(attempt.score_percent)}%
-                              </span>
-                              <Badge variant={attempt.passed ? "success" : "destructive"}>
-                                {attempt.passed ? (
-                                  <CheckCircle2 className="size-3" aria-hidden="true" />
-                                ) : (
-                                  <XCircle className="size-3" aria-hidden="true" />
-                                )}
-                                <span>
-                                  {attempt.passed ? t("exam.passed") : t("exam.failed")}
-                                </span>
-                              </Badge>
+                              {isInProgress ? (
+                                <>
+                                  <span className="text-muted-foreground font-mono text-xs tabular-nums">
+                                    {attempt.answered_count}/{attempt.total_questions}
+                                  </span>
+                                  <Badge variant="warning">
+                                    <Clock className="size-3" aria-hidden="true" />
+                                    <span>{vi ? "Đang làm" : "In progress"}</span>
+                                  </Badge>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="font-mono text-sm font-semibold tabular-nums">
+                                    {Math.round(attempt.score_percent)}%
+                                  </span>
+                                  <Badge
+                                    variant={attempt.passed ? "success" : "destructive"}
+                                  >
+                                    {attempt.passed ? (
+                                      <CheckCircle2 className="size-3" aria-hidden="true" />
+                                    ) : (
+                                      <XCircle className="size-3" aria-hidden="true" />
+                                    )}
+                                    <span>
+                                      {attempt.passed ? t("exam.passed") : t("exam.failed")}
+                                    </span>
+                                  </Badge>
+                                </>
+                              )}
                             </div>
                           </Link>
                         </li>

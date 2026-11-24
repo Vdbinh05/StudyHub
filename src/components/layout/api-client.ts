@@ -41,6 +41,79 @@ export function isSupabaseConfiguredClient(): boolean {
 }
 
 /**
+ * Returns true if the error indicates the backend Supabase database is not yet configured.
+ */
+export function isServiceUnavailableError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    if (err.status === 503 || err.code === "SUPABASE_NOT_CONFIGURED") {
+      return true;
+    }
+  }
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    if (
+      msg.includes("supabase") ||
+      msg.includes("next_public_supabase") ||
+      msg.includes(".env.local")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Translates raw API or infrastructure errors into calm, student-friendly messages.
+ * Never leaks environment variable names or raw Postgres traces in student copy.
+ */
+export function getFriendlyErrorMessage(
+  err: unknown,
+  locale: Locale,
+  fallback?: string,
+): string {
+  const vi = locale === "vi";
+  if (isServiceUnavailableError(err)) {
+    return vi
+      ? "Kết nối đến máy chủ dữ liệu học tập hiện chưa sẵn sàng. Vui lòng thử lại sau."
+      : "The study database service is temporarily unavailable. Please try again shortly.";
+  }
+  if (err instanceof ApiError) {
+    if (err.status === 401) {
+      return vi
+        ? "Bạn cần đăng nhập để tiếp tục thao tác này."
+        : "Please sign in to continue.";
+    }
+    if (err.status === 403) {
+      return vi
+        ? "Bạn không có quyền thực hiện thao tác này."
+        : "You do not have permission to perform this action.";
+    }
+    if (err.status === 404) {
+      return vi
+        ? "Không tìm thấy nội dung yêu cầu."
+        : "The requested item could not be found.";
+    }
+    if (err.status === 429) {
+      return vi
+        ? "Bạn thao tác quá nhanh. Vui lòng đợi một lát rồi thử lại."
+        : "Too many requests. Please wait a moment and try again.";
+    }
+    if (err.message && err.message.trim().length > 0) {
+      return err.message;
+    }
+  }
+  if (err instanceof Error && err.message.trim().length > 0) {
+    return err.message;
+  }
+  return (
+    fallback ??
+    (vi
+      ? "Đã xảy ra lỗi. Vui lòng thử lại."
+      : "Something went wrong. Please try again.")
+  );
+}
+
+/**
  * Typed JSON fetch wrapper aligned with StudyHub's uniform `{ data, meta? }` / `{ error }` contract.
  */
 export async function apiFetch<T>(

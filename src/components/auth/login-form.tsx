@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -12,7 +13,6 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,11 +22,52 @@ import { isSupabaseConfigured, tryCreateClient } from "@/lib/supabase/client";
 
 function sanitizeNextPath(raw: string | null): string {
   if (!raw) return "/dashboard";
-  if (raw.startsWith("/") && !raw.startsWith("//")) {
-    return raw;
+  const trimmed = raw.trim();
+  if (
+    trimmed.startsWith("/") &&
+    !trimmed.startsWith("//") &&
+    !trimmed.startsWith("/\\") &&
+    !trimmed.includes("\\")
+  ) {
+    return trimmed;
   }
   return "/dashboard";
 }
+
+function mapCallbackError(
+  rawCode: string | null,
+  rawDesc: string | null,
+  vi: boolean,
+): string | null {
+  if (!rawCode && !rawDesc) return null;
+  const combined = `${rawCode ?? ""} ${rawDesc ?? ""}`.toLowerCase();
+  if (combined.includes("access_denied") || combined.includes("cancel")) {
+    return vi
+      ? "Bạn đã hủy đăng nhập hoặc từ chối quyền truy cập."
+      : "Sign-in was canceled or access was denied.";
+  }
+  if (
+    combined.includes("otp_expired") ||
+    combined.includes("expired") ||
+    combined.includes("invalid_token") ||
+    combined.includes("invalid_grant")
+  ) {
+    return vi
+      ? "Liên kết xác nhận đã hết hạn hoặc không hợp lệ. Vui lòng thử lại."
+      : "The verification link has expired or is invalid. Please request a new one.";
+  }
+  if (combined.includes("auth_callback_failed") || combined.includes("callback")) {
+    return vi
+      ? "Không thể hoàn tất xác thực. Vui lòng đăng nhập lại."
+      : "Unable to complete authentication. Please sign in again.";
+  }
+  return vi
+    ? "Đăng nhập không thành công. Vui lòng thử lại."
+    : "Sign-in failed. Please try again.";
+}
+
+const GOOGLE_OAUTH_ENABLED =
+  process.env.NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH === "true";
 
 function LoginFormInner() {
   const { locale, t } = useI18n();
@@ -51,6 +92,12 @@ function LoginFormInner() {
 
   const configured = isSupabaseConfigured();
   const nextPath = sanitizeNextPath(searchParams.get("next"));
+  const callbackError = mapCallbackError(
+    searchParams.get("error"),
+    searchParams.get("error_description"),
+    vi,
+  );
+  const activeError = formError ?? callbackError;
 
   const emailInvalid =
     (touched.email || submitted) &&
@@ -74,11 +121,7 @@ function LoginFormInner() {
 
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi
-          ? "Supabase chưa được cấu hình. Không thể đăng nhập."
-          : "Supabase is not configured. Unable to sign in.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
 
@@ -95,7 +138,7 @@ function LoginFormInner() {
             ? vi
               ? "Email hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại."
               : "Invalid email or password. Please check and try again."
-            : error.message,
+            : getFriendlyErrorMessage(error, locale),
         );
         return;
       }
@@ -103,8 +146,8 @@ function LoginFormInner() {
       toast.success(vi ? "Đăng nhập thành công." : "Signed in successfully.");
       router.push(nextPath);
       router.refresh();
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
     } finally {
       setLoading(false);
     }
@@ -114,11 +157,7 @@ function LoginFormInner() {
     setFormError(null);
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi
-          ? "Supabase chưa được cấu hình. Không thể đăng nhập bằng Google."
-          : "Supabase is not configured. Unable to sign in with Google.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
 
@@ -132,34 +171,38 @@ function LoginFormInner() {
         },
       });
       if (error) {
-        setFormError(error.message);
+        setFormError(getFriendlyErrorMessage(error, locale));
         setOauthLoading(false);
       }
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
       setOauthLoading(false);
     }
   };
 
+  const controlsDisabled = !configured || loading;
+
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <CardTitle className="text-xl">{t("auth.loginTitle")}</CardTitle>
+        <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
+          {t("auth.loginTitle")}
+        </h1>
         <CardDescription>{t("auth.loginSubtitle")}</CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-4">
-        {formError && (
+        {activeError && (
           <div
             role="alert"
             className="border-destructive/30 bg-destructive-subtle text-destructive-subtle-foreground flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm"
           >
             <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-            <span>{formError}</span>
+            <span>{activeError}</span>
           </div>
         )}
 
-        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <form method="post" onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="login-email">{t("auth.email")}</Label>
             <Input
@@ -167,7 +210,9 @@ function LoginFormInner() {
               id="login-email"
               name="email"
               type="email"
+              inputMode="email"
               autoComplete="username"
+              autoCapitalize="none"
               spellCheck={false}
               enterKeyHint="next"
               required
@@ -177,11 +222,12 @@ function LoginFormInner() {
               onBlur={() => setTouched((prev) => ({ ...prev, email: true }))}
               aria-invalid={emailInvalid ? "true" : "false"}
               aria-describedby={emailInvalid ? "login-email-error" : undefined}
-              disabled={!configured || loading}
+              disabled={controlsDisabled}
             />
             {emailInvalid && (
               <p
                 id="login-email-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -199,7 +245,7 @@ function LoginFormInner() {
               <Label htmlFor="login-password">{t("auth.password")}</Label>
               <Link
                 href="/forgot-password"
-                className="text-primary text-xs font-medium hover:underline"
+                className="text-primary inline-flex min-h-11 items-center px-1 text-xs font-medium hover:underline sm:min-h-0 sm:px-0"
               >
                 {t("auth.forgotPassword")}
               </Link>
@@ -219,11 +265,12 @@ function LoginFormInner() {
                 onBlur={() => setTouched((prev) => ({ ...prev, password: true }))}
                 aria-invalid={passwordInvalid ? "true" : "false"}
                 aria-describedby={passwordInvalid ? "login-password-error" : undefined}
-                disabled={!configured || loading}
-                className="pr-10"
+                disabled={controlsDisabled}
+                className="pr-12"
               />
               <button
                 type="button"
+                disabled={controlsDisabled}
                 onClick={() => setShowPassword((prev) => !prev)}
                 aria-pressed={showPassword}
                 aria-label={
@@ -235,7 +282,7 @@ function LoginFormInner() {
                       ? "Hiện mật khẩu"
                       : "Show password"
                 }
-                className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2.5 -translate-y-1/2 rounded-md p-1 transition-colors"
+                className="text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50 absolute top-1/2 right-0.5 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md transition-colors sm:h-9 sm:w-9"
               >
                 {showPassword ? (
                   <EyeOff className="size-4" aria-hidden="true" />
@@ -247,6 +294,7 @@ function LoginFormInner() {
             {passwordInvalid && (
               <p
                 id="login-password-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -261,7 +309,7 @@ function LoginFormInner() {
 
           <Button
             type="submit"
-            className="h-10 w-full"
+            className="min-h-11 w-full sm:min-h-10"
             disabled={!configured || loading || oauthLoading}
           >
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
@@ -269,32 +317,36 @@ function LoginFormInner() {
           </Button>
         </form>
 
-        <div className="relative flex items-center justify-center py-1">
-          <Separator />
-          <span className="bg-card text-muted-foreground absolute px-2.5 text-xs">
-            {vi ? "hoặc" : "or"}
-          </span>
-        </div>
+        {GOOGLE_OAUTH_ENABLED && (
+          <>
+            <div className="relative flex items-center justify-center py-1">
+              <Separator />
+              <span className="bg-card text-muted-foreground absolute px-2.5 text-xs">
+                {vi ? "hoặc" : "or"}
+              </span>
+            </div>
 
-        <Button
-          type="button"
-          variant="outline"
-          className="h-10 w-full"
-          disabled={!configured || loading || oauthLoading}
-          onClick={() => void handleGoogleSignIn()}
-        >
-          {oauthLoading ? (
-            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <svg className="size-4" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M21.35 11.1H12v2.92h5.35c-.24 1.38-1.44 4.05-5.35 4.05-3.22 0-5.85-2.67-5.85-5.95s2.63-5.95 5.85-5.95c1.84 0 3.07.78 3.77 1.46l2.57-2.48C16.7 3.63 14.56 2.7 12 2.7 6.86 2.7 2.7 6.86 2.7 12s4.16 9.3 9.3 9.3c5.37 0 8.93-3.77 8.93-9.08 0-.61-.07-1.08-.15-1.12z"
-              />
-            </svg>
-          )}
-          <span>{t("auth.continueWithGoogle")}</span>
-        </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11 w-full sm:min-h-10"
+              disabled={!configured || loading || oauthLoading}
+              onClick={() => void handleGoogleSignIn()}
+            >
+              {oauthLoading ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <svg className="size-4" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M21.35 11.1H12v2.92h5.35c-.24 1.38-1.44 4.05-5.35 4.05-3.22 0-5.85-2.67-5.85-5.95s2.63-5.95 5.85-5.95c1.84 0 3.07.78 3.77 1.46l2.57-2.48C16.7 3.63 14.56 2.7 12 2.7 6.86 2.7 2.7 6.86 2.7 12s4.16 9.3 9.3 9.3c5.37 0 8.93-3.77 8.93-9.08 0-.61-.07-1.08-.15-1.12z"
+                  />
+                </svg>
+              )}
+              <span>{t("auth.continueWithGoogle")}</span>
+            </Button>
+          </>
+        )}
       </CardContent>
 
       <CardFooter className="justify-center border-t pt-4">

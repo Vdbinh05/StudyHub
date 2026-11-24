@@ -13,7 +13,17 @@ import {
   Play,
   UploadCloud,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -76,15 +86,21 @@ export function ImportOptionsPanel({
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {/* Append vs Replace */}
           <div className="space-y-2">
-            <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Label className="text-xs font-semibold text-muted-foreground">
               {locale === "en" ? "Target Mode" : "Chế độ ghi dữ liệu"}
             </Label>
-            <div className="grid grid-cols-2 gap-2">
+            <div
+              role="radiogroup"
+              aria-label={locale === "en" ? "Target Mode" : "Chế độ ghi dữ liệu"}
+              className="grid grid-cols-2 gap-2"
+            >
               <button
                 type="button"
+                role="radio"
+                aria-checked={mode === "append"}
                 onClick={() => onModeChange("append")}
                 className={cn(
-                  "min-h-[44px] rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                  "min-h-[44px] rounded-lg border px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "append"
                     ? "border-primary bg-primary/5 font-medium text-foreground ring-1 ring-primary"
                     : "border-border bg-card text-muted-foreground hover:bg-muted/40",
@@ -94,11 +110,13 @@ export function ImportOptionsPanel({
               </button>
               <button
                 type="button"
+                role="radio"
+                aria-checked={mode === "replace"}
                 onClick={() => onModeChange("replace")}
                 className={cn(
-                  "min-h-[44px] rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                  "min-h-[44px] rounded-lg border px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "replace"
-                    ? "border-destructive bg-destructive/5 font-medium text-destructive ring-1 ring-destructive"
+                    ? "border-destructive bg-destructive-subtle font-medium text-destructive-subtle-foreground ring-1 ring-destructive"
                     : "border-border bg-card text-muted-foreground hover:bg-muted/40",
                 )}
               >
@@ -109,18 +127,22 @@ export function ImportOptionsPanel({
               <p className="flex items-center gap-1.5 text-xs text-destructive">
                 <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
                 {locale === "en"
-                  ? "Existing questions in this study set will be deleted before importing."
-                  : "Toàn bộ câu hỏi hiện có trong học phần sẽ bị xóa trước khi nhập."}
+                  ? "Existing questions in this study set will be deleted before importing (confirmation required)."
+                  : "Toàn bộ câu hỏi hiện có trong học phần sẽ bị xóa trước khi nhập (cần xác nhận trước khi chạy)."}
               </p>
             )}
           </div>
 
           {/* Duplicate Policy */}
           <div className="space-y-2">
-            <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Label className="text-xs font-semibold text-muted-foreground">
               {locale === "en" ? "Duplicate Handling" : "Xử lý câu trùng lặp"}
             </Label>
-            <div className="grid grid-cols-3 gap-2">
+            <div
+              role="radiogroup"
+              aria-label={locale === "en" ? "Duplicate Handling" : "Xử lý câu trùng lặp"}
+              className="grid grid-cols-3 gap-2"
+            >
               {(
                 [
                   { id: "skip", vi: "Bỏ qua", en: "Skip" },
@@ -131,9 +153,11 @@ export function ImportOptionsPanel({
                 <button
                   key={opt.id}
                   type="button"
+                  role="radio"
+                  aria-checked={duplicatePolicy === opt.id}
                   onClick={() => onDuplicatePolicyChange(opt.id)}
                   className={cn(
-                    "min-h-[44px] rounded-lg border px-2.5 py-2 text-center text-xs font-medium transition-colors",
+                    "min-h-[44px] rounded-lg border px-2.5 py-2 text-center text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     duplicatePolicy === opt.id
                       ? "border-primary bg-primary/5 text-foreground ring-1 ring-primary"
                       : "border-border bg-card text-muted-foreground hover:bg-muted/40",
@@ -220,6 +244,7 @@ export interface StepCommitProps {
   locale: Locale;
   studySetId: string;
   studySetTitle: string;
+  existingQuestionCount?: number;
   readyCount: number;
   errorCount: number;
   skipInvalidRows: boolean;
@@ -228,12 +253,14 @@ export interface StepCommitProps {
   progress: CommitProgressState;
   onBack: () => void;
   onStartCommit: () => void;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }
 
 export function StepCommit({
   locale,
   studySetId,
   studySetTitle,
+  existingQuestionCount = 0,
   readyCount,
   errorCount,
   skipInvalidRows,
@@ -242,7 +269,10 @@ export function StepCommit({
   progress,
   onBack,
   onStartCommit,
+  headingRef,
 }: StepCommitProps) {
+  const [confirmReplaceOpen, setConfirmReplaceOpen] = React.useState(false);
+
   const percent =
     progress.totalChunks > 0
       ? Math.round((progress.completedChunks / progress.totalChunks) * 100)
@@ -252,13 +282,28 @@ export function StepCommit({
 
   const blockedByErrors = errorCount > 0 && !skipInvalidRows;
 
+  const handlePrimaryImportClick = () => {
+    if (mode === "replace") {
+      setConfirmReplaceOpen(true);
+      return;
+    }
+    onStartCommit();
+  };
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>
-          {locale === "en"
-            ? "Step 6: Confirm & Commit to Question Bank"
-            : "Bước 6: Xác nhận & Lưu vào ngân hàng câu hỏi"}
+          <h2
+            ref={headingRef}
+            data-import-step="6"
+            tabIndex={-1}
+            className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            {locale === "en"
+              ? "Step 6: Confirm & Commit to Question Bank"
+              : "Bước 6: Xác nhận & Lưu vào ngân hàng câu hỏi"}
+          </h2>
         </CardTitle>
         <CardDescription>
           {locale === "en"
@@ -334,16 +379,66 @@ export function StepCommit({
               <Button
                 type="button"
                 size="lg"
+                variant={mode === "replace" ? "destructive" : "default"}
                 className="min-h-[44px]"
                 disabled={blockedByErrors || readyCount === 0}
-                onClick={onStartCommit}
+                onClick={handlePrimaryImportClick}
               >
                 <UploadCloud className="mr-2 size-4" aria-hidden="true" />
-                {locale === "en"
-                  ? `Import ${readyCount.toLocaleString()} Question(s)`
-                  : `Nhập ${readyCount.toLocaleString()} câu hỏi`}
+                {mode === "replace"
+                  ? locale === "en"
+                    ? `Replace & Import ${readyCount.toLocaleString()} Question(s)`
+                    : `Thay thế & Nhập ${readyCount.toLocaleString()} câu hỏi`
+                  : locale === "en"
+                    ? `Import ${readyCount.toLocaleString()} Question(s)`
+                    : `Nhập ${readyCount.toLocaleString()} câu hỏi`}
               </Button>
             </div>
+
+            <AlertDialog
+              open={confirmReplaceOpen}
+              onOpenChange={setConfirmReplaceOpen}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle className="flex items-center gap-2 text-destructive">
+                    <AlertTriangle className="size-5 shrink-0" aria-hidden="true" />
+                    {locale === "en"
+                      ? "Confirm Replace Entire Study Set"
+                      : "Xác nhận thay thế toàn bộ học phần"}
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {locale === "en"
+                      ? `This action will permanently delete ${
+                          existingQuestionCount > 0
+                            ? `all ${existingQuestionCount.toLocaleString()} existing question(s)`
+                            : "all existing questions"
+                        } in "${studySetTitle}" and replace them with ${readyCount.toLocaleString()} imported question(s). Past exam snapshots remain untouched, but removed questions cannot be undone.`
+                      : `Thao tác này sẽ xóa vĩnh viễn ${
+                          existingQuestionCount > 0
+                            ? `toàn bộ ${existingQuestionCount.toLocaleString()} câu hỏi hiện có`
+                            : "toàn bộ câu hỏi hiện có"
+                        } trong học phần "${studySetTitle}" và thay bằng ${readyCount.toLocaleString()} câu hỏi mới. Lịch sử bài thi cũ được giữ nguyên, nhưng câu hỏi bị xóa không thể hoàn tác.`}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel autoFocus>
+                    {locale === "en" ? "Cancel" : "Hủy bỏ"}
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    className={buttonVariants({ variant: "destructive" })}
+                    onClick={() => {
+                      setConfirmReplaceOpen(false);
+                      onStartCommit();
+                    }}
+                  >
+                    {locale === "en"
+                      ? "Delete Existing & Import"
+                      : "Xóa câu cũ & Nhập mới"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </>
         )}
 
@@ -390,9 +485,9 @@ export function StepCommit({
 
         {progress.status === "completed" && (
           <div className="space-y-6 py-2" aria-live="polite">
-            <div className="flex items-start gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-5">
+            <div className="flex items-start gap-3 rounded-xl border border-success/30 bg-success-subtle p-5">
               <CheckCircle2
-                className="mt-0.5 size-6 shrink-0 text-emerald-600 dark:text-emerald-400"
+                className="mt-0.5 size-6 shrink-0 text-success-subtle-foreground"
                 aria-hidden="true"
               />
               <div>

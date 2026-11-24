@@ -12,7 +12,12 @@ import {
   Share2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiFetch, formatRelativeTime } from "@/components/layout/api-client";
+import {
+  apiFetch,
+  formatRelativeTime,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import { FadeIn } from "@/components/motion";
@@ -42,9 +47,11 @@ export function SharedSetsView() {
   const vi = locale === "vi";
   const router = useRouter();
   const queryClient = useQueryClient();
+  const configured = isSupabaseConfiguredClient();
 
   const sharedQuery = useQuery<SharedStudySet[]>({
     queryKey: ["shared-sets"],
+    enabled: configured,
     queryFn: async () => {
       const res = await apiFetch<SharedStudySet[]>(
         "/api/sets?scope=shared&pageSize=100",
@@ -71,14 +78,14 @@ export function SharedSetsView() {
       router.push(`/sets/${cloned.id}`);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : t("common.errorGeneric"));
+      toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
 
   const sets = sharedQuery.data ?? [];
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={vi ? "Được chia sẻ với tôi" : "Shared with Me"}
         description={
@@ -93,7 +100,13 @@ export function SharedSetsView() {
         }
       />
 
-      {sharedQuery.isLoading ? (
+      {!configured ? (
+        <EmptyState
+          icon={Share2}
+          title={vi ? "Chưa thể tải học phần chia sẻ" : "Shared sets unavailable"}
+          description={t("common.serviceUnavailableDesc")}
+        />
+      ) : sharedQuery.isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-44 rounded-xl" />
@@ -103,11 +116,7 @@ export function SharedSetsView() {
         <EmptyState
           icon={AlertCircle}
           title={vi ? "Không thể tải danh sách chia sẻ" : "Unable to load shared sets"}
-          description={
-            sharedQuery.error instanceof Error
-              ? sharedQuery.error.message
-              : t("common.errorGeneric")
-          }
+          description={getFriendlyErrorMessage(sharedQuery.error, locale)}
           action={
             <Button onClick={() => void sharedQuery.refetch()}>
               {t("common.retry")}
@@ -181,7 +190,10 @@ export function SharedSetsView() {
                   </Button>
                   {role === "editor" && (
                     <Button size="sm" variant="outline" asChild>
-                      <Link href={`/sets/${set.id}/edit`} aria-label={t("common.edit")}>
+                      <Link
+                        href={`/sets/${set.id}/edit`}
+                        aria-label={`${t("common.edit")} ${set.title}`}
+                      >
                         <Edit3 className="size-3.5" aria-hidden="true" />
                       </Link>
                     </Button>
@@ -192,7 +204,7 @@ export function SharedSetsView() {
                       variant="outline"
                       disabled={cloneMutation.isPending}
                       onClick={() => cloneMutation.mutate(set.id)}
-                      aria-label={t("library.duplicateSet")}
+                      aria-label={`${t("library.duplicateSet")} ${set.title}`}
                     >
                       <Copy className="size-3.5" aria-hidden="true" />
                     </Button>

@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { AlertCircle, ArrowLeft, CheckCircle2, Loader2 } from "lucide-react";
+import { getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -10,7 +11,6 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +28,8 @@ export function ForgotPasswordForm() {
   const [sent, setSent] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
 
+  const emailRef = React.useRef<HTMLInputElement>(null);
+
   const configured = isSupabaseConfigured();
   const emailInvalid =
     (touched || submitted) &&
@@ -39,14 +41,13 @@ export function ForgotPasswordForm() {
     setFormError(null);
 
     if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      emailRef.current?.focus();
       return;
     }
 
     const supabase = tryCreateClient();
     if (!supabase) {
-      setFormError(
-        vi ? "Supabase chưa được cấu hình." : "Supabase is not configured.",
-      );
+      setFormError(t("common.serviceUnavailableDesc"));
       return;
     }
 
@@ -57,12 +58,12 @@ export function ForgotPasswordForm() {
         redirectTo: `${origin}/auth/callback?next=/reset-password`,
       });
       if (error) {
-        setFormError(error.message);
+        setFormError(getFriendlyErrorMessage(error, locale));
         return;
       }
       setSent(true);
-    } catch {
-      setFormError(t("common.errorGeneric"));
+    } catch (err) {
+      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
     } finally {
       setLoading(false);
     }
@@ -75,7 +76,9 @@ export function ForgotPasswordForm() {
           <div className="bg-success-subtle text-success-subtle-foreground mb-2 flex size-10 items-center justify-center rounded-lg">
             <CheckCircle2 className="size-5" aria-hidden="true" />
           </div>
-          <CardTitle className="text-xl">{t("auth.resetPasswordTitle")}</CardTitle>
+          <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
+            {t("auth.resetPasswordTitle")}
+          </h1>
           <CardDescription>{t("auth.resetPasswordSent")}</CardDescription>
         </CardHeader>
         <CardFooter>
@@ -93,7 +96,9 @@ export function ForgotPasswordForm() {
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <CardTitle className="text-xl">{t("auth.resetPasswordTitle")}</CardTitle>
+        <h1 className="text-foreground text-xl leading-none font-semibold tracking-tight">
+          {t("auth.resetPasswordTitle")}
+        </h1>
         <CardDescription>
           {vi
             ? "Nhập email đã đăng ký để nhận liên kết đặt lại mật khẩu."
@@ -110,14 +115,17 @@ export function ForgotPasswordForm() {
             <span>{formError}</span>
           </div>
         )}
-        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <form method="post" onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="forgot-email">{t("auth.email")}</Label>
             <Input
+              ref={emailRef}
               id="forgot-email"
               name="email"
               type="email"
+              inputMode="email"
               autoComplete="email"
+              autoCapitalize="none"
               spellCheck={false}
               enterKeyHint="send"
               required
@@ -132,6 +140,7 @@ export function ForgotPasswordForm() {
             {emailInvalid && (
               <p
                 id="forgot-email-error"
+                role="alert"
                 className="text-destructive flex items-center gap-1.5 text-xs font-medium"
               >
                 <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
@@ -143,7 +152,11 @@ export function ForgotPasswordForm() {
               </p>
             )}
           </div>
-          <Button type="submit" className="h-10 w-full" disabled={!configured || loading}>
+          <Button
+            type="submit"
+            className="min-h-11 w-full sm:min-h-10"
+            disabled={!configured || loading}
+          >
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
             <span>{vi ? "Gửi liên kết đặt lại" : "Send reset link"}</span>
           </Button>
@@ -152,7 +165,7 @@ export function ForgotPasswordForm() {
       <CardFooter className="justify-center border-t pt-4">
         <Link
           href="/login"
-          className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-sm font-medium"
+          className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center gap-1.5 text-sm font-medium sm:min-h-0"
         >
           <ArrowLeft className="size-4" aria-hidden="true" />
           <span>{vi ? "Quay lại đăng nhập" : "Back to sign in"}</span>

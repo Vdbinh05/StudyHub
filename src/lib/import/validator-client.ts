@@ -6,6 +6,7 @@
 export { chunkArray } from "./text-utils";
 export {
   computeImportSummary,
+  computeQuestionDuplicateFingerprint,
   validateImportBatch,
   validateParsedQuestion,
 } from "./validator";

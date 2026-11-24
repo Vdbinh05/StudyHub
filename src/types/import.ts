@@ -65,6 +65,7 @@ export type ImportValidationIssueCode =
   | "EMPTY_FLASHCARD_BACK"
   | "DUPLICATE_QUESTION_IN_BATCH"
   | "INVALID_CORRECT_ANSWER"
+  | "EMBEDDED_IMAGE_SKIPPED"
   | "UNPARSED_BLOCK"
   | "INVALID_FORMAT";
 
@@ -161,6 +162,7 @@ export interface ImportPreviewResult {
   fileSizeBytes?: number;
   sheetNames?: string[];
   selectedSheet?: string;
+  headerRowCount?: 1 | 2;
   detectedColumns?: string[];
   sampleRows?: string[][];
   suggestedMapping?: ColumnMapping;
@@ -174,6 +176,7 @@ export interface ImportOptions {
   formatOverride?: ImportFormat;
   sheetName?: string;
   hasHeaderRow?: boolean;
+  headerRowCount?: 1 | 2;
   answerRule?: AnswerRule;
   columnMapping?: ColumnMapping;
   csvDelimiter?: string;

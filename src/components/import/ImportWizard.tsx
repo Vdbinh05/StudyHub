@@ -7,7 +7,12 @@ import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
-import { chunkArray, validateImportBatch } from "@/lib/import/validator-client";
+import {
+  chunkArray,
+  computeImportSummary,
+  validateImportBatch,
+  validateParsedQuestion,
+} from "@/lib/import/validator-client";
 import { cn } from "@/lib/utils";
 import type {
   AnswerRule,
@@ -35,6 +40,7 @@ interface ParseApiResponse {
     fileSizeBytes?: number;
     sheetNames?: string[];
     selectedSheet?: string;
+    headerRowCount?: 1 | 2;
     detectedColumns?: string[];
     sampleRows?: string[][];
     suggestedMapping?: ColumnMapping;
@@ -61,9 +67,50 @@ interface CommitApiResponse {
 export interface ImportWizardProps {
   studySetId: string;
   studySetTitle: string;
+  existingQuestionCount?: number;
 }
 
-export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
+const EMPTY_MAPPING: ColumnMapping = {
+  prompt: null,
+  correctAnswer: null,
+};
+
+function hasAnyMapping(mapping: ColumnMapping | undefined): boolean {
+  if (!mapping) return false;
+  return Boolean(
+    mapping.prompt ||
+      mapping.correctAnswer ||
+      mapping.optionA ||
+      mapping.optionB ||
+      mapping.backText,
+  );
+}
+
+function buildParseCacheKey(
+  sourceVersion: number,
+  opts: ImportOptions,
+): string {
+  return JSON.stringify({
+    v: sourceVersion,
+    fmt: opts.formatOverride ?? null,
+    sheet: opts.sheetName ?? null,
+    hdr: opts.hasHeaderRow ?? true,
+    hdrRows: opts.headerRowCount ?? null,
+    rule: opts.answerRule ?? { mode: "auto" },
+    map: opts.columnMapping ?? null,
+    csv: opts.csvDelimiter ?? "",
+    term: opts.termDelimiter ?? "\\t",
+    card: opts.cardDelimiter ?? "\\n",
+  });
+}
+
+const BATCH_REVALIDATE_DEBOUNCE_MS = 300;
+
+export function ImportWizard({
+  studySetId,
+  studySetTitle,
+  existingQuestionCount = 0,
+}: ImportWizardProps) {
   const { locale } = useI18n();
   const steps = React.useMemo(() => getImportStepLabels(locale), [locale]);
 
@@ -71,6 +118,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
   const [sourceMode, setSourceMode] = React.useState<"file" | "paste">("file");
   const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
   const [rawText, setRawText] = React.useState("");
+  const [sourceVersion, setSourceVersion] = React.useState<number>(0);
 
   // Parse configuration state
   const [detectedFormat, setDetectedFormat] = React.useState<ImportFormat>("eduquiz_txt");
@@ -78,12 +126,10 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
   const [sheetNames, setSheetNames] = React.useState<string[] | undefined>(undefined);
   const [selectedSheet, setSelectedSheet] = React.useState<string | undefined>(undefined);
   const [hasHeaderRow, setHasHeaderRow] = React.useState<boolean>(true);
+  const [headerRowCount, setHeaderRowCount] = React.useState<1 | 2 | undefined>(undefined);
   const [detectedColumns, setDetectedColumns] = React.useState<string[] | undefined>(undefined);
   const [sampleRows, setSampleRows] = React.useState<string[][] | undefined>(undefined);
-  const [columnMapping, setColumnMapping] = React.useState<ColumnMapping>({
-    prompt: null,
-    correctAnswer: null,
-  });
+  const [columnMapping, setColumnMapping] = React.useState<ColumnMapping>(EMPTY_MAPPING);
   const [termDelimiter, setTermDelimiter] = React.useState<string>("\\t");
   const [cardDelimiter, setCardDelimiter] = React.useState<string>("\\n");
   const [csvDelimiter, setCsvDelimiter] = React.useState<string>("");
@@ -129,28 +175,142 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
 
   // Stable session seed for idempotency keys across retries of the same import
   const commitBatchIdRef = React.useRef<string>(crypto.randomUUID());
+  // Parse cache key to eliminate 3x redundant re-parses across Steps 1 -> 4 (SH-038)
+  const lastParsedKeyRef = React.useRef<string | null>(null);
+  const hasParsedQuestionsRef = React.useRef<boolean>(false);
+  // Debounced cross-batch revalidation timer for Step-5 edits (SH-038)
+  const revalidateTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestQuestionsRef = React.useRef<ParsedQuestion[]>(questions);
+  // Step-transition focus management: skips initial mount, moves focus to the newly mounted step <h2> (I-02)
+  const previousStepRef = React.useRef<number>(step);
+  const pendingFocusStepRef = React.useRef<number | null>(null);
+  const stepHeadingElRef = React.useRef<HTMLHeadingElement | null>(null);
+  const stepHeadingStepRef = React.useRef<number>(step);
+
+  const handleStepHeadingMount = React.useCallback((el: HTMLHeadingElement | null) => {
+    if (el) {
+      const targetStep = Number(el.dataset.importStep ?? 0);
+      stepHeadingElRef.current = el;
+      stepHeadingStepRef.current = targetStep;
+      if (pendingFocusStepRef.current === targetStep) {
+        pendingFocusStepRef.current = null;
+        requestAnimationFrame(() => {
+          el.focus();
+        });
+      }
+    } else {
+      stepHeadingElRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (previousStepRef.current === step) {
+      return;
+    }
+    previousStepRef.current = step;
+    if (stepHeadingElRef.current && stepHeadingStepRef.current === step) {
+      pendingFocusStepRef.current = null;
+      const el = stepHeadingElRef.current;
+      const rafId = requestAnimationFrame(() => el.focus());
+      return () => cancelAnimationFrame(rafId);
+    }
+    pendingFocusStepRef.current = step;
+  }, [step]);
+
+  React.useEffect(() => {
+    latestQuestionsRef.current = questions;
+    hasParsedQuestionsRef.current = questions.length > 0;
+  }, [questions]);
+
+  React.useEffect(() => {
+    return () => {
+      if (revalidateTimerRef.current) {
+        clearTimeout(revalidateTimerRef.current);
+      }
+    };
+  }, []);
+
+  const flushBatchRevalidation = React.useCallback(() => {
+    if (revalidateTimerRef.current) {
+      clearTimeout(revalidateTimerRef.current);
+      revalidateTimerRef.current = null;
+      const revalidated = validateImportBatch(latestQuestionsRef.current);
+      setQuestions(revalidated.questions);
+      setSummary(revalidated.summary);
+      setDetectedChapters(revalidated.detectedChapters);
+    }
+  }, []);
 
   const runServerParse = React.useCallback(
-    async (overrideOpts?: Partial<ImportOptions>): Promise<boolean> => {
+    async (
+      overrideOpts?: Partial<ImportOptions>,
+      control?: { force?: boolean; resetMapping?: boolean },
+    ): Promise<boolean> => {
+      const effectiveFormatOverride =
+        overrideOpts && "formatOverride" in overrideOpts
+          ? overrideOpts.formatOverride
+          : formatOverride;
+      const effectiveSheetName =
+        overrideOpts && "sheetName" in overrideOpts
+          ? overrideOpts.sheetName
+          : selectedSheet;
+      const effectiveHasHeaderRow =
+        overrideOpts && "hasHeaderRow" in overrideOpts
+          ? overrideOpts.hasHeaderRow
+          : hasHeaderRow;
+      const effectiveHeaderRowCount =
+        overrideOpts && "headerRowCount" in overrideOpts
+          ? overrideOpts.headerRowCount
+          : headerRowCount;
+      const effectiveAnswerRule =
+        overrideOpts && "answerRule" in overrideOpts
+          ? overrideOpts.answerRule
+          : answerRule;
+      const effectiveMapping = control?.resetMapping
+        ? undefined
+        : overrideOpts && "columnMapping" in overrideOpts
+          ? overrideOpts.columnMapping
+          : hasAnyMapping(columnMapping)
+            ? columnMapping
+            : undefined;
+      const effectiveCsvDelim =
+        overrideOpts && "csvDelimiter" in overrideOpts
+          ? overrideOpts.csvDelimiter
+          : csvDelimiter || undefined;
+      const effectiveTermDelim =
+        overrideOpts && "termDelimiter" in overrideOpts
+          ? overrideOpts.termDelimiter
+          : termDelimiter;
+      const effectiveCardDelim =
+        overrideOpts && "cardDelimiter" in overrideOpts
+          ? overrideOpts.cardDelimiter
+          : cardDelimiter;
+
+      const effectiveOptions: ImportOptions = {
+        formatOverride: effectiveFormatOverride,
+        sheetName: effectiveSheetName,
+        hasHeaderRow: effectiveHasHeaderRow,
+        headerRowCount: effectiveHeaderRowCount,
+        answerRule: effectiveAnswerRule,
+        columnMapping: effectiveMapping,
+        csvDelimiter: effectiveCsvDelim,
+        termDelimiter: effectiveTermDelim,
+        cardDelimiter: effectiveCardDelim,
+      };
+
+      const requestKey = buildParseCacheKey(sourceVersion, effectiveOptions);
+      if (
+        !control?.force &&
+        lastParsedKeyRef.current === requestKey &&
+        hasParsedQuestionsRef.current
+      ) {
+        return true;
+      }
+
       setIsParsing(true);
       setParseError(null);
 
       try {
-        const effectiveOptions: ImportOptions = {
-          formatOverride: overrideOpts?.formatOverride ?? formatOverride,
-          sheetName: overrideOpts?.sheetName ?? selectedSheet,
-          hasHeaderRow: overrideOpts?.hasHeaderRow ?? hasHeaderRow,
-          answerRule: overrideOpts?.answerRule ?? answerRule,
-          columnMapping:
-            overrideOpts?.columnMapping ??
-            (columnMapping.prompt || columnMapping.correctAnswer
-              ? columnMapping
-              : undefined),
-          csvDelimiter: overrideOpts?.csvDelimiter ?? (csvDelimiter || undefined),
-          termDelimiter: overrideOpts?.termDelimiter ?? termDelimiter,
-          cardDelimiter: overrideOpts?.cardDelimiter ?? cardDelimiter,
-        };
-
         let response: Response;
         if (sourceMode === "file" && selectedFile) {
           const form = new FormData();
@@ -187,20 +347,34 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
         }
 
         const data = payload.data;
+        const resolvedMapping =
+          control?.resetMapping || !hasAnyMapping(columnMapping)
+            ? (data.suggestedMapping ?? EMPTY_MAPPING)
+            : (effectiveMapping ?? columnMapping);
+
         setDetectedFormat(data.format);
         setSheetNames(data.sheetNames);
         setSelectedSheet(data.selectedSheet);
+        setHeaderRowCount(data.headerRowCount);
         setDetectedColumns(data.detectedColumns);
         setSampleRows(data.sampleRows);
-        if (data.suggestedMapping && !columnMapping.prompt) {
-          setColumnMapping(data.suggestedMapping);
-        }
+        setColumnMapping(resolvedMapping);
         setQuestions(data.questions);
         setSummary(data.summary);
         setDetectedChapters(data.detectedChapters ?? []);
         setFileSizeBytes(data.fileSizeBytes ?? 0);
         setParsedFileName(data.fileName ?? selectedFile?.name ?? "pasted-input.txt");
         commitBatchIdRef.current = crypto.randomUUID();
+
+        // Store cache key matching the resolved state so unchanged Next clicks skip re-parsing
+        lastParsedKeyRef.current = buildParseCacheKey(sourceVersion, {
+          ...effectiveOptions,
+          sheetName: data.selectedSheet ?? effectiveSheetName,
+          headerRowCount: data.headerRowCount ?? effectiveHeaderRowCount,
+          columnMapping: hasAnyMapping(resolvedMapping)
+            ? resolvedMapping
+            : undefined,
+        });
         return true;
       } catch (err) {
         const msg =
@@ -223,25 +397,44 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
       csvDelimiter,
       formatOverride,
       hasHeaderRow,
+      headerRowCount,
       locale,
       rawText,
       selectedFile,
       selectedSheet,
       sourceMode,
+      sourceVersion,
       studySetId,
       termDelimiter,
     ],
   );
 
+  // O(1) immediate single-item validation + debounced batch duplicate revalidation (fixes 105ms freeze on 10k rows)
   const handleUpdateQuestion = React.useCallback(
     (tempId: string, updater: (q: ParsedQuestion) => ParsedQuestion) => {
       setQuestions((prev) => {
-        const nextList = prev.map((q) => (q.tempId === tempId ? updater(q) : q));
-        const revalidated = validateImportBatch(nextList);
+        const idx = prev.findIndex((q) => q.tempId === tempId);
+        if (idx === -1) return prev;
+        const nextList = prev.slice();
+        const updated = updater(prev[idx]);
+        nextList[idx] = validateParsedQuestion(updated, idx, {
+          isDuplicate: updated.isDuplicate,
+        });
+        latestQuestionsRef.current = nextList;
+        setSummary(computeImportSummary(nextList));
+        return nextList;
+      });
+
+      if (revalidateTimerRef.current) {
+        clearTimeout(revalidateTimerRef.current);
+      }
+      revalidateTimerRef.current = setTimeout(() => {
+        revalidateTimerRef.current = null;
+        const revalidated = validateImportBatch(latestQuestionsRef.current);
+        setQuestions(revalidated.questions);
         setSummary(revalidated.summary);
         setDetectedChapters(revalidated.detectedChapters);
-        return revalidated.questions;
-      });
+      }, BATCH_REVALIDATE_DEBOUNCE_MS);
     },
     [],
   );
@@ -378,7 +571,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
   ]);
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-5xl space-y-6">
       {/* Top Breadcrumb & Heading */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -410,6 +603,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
               <li key={s.step} className="flex flex-1 items-center gap-2">
                 <button
                   type="button"
+                  aria-current={isActive ? "step" : undefined}
                   disabled={s.step > step || commitProgress.status === "committing"}
                   onClick={() => s.step < step && setStep(s.step)}
                   className={cn(
@@ -433,7 +627,9 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
                       s.step
                     )}
                   </span>
-                  <span className="hidden whitespace-nowrap md:inline">{s.short}</span>
+                  <span className="sr-only md:not-sr-only md:whitespace-nowrap">
+                    {s.short}
+                  </span>
                 </button>
                 {s.step < steps.length && (
                   <div
@@ -463,19 +659,32 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
             <StepSourceInput
               locale={locale}
               sourceMode={sourceMode}
-              onSourceModeChange={setSourceMode}
+              onSourceModeChange={(m) => {
+                setSourceMode(m);
+                setSourceVersion((v) => v + 1);
+                lastParsedKeyRef.current = null;
+              }}
               selectedFile={selectedFile}
               onSelectFile={(f) => {
                 setSelectedFile(f);
                 setFormatOverride(undefined);
-                setColumnMapping({ prompt: null, correctAnswer: null });
+                setSelectedSheet(undefined);
+                setHeaderRowCount(undefined);
+                setColumnMapping(EMPTY_MAPPING);
+                setSourceVersion((v) => v + 1);
+                lastParsedKeyRef.current = null;
               }}
               rawText={rawText}
-              onRawTextChange={setRawText}
+              onRawTextChange={(txt) => {
+                setRawText(txt);
+                setSourceVersion((v) => v + 1);
+                lastParsedKeyRef.current = null;
+              }}
               isParsing={isParsing}
               errorMessage={parseError}
+              headingRef={handleStepHeadingMount}
               onContinue={async () => {
-                const ok = await runServerParse();
+                const ok = await runServerParse(undefined, { resetMapping: true });
                 if (ok) setStep(2);
               }}
             />
@@ -486,16 +695,41 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
               locale={locale}
               detectedFormat={detectedFormat}
               formatOverride={formatOverride}
-              onFormatOverrideChange={(fmt) => setFormatOverride(fmt)}
+              onFormatOverrideChange={(fmt) => {
+                setFormatOverride(fmt);
+                setColumnMapping(EMPTY_MAPPING);
+                lastParsedKeyRef.current = null;
+              }}
               sheetNames={sheetNames}
               selectedSheet={selectedSheet}
               onSheetChange={async (sheet) => {
                 setSelectedSheet(sheet);
-                setColumnMapping({ prompt: null, correctAnswer: null });
-                await runServerParse({ sheetName: sheet, columnMapping: undefined });
+                setHeaderRowCount(undefined);
+                setColumnMapping(EMPTY_MAPPING);
+                await runServerParse(
+                  { sheetName: sheet, headerRowCount: undefined },
+                  { force: true, resetMapping: true },
+                );
               }}
               hasHeaderRow={hasHeaderRow}
-              onHasHeaderRowChange={(val) => setHasHeaderRow(val)}
+              onHasHeaderRowChange={async (val) => {
+                setHasHeaderRow(val);
+                setHeaderRowCount(undefined);
+                setColumnMapping(EMPTY_MAPPING);
+                await runServerParse(
+                  { hasHeaderRow: val, headerRowCount: undefined },
+                  { force: true, resetMapping: true },
+                );
+              }}
+              headerRowCount={headerRowCount ?? 1}
+              onHeaderRowCountChange={async (rows) => {
+                setHeaderRowCount(rows);
+                setColumnMapping(EMPTY_MAPPING);
+                await runServerParse(
+                  { headerRowCount: rows },
+                  { force: true, resetMapping: true },
+                );
+              }}
               detectedColumns={detectedColumns}
               sampleRows={sampleRows}
               columnMapping={columnMapping}
@@ -507,6 +741,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
               csvDelimiter={csvDelimiter}
               onCsvDelimiterChange={setCsvDelimiter}
               isParsing={isParsing}
+              headingRef={handleStepHeadingMount}
               onBack={() => setStep(1)}
               onNext={async () => {
                 const ok = await runServerParse();
@@ -522,6 +757,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
               answerRule={answerRule}
               onAnswerRuleChange={setAnswerRule}
               isParsing={isParsing}
+              headingRef={handleStepHeadingMount}
               onBack={() => setStep(2)}
               onNext={async () => {
                 const ok = await runServerParse({ answerRule });
@@ -534,7 +770,12 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
             <div className="space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="text-lg font-semibold text-foreground">
+                  <h2
+                    ref={handleStepHeadingMount}
+                    data-import-step="4"
+                    tabIndex={-1}
+                    className="rounded-sm text-lg font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  >
                     {locale === "en"
                       ? "Step 4: Parse & Preview Questions"
                       : "Bước 4: Xem trước kết quả phân tích"}
@@ -583,7 +824,12 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
           {step === 5 && (
             <div className="space-y-5">
               <div>
-                <h2 className="text-lg font-semibold text-foreground">
+                <h2
+                  ref={handleStepHeadingMount}
+                  data-import-step="5"
+                  tabIndex={-1}
+                  className="rounded-sm text-lg font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
                   {locale === "en"
                     ? "Step 5: Inline Validation, Editing & Options"
                     : "Bước 5: Kiểm tra, chỉnh sửa trực tiếp & Tùy chọn"}
@@ -633,6 +879,7 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
                   type="button"
                   className="min-h-[44px]"
                   onClick={() => {
+                    flushBatchRevalidation();
                     setCommitProgress({
                       status: "idle",
                       completedChunks: 0,
@@ -658,12 +905,14 @@ export function ImportWizard({ studySetId, studySetTitle }: ImportWizardProps) {
               locale={locale}
               studySetId={studySetId}
               studySetTitle={studySetTitle}
+              existingQuestionCount={existingQuestionCount}
               readyCount={readyToImportQuestions.length}
               errorCount={summary.errorCount}
               skipInvalidRows={skipInvalidRows}
               mode={mode}
               duplicatePolicy={duplicatePolicy}
               progress={commitProgress}
+              headingRef={handleStepHeadingMount}
               onBack={() => setStep(5)}
               onStartCommit={handleStartCommit}
             />

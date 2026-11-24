@@ -1,11 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
   apiSuccess,
+  AppError,
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
+import {
+  chunkArray,
+  fetchInChunks,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import {
   bulkDeleteQuestionsSchema,
@@ -42,7 +49,11 @@ export async function POST(
 
     const basePos = lastQ ? lastQ.position + 1 : 0;
 
+    // Assign deterministic UUIDs upfront for 1:1 option/answer/tag mapping
+    const preparedIds = questions.map(() => randomUUID());
+
     const questionRows = questions.map((q, idx) => ({
+      id: preparedIds[idx],
       study_set_id: setId,
       question_type: q.question_type,
       position: q.position ?? basePos + idx,
@@ -57,14 +68,11 @@ export async function POST(
       source_metadata: (q.source_metadata ?? {}) as Json,
     }));
 
-    const { data: inserted, error: insErr } = await supabase
-      .from("questions")
-      .insert(questionRows)
-      .select("id, position");
+    for (const batch of chunkArray(questionRows, 200)) {
+      const { error: insErr } = await supabase.from("questions").insert(batch);
+      if (insErr) throw insErr;
+    }
 
-    if (insErr) throw insErr;
-
-    const insertedList = inserted ?? [];
     const optionsToInsert: Array<{
       question_id: string;
       study_set_id: string;
@@ -83,10 +91,12 @@ export async function POST(
       match_mode: "exact" | "case_insensitive" | "ignore_diacritics" | "numeric";
     }> = [];
 
+    const allTagSlugs = new Map<string, string>();
+    const questionSlugLinks: Array<{ question_id: string; slug: string }> = [];
+
     for (let i = 0; i < questions.length; i += 1) {
       const q = questions[i];
-      const createdId = insertedList[i]?.id;
-      if (!createdId) continue;
+      const createdId = preparedIds[i];
 
       for (let oIdx = 0; oIdx < (q.options ?? []).length; oIdx += 1) {
         const opt = q.options![oIdx];
@@ -110,26 +120,67 @@ export async function POST(
           match_mode: acc.match_mode,
         });
       }
+
+      for (const tagName of q.tags ?? []) {
+        const slug = slugifyTag(tagName);
+        allTagSlugs.set(slug, tagName.trim());
+        questionSlugLinks.push({ question_id: createdId, slug });
+      }
     }
 
-    if (optionsToInsert.length > 0) {
+    for (const batch of chunkArray(optionsToInsert, 400)) {
       const { error: optErr } = await supabase
         .from("question_options")
-        .insert(optionsToInsert);
+        .insert(batch);
       if (optErr) throw optErr;
     }
 
-    if (acceptedToInsert.length > 0) {
+    for (const batch of chunkArray(acceptedToInsert, 400)) {
       const { error: accErr } = await supabase
         .from("question_accepted_answers")
-        .insert(acceptedToInsert);
+        .insert(batch);
       if (accErr) throw accErr;
+    }
+
+    if (allTagSlugs.size > 0) {
+      const { data: savedTags, error: tagErr } = await supabase
+        .from("tags")
+        .upsert(
+          Array.from(allTagSlugs.entries()).map(([slug, name]) => ({
+            owner_id: user.id,
+            name,
+            slug,
+          })),
+          { onConflict: "owner_id,slug" },
+        )
+        .select("id, slug");
+      if (tagErr) throw tagErr;
+
+      const slugToId = new Map((savedTags ?? []).map((t) => [t.slug, t.id]));
+      const qtRows = questionSlugLinks
+        .map((link) => {
+          const tagId = slugToId.get(link.slug);
+          if (!tagId) return null;
+          return {
+            question_id: link.question_id,
+            tag_id: tagId,
+            study_set_id: setId,
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+
+      for (const batch of chunkArray(qtRows, 400)) {
+        const { error: qtErr } = await supabase
+          .from("question_tags")
+          .upsert(batch, { onConflict: "question_id,tag_id", ignoreDuplicates: true });
+        if (qtErr) throw qtErr;
+      }
     }
 
     return apiSuccess(
       {
-        inserted_count: insertedList.length,
-        question_ids: insertedList.map((q) => q.id),
+        inserted_count: preparedIds.length,
+        question_ids: preparedIds,
       },
       undefined,
       { status: 201 },
@@ -153,17 +204,42 @@ export async function PATCH(
     const body = await parseJsonBody(request);
     const input = bulkUpdateQuestionsSchema.parse(body);
 
+    const uniqueRequestedIds = Array.from(new Set(input.question_ids));
+
+    // SH-012 / SEC-003 + SH-005: Verify EVERY question_id actually belongs to `setId` in safe chunks!
+    const verifiedRows = await fetchInChunks(
+      uniqueRequestedIds,
+      async (chunk) =>
+        supabase
+          .from("questions")
+          .select("id")
+          .eq("study_set_id", setId)
+          .in("id", chunk),
+      SAFE_IN_CHUNK_SIZE,
+    );
+
+    const verifiedIds = verifiedRows.map((r) => r.id);
+    if (verifiedIds.length !== uniqueRequestedIds.length) {
+      throw new AppError(
+        "INVALID_REFERENCE",
+        "One or more question IDs do not belong to this study set.",
+        400,
+      );
+    }
+
     const updates: TablesUpdate<"questions"> = {};
     if (input.chapter !== undefined) updates.chapter = input.chapter;
     if (input.difficulty !== undefined) updates.difficulty = input.difficulty;
 
     if (Object.keys(updates).length > 0) {
-      const { error: updErr } = await supabase
-        .from("questions")
-        .update(updates)
-        .eq("study_set_id", setId)
-        .in("id", input.question_ids);
-      if (updErr) throw updErr;
+      for (const chunk of chunkArray(verifiedIds, SAFE_IN_CHUNK_SIZE)) {
+        const { error: updErr } = await supabase
+          .from("questions")
+          .update(updates)
+          .eq("study_set_id", setId)
+          .in("id", chunk);
+        if (updErr) throw updErr;
+      }
     }
 
     if (input.add_tags && input.add_tags.length > 0) {
@@ -189,31 +265,33 @@ export async function PATCH(
         tag_id: string;
         study_set_id: string;
       }> = [];
-      for (const qId of input.question_ids) {
+      for (const qId of verifiedIds) {
         for (const t of tags ?? []) {
           joinRows.push({ question_id: qId, tag_id: t.id, study_set_id: setId });
         }
       }
-      if (joinRows.length > 0) {
+      for (const batch of chunkArray(joinRows, 400)) {
         const { error: qtErr } = await supabase
           .from("question_tags")
-          .upsert(joinRows, { onConflict: "question_id,tag_id" });
+          .upsert(batch, { onConflict: "question_id,tag_id" });
         if (qtErr) throw qtErr;
       }
     }
 
     if (input.remove_tag_ids && input.remove_tag_ids.length > 0) {
-      const { error: remErr } = await supabase
-        .from("question_tags")
-        .delete()
-        .eq("study_set_id", setId)
-        .in("question_id", input.question_ids)
-        .in("tag_id", input.remove_tag_ids);
-      if (remErr) throw remErr;
+      for (const chunk of chunkArray(verifiedIds, SAFE_IN_CHUNK_SIZE)) {
+        const { error: remErr } = await supabase
+          .from("question_tags")
+          .delete()
+          .eq("study_set_id", setId)
+          .in("question_id", chunk)
+          .in("tag_id", input.remove_tag_ids);
+        if (remErr) throw remErr;
+      }
     }
 
     return apiSuccess({
-      updated_count: input.question_ids.length,
+      updated_count: verifiedIds.length,
     });
   } catch (err) {
     return handleApiError(err);
@@ -233,18 +311,24 @@ export async function DELETE(
 
     const body = await parseJsonBody(request);
     const { question_ids } = bulkDeleteQuestionsSchema.parse(body);
+    const uniqueIds = Array.from(new Set(question_ids));
 
-    const { data, error } = await supabase
-      .from("questions")
-      .delete()
-      .eq("study_set_id", setId)
-      .in("id", question_ids)
-      .select("id");
+    // SH-005: Chunk bulk deletes <= 100 UUIDs to avoid HTTP 414
+    let deletedCount = 0;
+    for (const chunk of chunkArray(uniqueIds, SAFE_IN_CHUNK_SIZE)) {
+      const { data, error } = await supabase
+        .from("questions")
+        .delete()
+        .eq("study_set_id", setId)
+        .in("id", chunk)
+        .select("id");
 
-    if (error) throw error;
+      if (error) throw error;
+      deletedCount += (data ?? []).length;
+    }
 
     return apiSuccess({
-      deleted_count: (data ?? []).length,
+      deleted_count: deletedCount,
     });
   } catch (err) {
     return handleApiError(err);

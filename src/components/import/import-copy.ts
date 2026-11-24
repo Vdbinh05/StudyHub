@@ -1,9 +1,30 @@
-import type { Locale } from "@/types/domain";
+import type { Locale, QuestionType } from "@/types/domain";
 import type {
   AnswerDetectionSource,
   AnswerRuleMode,
   ImportFormat,
 } from "@/types/import";
+
+export function getQuestionTypeLabel(
+  questionType: QuestionType,
+  locale: Locale,
+): string {
+  const vi: Record<QuestionType, string> = {
+    single_choice: "Một đáp án",
+    multiple_choice: "Nhiều đáp án",
+    true_false: "Đúng / Sai",
+    flashcard: "Thẻ ghi nhớ",
+    short_answer: "Tự luận ngắn",
+  };
+  const en: Record<QuestionType, string> = {
+    single_choice: "Single Choice",
+    multiple_choice: "Multiple Choice",
+    true_false: "True / False",
+    flashcard: "Flashcard",
+    short_answer: "Short Answer",
+  };
+  return locale === "en" ? en[questionType] : vi[questionType];
+}
 
 export function getImportStepLabels(locale: Locale): Array<{
   step: number;

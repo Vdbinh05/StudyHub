@@ -3,6 +3,7 @@
 import * as React from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -13,10 +14,13 @@ import {
   Flame,
   Play,
   Target,
+  XCircle,
 } from "lucide-react";
 import {
   apiFetch,
   formatMinutes,
+  getFriendlyErrorMessage,
+  isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
@@ -35,6 +39,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
+  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
@@ -67,6 +72,26 @@ const AccuracyTrendChart = dynamic(
 
 type StatsRange = "7d" | "30d" | "90d";
 
+const GENERIC_CHAPTER_PLACEHOLDERS = new Set([
+  "",
+  "general",
+  "chung",
+  "uncategorized",
+  "none",
+  "null",
+]);
+
+function isRealChapter(chapter: string | null | undefined): chapter is string {
+  if (!chapter) return false;
+  return !GENERIC_CHAPTER_PLACEHOLDERS.has(chapter.trim().toLowerCase());
+}
+
+function parseRangeFromDays(rawDays: string | null): StatsRange {
+  if (rawDays === "7" || rawDays === "7d") return "7d";
+  if (rawDays === "90" || rawDays === "90d") return "90d";
+  return "30d";
+}
+
 function parseStatistics(raw: unknown): StatisticsSummary {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const summary = (
@@ -84,11 +109,17 @@ function parseStatistics(raw: unknown): StatisticsSummary {
   const dailyCorrect = dailyActivity.reduce((acc, d) => acc + d.correct, 0);
 
   const totalAnswered =
-    Number(summary.totalAnswered ?? summary.total_answered ?? Math.max(summedAnswered, dailyAnswered)) ||
-    0;
+    Number(
+      summary.totalAnswered ??
+        summary.total_answered ??
+        Math.max(summedAnswered, dailyAnswered),
+    ) || 0;
   const totalCorrect =
-    Number(summary.totalCorrect ?? summary.total_correct ?? Math.max(summedCorrect, dailyCorrect)) ||
-    0;
+    Number(
+      summary.totalCorrect ??
+        summary.total_correct ??
+        Math.max(summedCorrect, dailyCorrect),
+    ) || 0;
   const overallAccuracy =
     summary.overall_accuracy_percent !== undefined ||
     summary.overallAccuracy !== undefined ||
@@ -156,16 +187,26 @@ function parseStatistics(raw: unknown): StatisticsSummary {
   };
 }
 
-export function StatisticsView() {
+function StatisticsViewInner() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
-  const [range, setRange] = React.useState<StatsRange>("30d");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const configured = isSupabaseConfiguredClient();
+
+  const range = parseRangeFromDays(searchParams.get("days"));
+  const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
+
+  const setRange = (next: StatsRange) => {
+    const nextDays = next === "7d" ? "7" : next === "90d" ? "90" : "30";
+    router.replace(`/statistics?days=${nextDays}`);
+  };
 
   const { data, isLoading, error, refetch } = useQuery<StatisticsSummary>({
-    queryKey: ["statistics", range],
+    queryKey: ["statistics", days],
+    enabled: configured,
     queryFn: async () => {
-      const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
-      const res = await apiFetch<unknown>(`/api/statistics?days=${days}&range=${range}`);
+      const res = await apiFetch<unknown>(`/api/statistics?days=${days}`);
       return parseStatistics(res.data);
     },
   });
@@ -177,7 +218,7 @@ export function StatisticsView() {
   ];
 
   return (
-    <FadeIn className="space-y-6">
+    <FadeIn aboveFold className="space-y-6">
       <PageHeader
         title={t("stats.title")}
         description={t("stats.subtitle")}
@@ -195,8 +236,8 @@ export function StatisticsView() {
                 aria-pressed={range === opt.value}
                 className={
                   range === opt.value
-                    ? "bg-card text-foreground rounded-md px-3 py-1 text-xs font-semibold shadow-xs"
-                    : "text-muted-foreground hover:text-foreground rounded-md px-3 py-1 text-xs font-medium transition-colors"
+                    ? "bg-card text-foreground min-h-9 rounded-md px-3 py-1 text-xs font-semibold shadow-xs"
+                    : "text-muted-foreground hover:text-foreground min-h-9 rounded-md px-3 py-1 text-xs font-medium transition-colors"
                 }
               >
                 {opt.label}
@@ -206,7 +247,13 @@ export function StatisticsView() {
         }
       />
 
-      {isLoading ? (
+      {!configured ? (
+        <EmptyState
+          icon={BarChart3}
+          title={vi ? "Chưa thể tải thống kê học tập" : "Statistics unavailable"}
+          description={t("common.serviceUnavailableDesc")}
+        />
+      ) : isLoading ? (
         <div className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {Array.from({ length: 4 }).map((_, i) => (
@@ -222,7 +269,7 @@ export function StatisticsView() {
         <EmptyState
           icon={AlertCircle}
           title={vi ? "Không thể tải thống kê" : "Unable to load statistics"}
-          description={error instanceof Error ? error.message : t("common.errorGeneric")}
+          description={getFriendlyErrorMessage(error, locale)}
           action={<Button onClick={() => void refetch()}>{t("common.retry")}</Button>}
         />
       ) : !data || (data.totalAnswered === 0 && data.examTrend.length === 0) ? (
@@ -236,6 +283,11 @@ export function StatisticsView() {
           }
           action={
             <Button asChild>
+              <Link href="/exams/new">{t("nav.customExam")}</Link>
+            </Button>
+          }
+          secondaryAction={
+            <Button asChild variant="outline">
               <Link href="/library">{t("library.title")}</Link>
             </Button>
           }
@@ -254,7 +306,9 @@ export function StatisticsView() {
                     {data.streakDays} {vi ? "ngày" : "days"}
                   </p>
                   <p className="text-muted-foreground mt-0.5 text-xs">
-                    {vi ? `Kỷ lục: ${data.longestStreakDays} ngày` : `Best: ${data.longestStreakDays} days`}
+                    {vi
+                      ? `Kỷ lục: ${data.longestStreakDays} ngày`
+                      : `Best: ${data.longestStreakDays} days`}
                   </p>
                 </div>
                 <div className="bg-warning-subtle text-warning-subtle-foreground flex size-9 items-center justify-center rounded-lg">
@@ -311,7 +365,9 @@ export function StatisticsView() {
                     {data.masteredQuestions}
                   </p>
                   <p className="text-muted-foreground mt-0.5 text-xs">
-                    {vi ? `${data.dueForReview} câu cần ôn hôm nay` : `${data.dueForReview} due today`}
+                    {vi
+                      ? `${data.dueForReview} câu cần ôn hôm nay`
+                      : `${data.dueForReview} due today`}
                   </p>
                 </div>
                 <div className="bg-success-subtle text-success-subtle-foreground flex size-9 items-center justify-center rounded-lg">
@@ -374,8 +430,8 @@ export function StatisticsView() {
                 <CardTitle className="text-base">{t("stats.masteryBreakdown")}</CardTitle>
                 <CardDescription>
                   {vi
-                    ? "Phân bổ câu hỏi theo thuật toán SM-2."
-                    : "Deterministic SM-2 mastery levels."}
+                    ? "Phân bổ câu hỏi theo lịch lặp lại ngắt quãng."
+                    : "Spaced-repetition mastery distribution."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -426,12 +482,15 @@ export function StatisticsView() {
                 ) : (
                   <ul className="divide-border divide-y">
                     {data.weakTopics.map((topic, idx) => {
+                      const validChapter = isRealChapter(topic.chapter)
+                        ? topic.chapter
+                        : null;
                       const practiceHref = topic.studySetId
-                        ? `/sets/${topic.studySetId}/practice${topic.chapter ? `?chapter=${encodeURIComponent(topic.chapter)}` : ""}`
+                        ? `/sets/${topic.studySetId}/practice${validChapter ? `?chapter=${encodeURIComponent(validChapter)}` : ""}`
                         : "/review";
                       return (
                         <li
-                          key={`${topic.studySetId}-${topic.chapter ?? "all"}-${idx}`}
+                          key={`${topic.studySetId}-${validChapter ?? "all"}-${idx}`}
                           className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
                         >
                           <div className="min-w-0">
@@ -439,8 +498,8 @@ export function StatisticsView() {
                               {topic.studySetTitle}
                             </p>
                             <p className="text-muted-foreground text-xs">
-                              {topic.chapter
-                                ? `${vi ? "Chương" : "Chapter"}: ${topic.chapter}`
+                              {validChapter
+                                ? `${vi ? "Chương" : "Chapter"}: ${validChapter}`
                                 : vi
                                   ? "Toàn bộ học phần"
                                   : "Entire study set"}
@@ -452,10 +511,18 @@ export function StatisticsView() {
                           </div>
                           <div className="flex items-center gap-2.5">
                             <Badge variant={topic.accuracy < 60 ? "destructive" : "warning"}>
-                              {Math.round(topic.accuracy)}%
+                              {topic.accuracy < 60 ? (
+                                <XCircle className="size-3" aria-hidden="true" />
+                              ) : (
+                                <AlertTriangle className="size-3" aria-hidden="true" />
+                              )}
+                              <span>{Math.round(topic.accuracy)}%</span>
                             </Badge>
                             <Button size="sm" variant="outline" asChild>
-                              <Link href={practiceHref}>
+                              <Link
+                                href={practiceHref}
+                                aria-label={`${vi ? "Ôn ngay" : "Practice"} ${topic.studySetTitle}`}
+                              >
                                 <Play className="size-3.5" aria-hidden="true" />
                                 <span>{vi ? "Ôn ngay" : "Practice"}</span>
                               </Link>
@@ -475,21 +542,32 @@ export function StatisticsView() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">
-                  {vi ? "Hiệu quả theo học phần & chương" : "Performance by Study Set & Chapter"}
+                  {vi
+                    ? "Hiệu quả theo học phần & chương"
+                    : "Performance by Study Set & Chapter"}
                 </CardTitle>
               </CardHeader>
               <CardContent className="p-0">
                 <div
                   tabIndex={0}
                   role="region"
-                  aria-label={vi ? "Bảng hiệu quả theo học phần" : "Performance by set table"}
-                  className="overflow-x-auto"
+                  aria-label={
+                    vi ? "Bảng hiệu quả theo học phần" : "Performance by set table"
+                  }
+                  className="responsive-table-region"
                 >
                   <Table>
+                    <TableCaption className="sr-only">
+                      {vi
+                        ? "Hiệu quả học tập theo từng học phần và chương"
+                        : "Accuracy performance by study set and chapter"}
+                    </TableCaption>
                     <TableHeader>
                       <TableRow>
                         <TableHead scope="col">{vi ? "Học phần" : "Study Set"}</TableHead>
-                        <TableHead scope="col">{vi ? "Chương / Môn" : "Chapter / Subject"}</TableHead>
+                        <TableHead scope="col">
+                          {vi ? "Chương / Môn" : "Chapter / Subject"}
+                        </TableHead>
                         <TableHead scope="col">{vi ? "Lượt làm" : "Answered"}</TableHead>
                         <TableHead scope="col">{t("study.accuracy")}</TableHead>
                         <TableHead scope="col" className="text-right">
@@ -498,39 +576,53 @@ export function StatisticsView() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.performanceBySet.map((row, idx) => (
-                        <TableRow key={`${row.studySetId}-${row.chapter ?? idx}`}>
-                          <TableCell className="font-medium">{row.studySetTitle}</TableCell>
-                          <TableCell className="text-muted-foreground text-xs">
-                            {row.chapter ?? row.subject ?? "—"}
-                          </TableCell>
-                          <TableCell className="font-mono text-xs tabular-nums">
-                            {row.totalAnswered}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant={
-                                row.accuracy >= 80
-                                  ? "success"
-                                  : row.accuracy >= 60
-                                    ? "warning"
-                                    : "destructive"
-                              }
-                            >
-                              {Math.round(row.accuracy)}%
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {row.studySetId && (
-                              <Button variant="ghost" size="sm" asChild>
-                                <Link href={`/sets/${row.studySetId}`}>
-                                  {vi ? "Mở học phần" : "Open set"}
-                                </Link>
-                              </Button>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {data.performanceBySet.map((row, idx) => {
+                        const displayChapter = isRealChapter(row.chapter)
+                          ? row.chapter
+                          : (row.subject ?? "—");
+                        return (
+                          <TableRow key={`${row.studySetId}-${row.chapter ?? idx}`}>
+                            <TableCell className="font-medium">
+                              {row.studySetTitle}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground text-xs">
+                              {displayChapter}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums">
+                              {row.totalAnswered}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={
+                                  row.accuracy >= 80
+                                    ? "success"
+                                    : row.accuracy >= 60
+                                      ? "warning"
+                                      : "destructive"
+                                }
+                              >
+                                {row.accuracy >= 80 ? (
+                                  <CheckCircle2 className="size-3" aria-hidden="true" />
+                                ) : row.accuracy >= 60 ? (
+                                  <AlertTriangle className="size-3" aria-hidden="true" />
+                                ) : (
+                                  <XCircle className="size-3" aria-hidden="true" />
+                                )}
+                                <span>{Math.round(row.accuracy)}%</span>
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              {row.studySetId && (
+                                <Button variant="ghost" size="sm" asChild>
+                                  <Link href={`/sets/${row.studySetId}`}>
+                                    {vi ? "Mở học phần" : "Open set"}
+                                  </Link>
+                                </Button>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
@@ -540,5 +632,13 @@ export function StatisticsView() {
         </>
       )}
     </FadeIn>
+  );
+}
+
+export function StatisticsView() {
+  return (
+    <React.Suspense fallback={<Skeleton className="h-96 w-full rounded-xl" />}>
+      <StatisticsViewInner />
+    </React.Suspense>
   );
 }

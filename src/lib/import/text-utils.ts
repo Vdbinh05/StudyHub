@@ -1,13 +1,10 @@
 export const OPTION_LABELS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
 
 /**
- * Strip UTF-8 BOM (\uFEFF) if present at the start of text.
+ * Strip UTF-8 BOM / zero-width BOM (\uFEFF) characters anywhere in text.
  */
 export function stripUtf8Bom(text: string): string {
-  if (text.charCodeAt(0) === 0xfeff) {
-    return text.slice(1);
-  }
-  return text;
+  return text.includes("\uFEFF") ? text.replace(/\uFEFF/g, "") : text;
 }
 
 /**
@@ -22,10 +19,10 @@ export function normalizeText(text: string): string {
 }
 
 /**
- * Normalize text for deterministic duplicate comparison (NFC, trim, collapse whitespace, lowercase).
+ * Normalize text for deterministic duplicate comparison (NFC, strip BOM, trim, collapse whitespace, lowercase).
  */
 export function normalizeForComparison(text: string): string {
-  return text
+  return stripUtf8Bom(text)
     .normalize("NFC")
     .trim()
     .replace(/\s+/g, " ")

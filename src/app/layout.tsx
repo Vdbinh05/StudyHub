@@ -15,10 +15,12 @@ export const metadata: Metadata = {
     template: "%s | StudyHub",
   },
   description:
-    "Nền tảng tự học, ôn tập flashcard, nhập đề thông minh không dùng AI và luyện thi trắc nghiệm dành cho học sinh, sinh viên và bạn bè.",
+    "Nền tảng tự học, ôn tập flashcard, nhập đề chính xác từ DOCX/XLSX/TXT và luyện thi trắc nghiệm nhiều môn dành cho học sinh, sinh viên và bạn bè.",
 };
 
 export const viewport: Viewport = {
+  colorScheme: "light dark",
+  viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#f8fafc" },
     { media: "(prefers-color-scheme: dark)", color: "#0b1120" },
@@ -34,10 +36,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="vi" suppressHydrationWarning className={inter.variable}>
-      <body className="min-h-screen bg-background font-sans text-foreground antialiased">
-        <a href="#main-content" className="skip-to-content">
-          Chuyển đến nội dung chính
-        </a>
+      <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
         <AppProviders>{children}</AppProviders>
       </body>
     </html>

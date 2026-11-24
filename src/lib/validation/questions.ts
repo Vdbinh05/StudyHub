@@ -39,39 +39,118 @@ const baseQuestionSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
 });
 
-export const createQuestionSchema = baseQuestionSchema.superRefine((data, ctx) => {
-  if (
-    data.question_type === "single_choice" ||
-    data.question_type === "multiple_choice" ||
-    data.question_type === "true_false"
-  ) {
-    if (!data.options || data.options.length < 2) {
+function validateChoiceOptions(
+  questionType: string | undefined,
+  options: Array<{ is_correct: boolean }> | undefined,
+  ctx: z.RefinementCtx,
+  requireWhenMissing: boolean,
+): void {
+  const isChoice =
+    questionType === "single_choice" ||
+    questionType === "multiple_choice" ||
+    questionType === "true_false";
+
+  if (!isChoice && options === undefined) {
+    return;
+  }
+
+  if (options === undefined) {
+    if (isChoice && requireWhenMissing) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         path: ["options"],
         message: "Choice questions require at least 2 options.",
       });
-    } else if (!data.options.some((opt) => opt.is_correct)) {
+    }
+    return;
+  }
+
+  if (isChoice || options.length > 0) {
+    if (options.length < 2) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
+        path: ["options"],
+        message: "Choice questions require at least 2 options.",
+      });
+      return;
+    }
+
+    const correctCount = options.filter((opt) => opt.is_correct).length;
+    if (correctCount < 1) {
+      ctx.addIssue({
+        code: "custom",
         path: ["options"],
         message: "Choice questions require at least 1 correct option.",
       });
+    } else if (
+      (questionType === "single_choice" || questionType === "true_false") &&
+      correctCount > 1
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "Single-choice and true/false questions must have exactly 1 correct option.",
+      });
     }
   }
+}
+
+export const createQuestionSchema = baseQuestionSchema.superRefine((data, ctx) => {
+  validateChoiceOptions(data.question_type, data.options, ctx, true);
+
   if (
     data.question_type === "flashcard" &&
     (!data.back_text || data.back_text.trim().length === 0)
   ) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["back_text"],
       message: "Flashcards require back_text.",
     });
   }
+
+  if (
+    data.question_type === "short_answer" &&
+    (!data.accepted_answers || data.accepted_answers.length === 0)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["accepted_answers"],
+      message: "Short-answer questions require at least 1 accepted answer.",
+    });
+  }
 });
 
-export const updateQuestionSchema = baseQuestionSchema.partial();
+// SH-025 / BUG-017: Validate option/flashcard/short_answer invariants on PATCH too!
+export const updateQuestionSchema = baseQuestionSchema
+  .partial()
+  .superRefine((data, ctx) => {
+    validateChoiceOptions(data.question_type, data.options, ctx, false);
+
+    if (
+      data.question_type === "flashcard" &&
+      data.back_text !== undefined &&
+      (!data.back_text || data.back_text.trim().length === 0)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["back_text"],
+        message: "Flashcards require non-empty back_text.",
+      });
+    }
+
+    if (
+      data.question_type === "short_answer" &&
+      data.accepted_answers !== undefined &&
+      data.accepted_answers.length === 0
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["accepted_answers"],
+        message: "Short-answer questions require at least 1 accepted answer.",
+      });
+    }
+  });
 
 export const listQuestionsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),

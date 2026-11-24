@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { AlertCircle } from "lucide-react";
@@ -6,6 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SUPABASE_NOT_CONFIGURED_MESSAGE } from "@/lib/supabase/env";
 import { tryCreateClient } from "@/lib/supabase/server";
+
+export const metadata: Metadata = {
+  title: "Nhập câu hỏi — StudyHub",
+};
 
 interface ImportPageProps {
   params: Promise<{ id: string }>;
@@ -46,7 +51,7 @@ export default async function StudySetImportPage({ params }: ImportPageProps) {
 
   const { data: studySet } = await supabase
     .from("study_sets")
-    .select("id, title, owner_id")
+    .select("id, title, owner_id, question_count")
     .eq("id", id)
     .maybeSingle();
 
@@ -89,5 +94,11 @@ export default async function StudySetImportPage({ params }: ImportPageProps) {
     );
   }
 
-  return <ImportWizard studySetId={studySet.id} studySetTitle={studySet.title} />;
+  return (
+    <ImportWizard
+      studySetId={studySet.id}
+      studySetTitle={studySet.title}
+      existingQuestionCount={studySet.question_count ?? 0}
+    />
+  );
 }

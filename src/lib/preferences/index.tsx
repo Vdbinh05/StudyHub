@@ -1,0 +1,455 @@
+"use client";
+
+import * as React from "react";
+import { usePathname } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
+import {
+  ApiError,
+  apiFetch,
+  isSupabaseConfiguredClient,
+} from "@/components/layout/api-client";
+import { useI18n } from "@/lib/i18n";
+import type { Locale, ThemePreference, UserPreferences } from "@/types/domain";
+
+const STORAGE_KEY = "studyhub-user-preferences";
+
+const PUBLIC_UNAUTH_PATHS = new Set([
+  "/",
+  "/login",
+  "/register",
+  "/forgot-password",
+  "/reset-password",
+]);
+
+export type FeedbackSoundKind = "correct" | "wrong" | "complete" | "flip";
+
+export interface StudyHubPreferences {
+  language: Locale;
+  theme: ThemePreference;
+  daily_goal: number;
+  /** Alias for `daily_goal` kept permanently in sync for learning/exam consumers */
+  daily_goal_questions: number;
+  default_shuffle_questions: boolean;
+  default_shuffle_options: boolean;
+  show_instant_feedback: boolean;
+  sound_effects: boolean;
+  reduced_motion: boolean;
+}
+
+export interface UpdateUserPreferencesInput {
+  language?: Locale;
+  theme?: ThemePreference;
+  daily_goal?: number;
+  daily_goal_questions?: number;
+  default_shuffle_questions?: boolean;
+  default_shuffle_options?: boolean;
+  show_instant_feedback?: boolean;
+  sound_effects?: boolean;
+  reduced_motion?: boolean;
+}
+
+export interface UpdatePreferencesOptions {
+  persistRemote?: boolean;
+  throwOnError?: boolean;
+}
+
+export interface PreferencesContextValue {
+  preferences: StudyHubPreferences;
+  isLoading: boolean;
+  isSaving: boolean;
+  isServerSynced: boolean;
+  updatePreferences: (
+    patch: UpdateUserPreferencesInput,
+    options?: UpdatePreferencesOptions,
+  ) => Promise<StudyHubPreferences>;
+  refreshPreferences: () => Promise<void>;
+  playFeedbackSound: (kind: FeedbackSoundKind) => void;
+}
+
+export const DEFAULT_USER_PREFERENCES: StudyHubPreferences = {
+  language: "vi",
+  theme: "system",
+  daily_goal: 20,
+  daily_goal_questions: 20,
+  default_shuffle_questions: false,
+  default_shuffle_options: true,
+  show_instant_feedback: true,
+  sound_effects: false,
+  reduced_motion: false,
+};
+
+function clampDailyGoal(value: unknown, fallback = 20): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(1, Math.min(500, Math.round(num)));
+}
+
+function normalizePreferences(
+  raw: Partial<StudyHubPreferences> | Partial<UserPreferences> | null | undefined,
+  base: StudyHubPreferences = DEFAULT_USER_PREFERENCES,
+): StudyHubPreferences {
+  if (!raw) return base;
+  const rawGoal =
+    "daily_goal" in raw && raw.daily_goal !== undefined
+      ? raw.daily_goal
+      : "daily_goal_questions" in raw && raw.daily_goal_questions !== undefined
+        ? raw.daily_goal_questions
+        : base.daily_goal;
+  const goal = clampDailyGoal(rawGoal, base.daily_goal);
+
+  const language: Locale =
+    raw.language === "vi" || raw.language === "en" ? raw.language : base.language;
+  const theme: ThemePreference =
+    raw.theme === "light" || raw.theme === "dark" || raw.theme === "system"
+      ? raw.theme
+      : base.theme;
+
+  return {
+    language,
+    theme,
+    daily_goal: goal,
+    daily_goal_questions: goal,
+    default_shuffle_questions:
+      typeof raw.default_shuffle_questions === "boolean"
+        ? raw.default_shuffle_questions
+        : base.default_shuffle_questions,
+    default_shuffle_options:
+      typeof raw.default_shuffle_options === "boolean"
+        ? raw.default_shuffle_options
+        : base.default_shuffle_options,
+    show_instant_feedback:
+      typeof raw.show_instant_feedback === "boolean"
+        ? raw.show_instant_feedback
+        : base.show_instant_feedback,
+    sound_effects:
+      typeof raw.sound_effects === "boolean"
+        ? raw.sound_effects
+        : base.sound_effects,
+    reduced_motion:
+      typeof raw.reduced_motion === "boolean"
+        ? raw.reduced_motion
+        : base.reduced_motion,
+  };
+}
+
+let cachedRawPrefs: string | null | undefined;
+let cachedParsedPrefs: StudyHubPreferences = DEFAULT_USER_PREFERENCES;
+const prefsListeners = new Set<() => void>();
+
+function emitPrefsChange(): void {
+  for (const listener of prefsListeners) {
+    listener();
+  }
+}
+
+function subscribeLocalPreferences(listener: () => void): () => void {
+  prefsListeners.add(listener);
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === STORAGE_KEY) {
+      cachedRawPrefs = undefined;
+      listener();
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorage);
+  }
+  return () => {
+    prefsListeners.delete(listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", handleStorage);
+    }
+  };
+}
+
+function getLocalPreferencesSnapshot(): StudyHubPreferences {
+  if (typeof window === "undefined") return DEFAULT_USER_PREFERENCES;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (raw === cachedRawPrefs) {
+      return cachedParsedPrefs;
+    }
+    cachedRawPrefs = raw;
+    if (!raw) {
+      cachedParsedPrefs = DEFAULT_USER_PREFERENCES;
+      return cachedParsedPrefs;
+    }
+    const parsed = JSON.parse(raw) as Partial<StudyHubPreferences>;
+    cachedParsedPrefs = normalizePreferences(parsed);
+    return cachedParsedPrefs;
+  } catch {
+    return cachedParsedPrefs;
+  }
+}
+
+function getServerPreferencesSnapshot(): StudyHubPreferences {
+  return DEFAULT_USER_PREFERENCES;
+}
+
+function writeLocalPreferences(prefs: StudyHubPreferences): void {
+  const serialized = JSON.stringify(prefs);
+  cachedRawPrefs = serialized;
+  cachedParsedPrefs = prefs;
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, serialized);
+    } catch {
+      // Ignore storage quota or private-mode restrictions
+    }
+  }
+  emitPrefsChange();
+}
+
+const emptySubscribe = () => () => {};
+
+function playDeterministicTone(kind: FeedbackSoundKind): void {
+  if (typeof window === "undefined") return;
+  const AudioCtx =
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioCtx) return;
+
+  try {
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (kind === "correct") {
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(523.25, now); // C5
+      osc.frequency.exponentialRampToValueAtTime(659.25, now + 0.08); // E5
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+      osc.start(now);
+      osc.stop(now + 0.17);
+    } else if (kind === "wrong") {
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(240, now);
+      osc.frequency.linearRampToValueAtTime(190, now + 0.12);
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      osc.start(now);
+      osc.stop(now + 0.19);
+    } else if (kind === "complete") {
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.setValueAtTime(659.25, now + 0.08);
+      osc.frequency.setValueAtTime(783.99, now + 0.16);
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+      osc.start(now);
+      osc.stop(now + 0.31);
+    } else {
+      // subtle card flip click
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(380, now);
+      gain.gain.setValueAtTime(0.03, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+      osc.start(now);
+      osc.stop(now + 0.07);
+    }
+
+    osc.onended = () => {
+      void ctx.close().catch(() => {});
+    };
+  } catch {
+    // Ignore autoplay/audio-device restrictions
+  }
+}
+
+const PreferencesContext = React.createContext<PreferencesContextValue | null>(
+  null,
+);
+
+export function PreferencesProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const pathname = usePathname() ?? "/";
+  const queryClient = useQueryClient();
+  const { setLocale } = useI18n();
+  const { setTheme } = useTheme();
+
+  const preferences = React.useSyncExternalStore(
+    subscribeLocalPreferences,
+    getLocalPreferencesSnapshot,
+    getServerPreferencesSnapshot,
+  );
+  const hydratedLocal = React.useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false,
+  );
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  const shouldFetchRemote =
+    isSupabaseConfiguredClient() && !PUBLIC_UNAUTH_PATHS.has(pathname);
+
+  const remoteQuery = useQuery<UserPreferences | null>({
+    queryKey: ["user-preferences"],
+    enabled: shouldFetchRemote,
+    staleTime: 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        const res = await apiFetch<UserPreferences>("/api/preferences");
+        if (res.data) {
+          const merged = normalizePreferences(res.data, DEFAULT_USER_PREFERENCES);
+          writeLocalPreferences(merged);
+        }
+        return res.data;
+      } catch (err) {
+        if (
+          err instanceof ApiError &&
+          (err.status === 401 ||
+            err.status === 403 ||
+            err.status === 503 ||
+            err.code === "SUPABASE_NOT_CONFIGURED")
+        ) {
+          return null;
+        }
+        return null;
+      }
+    },
+  });
+
+  // Apply reduced_motion attribute onto <html> so CSS respects the in-app toggle
+  React.useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (preferences.reduced_motion) {
+      document.documentElement.dataset.reducedMotion = "true";
+    } else {
+      delete document.documentElement.dataset.reducedMotion;
+    }
+  }, [preferences.reduced_motion]);
+
+  const updatePreferences = React.useCallback(
+    async (
+      patch: UpdateUserPreferencesInput,
+      options?: UpdatePreferencesOptions,
+    ): Promise<StudyHubPreferences> => {
+      const next = normalizePreferences(patch, preferences);
+      writeLocalPreferences(next);
+
+      if (patch.language) {
+        setLocale(patch.language);
+      }
+      if (patch.theme) {
+        setTheme(patch.theme);
+      }
+
+      if (options?.persistRemote === false || !isSupabaseConfiguredClient()) {
+        return next;
+      }
+
+      setIsSaving(true);
+      try {
+        const payload: Partial<UserPreferences> = {};
+        if (patch.language !== undefined) payload.language = next.language;
+        if (patch.theme !== undefined) payload.theme = next.theme;
+        if (
+          patch.daily_goal !== undefined ||
+          patch.daily_goal_questions !== undefined
+        ) {
+          payload.daily_goal = next.daily_goal;
+        }
+        if (patch.default_shuffle_questions !== undefined) {
+          payload.default_shuffle_questions = next.default_shuffle_questions;
+        }
+        if (patch.default_shuffle_options !== undefined) {
+          payload.default_shuffle_options = next.default_shuffle_options;
+        }
+        if (patch.show_instant_feedback !== undefined) {
+          payload.show_instant_feedback = next.show_instant_feedback;
+        }
+        if (patch.sound_effects !== undefined) {
+          payload.sound_effects = next.sound_effects;
+        }
+        if (patch.reduced_motion !== undefined) {
+          payload.reduced_motion = next.reduced_motion;
+        }
+
+        const res = await apiFetch<UserPreferences>("/api/preferences", {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        const synced = normalizePreferences(res.data, next);
+        writeLocalPreferences(synced);
+        queryClient.setQueryData(["user-preferences"], res.data);
+        return synced;
+      } catch (err) {
+        if (options?.throwOnError) {
+          throw err;
+        }
+        return next;
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [preferences, queryClient, setLocale, setTheme],
+  );
+
+  const refreshPreferences = React.useCallback(async () => {
+    if (!isSupabaseConfiguredClient()) return;
+    await queryClient.invalidateQueries({ queryKey: ["user-preferences"] });
+  }, [queryClient]);
+
+  const playFeedbackSound = React.useCallback(
+    (kind: FeedbackSoundKind) => {
+      if (!preferences.sound_effects) return;
+      playDeterministicTone(kind);
+    },
+    [preferences.sound_effects],
+  );
+
+  const value = React.useMemo<PreferencesContextValue>(
+    () => ({
+      preferences,
+      isLoading: !hydratedLocal || (shouldFetchRemote && remoteQuery.isLoading),
+      isSaving,
+      isServerSynced: Boolean(remoteQuery.data),
+      updatePreferences,
+      refreshPreferences,
+      playFeedbackSound,
+    }),
+    [
+      preferences,
+      hydratedLocal,
+      shouldFetchRemote,
+      remoteQuery.isLoading,
+      remoteQuery.data,
+      isSaving,
+      updatePreferences,
+      refreshPreferences,
+      playFeedbackSound,
+    ],
+  );
+
+  return (
+    <PreferencesContext.Provider value={value}>
+      {children}
+    </PreferencesContext.Provider>
+  );
+}
+
+const FALLBACK_CONTEXT_VALUE: PreferencesContextValue = {
+  preferences: DEFAULT_USER_PREFERENCES,
+  isLoading: false,
+  isSaving: false,
+  isServerSynced: false,
+  updatePreferences: async (patch) =>
+    normalizePreferences(patch, DEFAULT_USER_PREFERENCES),
+  refreshPreferences: async () => {},
+  playFeedbackSound: () => {},
+};
+
+export function useUserPreferences(): PreferencesContextValue {
+  const ctx = React.useContext(PreferencesContext);
+  return ctx ?? FALLBACK_CONTEXT_VALUE;
+}

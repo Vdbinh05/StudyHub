@@ -74,16 +74,34 @@ export async function PATCH(
     }
 
     if (input.parent_id) {
-      const { data: parent, error: parentError } = await supabase
+      const { data: allOwnedFolders, error: foldersErr } = await supabase
         .from("folders")
-        .select("id")
-        .eq("id", input.parent_id)
-        .eq("owner_id", user.id)
-        .maybeSingle();
+        .select("id, parent_id")
+        .eq("owner_id", user.id);
 
-      if (parentError) throw parentError;
-      if (!parent) {
+      if (foldersErr) throw foldersErr;
+
+      const parentById = new Map(
+        (allOwnedFolders ?? []).map((f) => [f.id, f.parent_id]),
+      );
+
+      if (!parentById.has(input.parent_id)) {
         throw new AppError("NOT_FOUND", "Parent folder not found.", 404);
+      }
+
+      // Guard against multi-hop circular hierarchies (A -> B -> A) (DB-P2-2)
+      let cursor: string | null | undefined = input.parent_id;
+      let depth = 0;
+      while (cursor && depth < 32) {
+        if (cursor === folderId) {
+          throw new AppError(
+            "VALIDATION_ERROR",
+            "Circular folder hierarchy is not allowed.",
+            400,
+          );
+        }
+        cursor = parentById.get(cursor);
+        depth += 1;
       }
     }
 

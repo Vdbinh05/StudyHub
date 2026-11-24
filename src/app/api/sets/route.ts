@@ -6,6 +6,8 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import { sanitizePostgrestSearch } from "@/lib/security/sanitize";
+import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import {
   createStudySetSchema,
   listSetsQuerySchema,
@@ -49,7 +51,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       let sharedQuery = supabase
         .from("study_sets")
         .select("*", { count: "exact" })
-        .in("id", setIds)
+        .in("id", setIds.slice(0, SAFE_IN_CHUNK_SIZE))
         .neq("owner_id", user.id);
 
       if (!query.includeArchived) {
@@ -59,7 +61,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         sharedQuery = sharedQuery.eq("set_type", query.type);
       }
       if (query.search) {
-        const escaped = query.search.replace(/[%_,]/g, "");
+        const escaped = sanitizePostgrestSearch(query.search);
         if (escaped) {
           sharedQuery = sharedQuery.or(
             `title.ilike.%${escaped}%,subject.ilike.%${escaped}%,description.ilike.%${escaped}%`,
@@ -77,15 +79,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const ownerIds = Array.from(
         new Set((sets ?? []).map((s) => s.owner_id)),
       );
-      const { data: owners } =
+      const owners =
         ownerIds.length > 0
-          ? await supabase
-              .from("profiles")
-              .select("id, display_name, username, avatar_url")
-              .in("id", ownerIds)
-          : { data: [] };
+          ? await fetchInChunks(
+              ownerIds,
+              async (chunk) =>
+                supabase
+                  .from("profiles")
+                  .select("id, display_name, username, avatar_url")
+                  .in("id", chunk),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : [];
 
-      const ownerMap = new Map((owners ?? []).map((o) => [o.id, o]));
+      const ownerMap = new Map(owners.map((o) => [o.id, o]));
       const items = (sets ?? []).map((s) => ({
         ...s,
         member_role: roleMap.get(s.id) ?? "viewer",
@@ -106,14 +113,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (query.scope === "owned") {
       dbQuery = dbQuery.eq("owner_id", user.id);
     } else {
-      // scope === "all": owned or member sets
       const { data: memberships, error: memError } = await supabase
         .from("study_set_members")
         .select("study_set_id")
         .eq("user_id", user.id);
       if (memError) throw memError;
 
-      const memberSetIds = (memberships ?? []).map((m) => m.study_set_id);
+      const memberSetIds = (memberships ?? [])
+        .map((m) => m.study_set_id)
+        .slice(0, SAFE_IN_CHUNK_SIZE);
       if (memberSetIds.length > 0) {
         dbQuery = dbQuery.or(
           `owner_id.eq.${user.id},id.in.(${memberSetIds.join(",")})`,
@@ -125,6 +133,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     if (!query.includeArchived) {
       dbQuery = dbQuery.eq("is_archived", false);
+    }
+
+    if (query.favoritesOnly) {
+      dbQuery = dbQuery.eq("is_favorite", true);
     }
 
     if (query.folderId === "unfiled") {
@@ -142,7 +154,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     if (query.search) {
-      const escaped = query.search.replace(/[%_,]/g, "");
+      const escaped = sanitizePostgrestSearch(query.search);
       if (escaped) {
         dbQuery = dbQuery.or(
           `title.ilike.%${escaped}%,subject.ilike.%${escaped}%,description.ilike.%${escaped}%`,
@@ -163,8 +175,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           nullsFirst: false,
         });
         break;
+      case "question_count_desc":
+        dbQuery = dbQuery.order("question_count", { ascending: false });
+        break;
       default:
-        dbQuery = dbQuery.order("updated_at", { ascending: false });
+        dbQuery = dbQuery
+          .order("is_favorite", { ascending: false })
+          .order("updated_at", { ascending: false });
         break;
     }
 

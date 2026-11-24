@@ -12,20 +12,31 @@ const VIEWPORTS = [
   { name: "desktop-1920", width: 1920, height: 1080 },
 ] as const;
 
-test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
-  test("HTTP security headers are present on landing page", async ({ request }) => {
+test.describe("StudyHub V2.0 Public Routes, Security Headers, Theme & i18n", () => {
+  test("HTTP security headers & production CSP hygiene are enforced on landing page", async ({
+    request,
+  }) => {
     const res = await request.get("/");
     expect(res.status()).toBe(200);
 
     const headers = res.headers();
+    const csp = headers["content-security-policy"] ?? "";
     expect(headers["x-content-type-options"]).toBe("nosniff");
     expect(headers["x-frame-options"]).toBe("DENY");
     expect(headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
     expect(headers["permissions-policy"]).toContain("camera=()");
-    expect(headers["content-security-policy"]).toBeTruthy();
-    expect(headers["content-security-policy"]).toContain("object-src 'none'");
-    expect(headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(csp).toBeTruthy();
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
     expect(headers["x-powered-by"]).toBeUndefined();
+
+    // Production builds (`next start`) must emit HSTS and must NOT allow localhost/unsafe-eval in CSP (SH-043)
+    if (process.env.PLAYWRIGHT_EXPECT_PROD === "1") {
+      expect(headers["strict-transport-security"]).toContain("max-age=");
+      expect(csp).not.toContain("http://127.0.0.1");
+      expect(csp).not.toContain("http://localhost");
+      expect(csp).not.toContain("'unsafe-eval'");
+    }
   });
 
   test("API health and EduQuiz import template endpoints work deterministically", async ({
@@ -49,7 +60,9 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
     expect(badTplRes.status()).toBe(400);
   });
 
-  test("public & auth pages render cleanly with zero uncaught errors", async ({ page }) => {
+  test("public & auth pages render cleanly with semantic <h1> and zero uncaught errors", async ({
+    page,
+  }) => {
     const pageErrors: string[] = [];
     const severeConsoleErrors: string[] = [];
 
@@ -57,18 +70,33 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
     page.on("console", (msg) => {
       if (msg.type() === "error") {
         const txt = msg.text();
-        // Ignore expected 503 network logs if any unconfigured backend check runs
         if (!txt.includes("503")) {
           severeConsoleErrors.push(txt);
         }
       }
     });
 
-    for (const route of ["/", "/login", "/register", "/forgot-password", "/reset-password"]) {
+    for (const route of [
+      "/",
+      "/login",
+      "/register",
+      "/forgot-password",
+      "/reset-password",
+    ]) {
       const response = await page.goto(route, { waitUntil: "networkidle" });
       expect(response?.status(), `Route ${route} failed`).toBe(200);
       await expect(page.locator("main")).toBeVisible();
+      await expect(
+        page.locator("h1").first(),
+        `Missing <h1> on ${route}`,
+      ).toBeVisible();
     }
+
+    // Login callback error query parameter must surface a friendly error alert (SH-037 / BUG-022)
+    await page.goto("/login?error=auth_callback_failed", {
+      waitUntil: "networkidle",
+    });
+    await expect(page.locator('[role="alert"]').first()).toBeVisible();
 
     expect(pageErrors, `Uncaught page errors: ${pageErrors.join("; ")}`).toEqual([]);
     expect(
@@ -77,7 +105,20 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
     ).toEqual([]);
   });
 
-  test("Light/Dark theme toggle and VI/EN language toggle work cleanly on landing page", async ({
+  test("custom 404 page renders localized StudyHub NotFoundView instead of raw Next.js 404", async ({
+    page,
+  }) => {
+    const res = await page.goto("/nonexistent-v2-route-check", {
+      waitUntil: "networkidle",
+    });
+    expect(res?.status()).toBe(404);
+    await expect(page.locator("main")).toBeVisible();
+    await expect(page.locator("h1")).toBeVisible();
+    await expect(page.getByText("404")).toBeVisible();
+    await expect(page.getByRole("link", { name: /trang chủ|home/i })).toBeVisible();
+  });
+
+  test("Light/Dark theme toggle, VI/EN language toggle, <title>, and skip link localization work cleanly", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -85,8 +126,9 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
 
     // Default Vietnamese UI
     await expect(page.locator("h1")).toContainText("Tự học");
+    const skipLink = page.locator('a.skip-to-content[href="#main-content"]');
+    await expect(skipLink).toContainText(/chuyển đến nội dung chính/i);
 
-    // Capture Desktop 1440px Light screenshot if requested
     if (SCREENSHOT_DIR) {
       await page.screenshot({
         path: path.join(SCREENSHOT_DIR, "landing-desktop-1440-light.png"),
@@ -94,12 +136,16 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
       });
     }
 
-    // Switch language VI -> EN
+    // Switch language VI -> EN and verify skip link & reload <title> persistence (#72)
     const langBtn = page.getByRole("button", {
       name: /Chuyển ngôn ngữ giao diện sang tiếng Anh/i,
     });
     await langBtn.click();
     await expect(page.locator("h1")).toContainText("Study flashcards");
+    await expect(skipLink).toContainText(/skip to/i);
+    await expect(page).toHaveTitle(/Personal Self-Study/i);
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page).toHaveTitle(/Personal Self-Study/i);
 
     // Toggle back EN -> VI
     await page
@@ -107,13 +153,12 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
       .click();
     await expect(page.locator("h1")).toContainText("Tự học");
 
-    // Switch Theme -> Dark
+    // Switch Theme -> Dark (uses WCAG role="menuitemradio")
     const themeBtn = page.getByRole("button", { name: /Đổi giao diện sáng tối/i });
     await themeBtn.click();
-    await page.getByRole("menuitem", { name: /Tối|Dark/i }).click();
+    await page.getByRole("menuitemradio", { name: /Tối|Dark/i }).click();
     await expect(page.locator("html")).toHaveClass(/dark/);
 
-    // Capture Desktop 1440px Dark screenshot if requested
     if (SCREENSHOT_DIR) {
       await page.waitForTimeout(200);
       await page.screenshot({
@@ -124,36 +169,59 @@ test.describe("StudyHub Public Routes, Security Headers, Theme & i18n", () => {
 
     // Switch Theme -> Light
     await themeBtn.click();
-    await page.getByRole("menuitem", { name: /Sáng|Light/i }).click();
+    await page.getByRole("menuitemradio", { name: /Sáng|Light/i }).click();
     await expect(page.locator("html")).not.toHaveClass(/dark/);
-
-    // Capture Login page 1440px Light screenshot if requested
-    if (SCREENSHOT_DIR) {
-      await page.goto("/login", { waitUntil: "networkidle" });
-      await page.screenshot({
-        path: path.join(SCREENSHOT_DIR, "login-desktop-1440-light.png"),
-        fullPage: false,
-      });
-    }
   });
 
-  test("protected routes enforce auth or show honest unconfigured notice (never fake login)", async ({
+  test("protected V1 & V2 routes redirect cleanly to /login without 503 storms or raw env-var leaks (SH-026)", async ({
     page,
   }) => {
-    const healthRes = await page.request.get("/api/health");
-    const health = await healthRes.json();
-    const supabaseConfigured: boolean = Boolean(health?.data?.supabaseConfigured);
-
-    for (const route of ["/dashboard", "/library", "/review", "/statistics", "/settings"]) {
-      await page.goto(route, { waitUntil: "networkidle" });
-
-      if (supabaseConfigured) {
-        expect(page.url()).toContain("/login");
-      } else {
-        // Honest unconfigured Supabase banner must be shown; never a fake authenticated profile
-        await expect(page.locator('[role="status"]').first()).toContainText(/Supabase/i);
+    const failed503Urls: string[] = [];
+    page.on("response", (res) => {
+      if (res.status() === 503) {
+        failed503Urls.push(res.url());
       }
+    });
+
+    const protectedRoutes = [
+      "/dashboard",
+      "/library",
+      "/exams",
+      "/exams/new",
+      "/practice",
+      "/folders",
+      "/import",
+      "/review",
+      "/statistics",
+      "/settings",
+    ];
+
+    for (const route of protectedRoutes) {
+      await page.goto(route, { waitUntil: "networkidle" });
+      expect(page.url(), `Protected route ${route} must redirect to /login`).toContain(
+        "/login",
+      );
+      const bodyText = await page.locator("body").innerText();
+      expect(bodyText).not.toContain("NEXT_PUBLIC_SUPABASE_URL");
+      expect(bodyText).not.toContain(".env.local");
     }
+
+    expect(
+      failed503Urls,
+      `Unexpected 503 storm during protected redirects: ${failed503Urls.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  test("prefers-reduced-motion renders cleanly without hiding or breaking interactive content", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/", { waitUntil: "networkidle" });
+    await expect(page.locator("h1")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /đăng ký|sign up|tạo tài khoản/i }).first(),
+    ).toBeVisible();
   });
 });
 
@@ -164,7 +232,7 @@ test.describe("Responsive Layout & Accessibility Audit (6 Viewports)", () => {
     }) => {
       await page.setViewportSize({ width: vp.width, height: vp.height });
 
-      for (const route of ["/", "/login"]) {
+      for (const route of ["/", "/login", "/register"]) {
         await page.goto(route, { waitUntil: "networkidle" });
 
         const metrics = await page.evaluate(() => ({
@@ -185,10 +253,10 @@ test.describe("Responsive Layout & Accessibility Audit (6 Viewports)", () => {
       await page.keyboard.press("Tab");
       await expect(skipLink).toBeFocused();
 
-      // Capture mobile 390px Light screenshot if requested
       if (SCREENSHOT_DIR && vp.name === "mobile-390") {
-        // Blur skip link before screenshot so viewport looks natural
-        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+        await page.evaluate(() =>
+          (document.activeElement as HTMLElement | null)?.blur(),
+        );
         await page.screenshot({
           path: path.join(SCREENSHOT_DIR, "landing-mobile-390-light.png"),
           fullPage: false,
