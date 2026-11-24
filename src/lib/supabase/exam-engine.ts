@@ -482,6 +482,7 @@ export async function fetchEligibleCandidates(params: {
   filters?: ExamFilterConfig;
   selectionPolicy: SelectionPolicy;
   explicitQuestionIds?: string[];
+  requireProgress?: boolean;
 }): Promise<{
   dedupedSets: Array<{ study_set_id: string; title: string; subject: string | null }>;
   candidates: EligibleCandidateRow[];
@@ -496,6 +497,7 @@ export async function fetchEligibleCandidates(params: {
     filters,
     selectionPolicy,
     explicitQuestionIds,
+    requireProgress = false,
   } = params;
 
   const { data: dedupedSets, error: dedupErr } = await rpcResolveDedupedStudySets(
@@ -594,12 +596,30 @@ export async function fetchEligibleCandidates(params: {
   const allQIds = rawQuestions.map((q) => q.id);
   const candidateSetIds = Array.from(new Set(rawQuestions.map((q) => q.study_set_id)));
 
+  // V3.1 P1-4: Skip full-bank progress/starred scans when the active policy doesn't need them!
+  const needsProgress =
+    requireProgress ||
+    (selectionPolicy !== "random" &&
+      selectionPolicy !== "starred_only" &&
+      selectionPolicy !== "anti_repeat");
+  const needsStarred = selectionPolicy === "starred_only";
+
+  type ProgressLite = {
+    question_id: string;
+    mastery_level: string;
+    correct_count: number;
+    wrong_count: number;
+    last_reviewed_at: string | null;
+    next_review_at: string | null;
+  };
+
   // For >100-question banks (e.g. 500–10,000Q), query progress & starred rows by study_set_id via
   // paginated `fetchAllPages` instead of issuing up to 200 sequential `.in(question_id)` chunks.
-  const [progressRows, starredRows] =
-    allQIds.length <= SAFE_IN_CHUNK_SIZE
-      ? await Promise.all([
-          fetchInChunks(
+  const [progressRows, starredRows] = await Promise.all([
+    !needsProgress
+      ? Promise.resolve<ProgressLite[]>([])
+      : allQIds.length <= SAFE_IN_CHUNK_SIZE
+        ? fetchInChunks(
             allQIds,
             async (chunk) =>
               supabase
@@ -610,28 +630,9 @@ export async function fetchEligibleCandidates(params: {
                 .eq("user_id", userId)
                 .in("question_id", chunk),
             SAFE_IN_CHUNK_SIZE,
-          ),
-          fetchInChunks(
-            allQIds,
-            async (chunk) =>
-              supabase
-                .from("starred_questions")
-                .select("question_id")
-                .eq("user_id", userId)
-                .in("question_id", chunk),
-            SAFE_IN_CHUNK_SIZE,
-          ),
-        ])
-      : await Promise.all([
-          (async () => {
-            const out: Array<{
-              question_id: string;
-              mastery_level: string;
-              correct_count: number;
-              wrong_count: number;
-              last_reviewed_at: string | null;
-              next_review_at: string | null;
-            }> = [];
+          )
+        : (async () => {
+            const out: ProgressLite[] = [];
             for (const setChunk of chunkArray(candidateSetIds, SAFE_IN_CHUNK_SIZE)) {
               const pages = await fetchAllPages(async (from, to) =>
                 supabase
@@ -648,7 +649,20 @@ export async function fetchEligibleCandidates(params: {
             }
             return out;
           })(),
-          (async () => {
+    !needsStarred
+      ? Promise.resolve<Array<{ question_id: string }>>([])
+      : allQIds.length <= SAFE_IN_CHUNK_SIZE
+        ? fetchInChunks(
+            allQIds,
+            async (chunk) =>
+              supabase
+                .from("starred_questions")
+                .select("question_id")
+                .eq("user_id", userId)
+                .in("question_id", chunk),
+            SAFE_IN_CHUNK_SIZE,
+          )
+        : (async () => {
             const out: Array<{ question_id: string }> = [];
             for (const setChunk of chunkArray(candidateSetIds, SAFE_IN_CHUNK_SIZE)) {
               const pages = await fetchAllPages(async (from, to) =>
@@ -664,7 +678,7 @@ export async function fetchEligibleCandidates(params: {
             }
             return out;
           })(),
-        ]);
+  ]);
 
   const progressMap = new Map(progressRows.map((p) => [p.question_id, p]));
   const starredSet = new Set(starredRows.map((s) => s.question_id));

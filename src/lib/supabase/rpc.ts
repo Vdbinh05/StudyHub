@@ -453,3 +453,86 @@ export async function rpcSyncOfflineLearningEvents(
     error,
   };
 }
+
+/**
+ * Detects whether a Supabase RPC error indicates a not-yet-applied migration function
+ * (`42883` undefined_function or PostgREST `PGRST202` schema cache miss) so routes can
+ * gracefully fall back during rolling deployments.
+ */
+export function isMissingRpcError(error: RpcError | null | undefined): boolean {
+  if (!error) return false;
+  return (
+    error.code === "42883" ||
+    error.code === "PGRST202" ||
+    error.message.includes("Could not find the function")
+  );
+}
+
+export async function rpcGetDashboardSummary(
+  supabase: SupabaseClient<Database>,
+): Promise<{ data: Record<string, unknown> | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("get_dashboard_summary");
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null,
+    error,
+  };
+}
+
+export async function rpcGetStudySetSummary(
+  supabase: SupabaseClient<Database>,
+  setId: string,
+): Promise<{ data: Record<string, unknown> | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("get_study_set_summary", {
+    p_set_id: setId,
+  });
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null,
+    error,
+  };
+}
+
+export async function rpcRecordStudySessionAnswer(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_session_id: string;
+    p_question_id: string;
+    p_selected_option_ids: string[];
+    p_typed_answer: string | null;
+    p_structured_response: StructuredAnswerResponse | null;
+    p_is_correct: boolean | null;
+    p_self_rating: string | null;
+    p_confidence: ConfidenceLevel | null;
+    p_hint_used: boolean;
+    p_response_time_ms: number | null;
+    p_update_progress: boolean;
+  },
+): Promise<{
+  data: {
+    answer: Record<string, unknown>;
+    is_correct: boolean;
+    progress: Record<string, unknown> | null;
+  } | null;
+  error: RpcError;
+}> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("record_study_session_answer", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as {
+            answer: Record<string, unknown>;
+            is_correct: boolean;
+            progress: Record<string, unknown> | null;
+          })
+        : null,
+    error,
+  };
+}

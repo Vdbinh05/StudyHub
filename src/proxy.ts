@@ -11,11 +11,11 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 export const config = {
   matcher: [
     /*
-     * Match all request paths except:
-     * - _next/static (static files)
-     * - _next/image (image optimization)
-     * - favicon.ico and common static asset extensions
+     * Match App Router page routes only. Exclude:
+     * - api/* and auth/* (every Route Handler authenticates directly via `requireAuth()`/`tryCreateClient()`
+     *   and security headers are enforced globally in `next.config.ts`, avoiding 2x `auth.getUser()` RTTs)
+     * - _next/static, _next/image, favicon.ico, manifest, sw.js, and static asset extensions
      */
-    "/((?!_next/static|_next/image|favicon.ico|manifest\\.webmanifest|sw\\.js|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map|webmanifest)$).*)",
+    "/((?!api(?:/|$)|auth(?:/|$)|_next/static|_next/image|favicon.ico|manifest\\.webmanifest|sw\\.js|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map|webmanifest)$).*)",
   ],
 };

@@ -68,6 +68,10 @@ const sql0017 = readFileSync(
   path.join(MIGRATIONS_DIR, "0017_v3_production_vercel_hardening.sql"),
   "utf8",
 );
+const sql0018 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0018_v3_1_performance_rpcs_and_indexes.sql"),
+  "utf8",
+);
 const allSql = [sql0001, sql0002, sql0003, sql0004].join("\n");
 
 const ALL_20_TABLES = [
@@ -421,5 +425,64 @@ describe("Security: Supabase SQL Migrations Structural Audit", () => {
     expect(exec0017).toMatch(
       /GRANT EXECUTE ON FUNCTION public\.check_and_increment_rate_limit\(text, integer, integer\) TO service_role;/i,
     );
+  });
+
+  it("V3.1 migration 0018 remains 100% additive/MCP-safe, adds 5 composite indexes, and hardens all 3 performance RPCs", () => {
+    const exec0018 = sql0018
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+
+    // Zero destructive drops or temp tables
+    expect(exec0018).not.toMatch(/\bDROP\s+POLICY\b/i);
+    expect(exec0018).not.toMatch(/\bDROP\s+TRIGGER\b/i);
+    expect(exec0018).not.toMatch(/\bDROP\s+TABLE\b/i);
+    expect(exec0018).not.toMatch(/\bCREATE\s+TEMP\s+TABLE\b/i);
+
+    // Zero auth.role() and 100% wrapped (SELECT auth.uid())
+    expect(exec0018).not.toMatch(/\bauth\.role\s*\(\s*\)/i);
+    const wrapped = exec0018.match(/\(\s*SELECT\s+auth\.uid\s*\(\s*\)\s*\)/gi) ?? [];
+    const total = exec0018.match(/\bauth\.uid\s*\(\s*\)/gi) ?? [];
+    expect(total.length).toBeGreaterThanOrEqual(3);
+    expect(wrapped.length).toBe(total.length);
+
+    // All 5 targeted composite indexes present
+    for (const idx of [
+      "idx_study_sessions_user_started",
+      "idx_exam_attempts_user_submitted",
+      "idx_starred_questions_user_set",
+      "idx_exam_attempt_answers_user_wrong",
+      "idx_study_session_answers_session_correct",
+    ]) {
+      expect(exec0018, `Missing index ${idx}`).toMatch(
+        new RegExp(`CREATE INDEX IF NOT EXISTS ${idx}\\b`, "i"),
+      );
+    }
+
+    // All 3 SECURITY DEFINER performance RPCs set search_path = '' and revoke PUBLIC/anon
+    const fnBlocks = exec0018.split(/CREATE OR REPLACE FUNCTION\s+/i).slice(1);
+    expect(fnBlocks).toHaveLength(3);
+    for (const block of fnBlocks) {
+      const header = block.split(/AS \$\$/i)[0] ?? "";
+      const fnName = header.match(/^([^\s(]+)/)?.[1] ?? "unknown";
+      expect(header, `${fnName} missing SECURITY DEFINER`).toMatch(/\bSECURITY DEFINER\b/i);
+      expect(header, `${fnName} missing SET search_path = ''`).toMatch(
+        /SET\s+search_path\s*=\s*''/i,
+      );
+    }
+
+    for (const fn of [
+      "get_dashboard_summary",
+      "get_study_set_summary",
+      "record_study_session_answer",
+    ]) {
+      expect(exec0018).toMatch(new RegExp(`CREATE OR REPLACE FUNCTION public\\.${fn}\\b`, "i"));
+      expect(exec0018).toMatch(
+        new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}\\([^)]*\\) FROM PUBLIC, anon;`, "i"),
+      );
+      expect(exec0018).toMatch(
+        new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${fn}\\([^)]*\\) TO authenticated;`, "i"),
+      );
+    }
   });
 });

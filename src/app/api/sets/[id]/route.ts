@@ -7,6 +7,10 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import { fetchAllPages } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcGetStudySetSummary,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import { updateStudySetSchema } from "@/lib/validation/sets";
 
@@ -22,6 +26,21 @@ export async function GET(
     const { supabase, user } = await requireAuth();
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
+
+    // Fast path (Migration 0018): single PostgreSQL RPC aggregates chapters, types, mastery & stars
+    const { data: rpcSummary, error: rpcErr } = await rpcGetStudySetSummary(
+      supabase,
+      setId,
+    );
+    if (!rpcErr) {
+      if (!rpcSummary) {
+        throw new AppError("NOT_FOUND", "Study set not found.", 404);
+      }
+      return apiSuccess(rpcSummary);
+    }
+    if (!isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
 
     const access = await requireStudySetAccess(supabase, setId, user.id, "read");
 

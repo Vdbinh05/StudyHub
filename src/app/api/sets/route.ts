@@ -14,6 +14,9 @@ import {
 } from "@/lib/validation/sets";
 import type { MemberRole, StudySet } from "@/types/domain";
 
+const STUDY_SET_LIST_COLUMNS =
+  "id, owner_id, folder_id, title, description, subject, set_type, visibility, source_language, question_count, default_exam_duration_minutes, default_pass_threshold, is_archived, is_favorite, content_version, last_studied_at, created_at, updated_at";
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
@@ -50,7 +53,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
       let sharedQuery = supabase
         .from("study_sets")
-        .select("*", { count: "exact" })
+        .select(STUDY_SET_LIST_COLUMNS, { count: "exact" })
         .in("id", setIds.slice(0, SAFE_IN_CHUNK_SIZE))
         .neq("owner_id", user.id);
 
@@ -108,7 +111,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       });
     }
 
-    let dbQuery = supabase.from("study_sets").select("*", { count: "exact" });
+    let dbQuery = supabase
+      .from("study_sets")
+      .select(STUDY_SET_LIST_COLUMNS, { count: "exact" });
 
     if (query.scope === "owned") {
       dbQuery = dbQuery.eq("owner_id", user.id);

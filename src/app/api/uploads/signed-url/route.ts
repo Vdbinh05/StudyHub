@@ -36,7 +36,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     if (request.nextUrl.searchParams.get("redirect") === "1") {
       const redirectResponse = NextResponse.redirect(data.signedUrl, 302);
-      redirectResponse.headers.set("Cache-Control", "private, max-age=300");
+      // Half of SIGNED_URL_TTL_SECONDS (3600s) — cuts mobile re-signing hops while staying strictly private
+      redirectResponse.headers.set("Cache-Control", "private, max-age=1800");
       redirectResponse.headers.set("Vary", "Cookie");
       return redirectResponse;
     }

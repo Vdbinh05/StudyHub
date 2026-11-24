@@ -39,11 +39,36 @@ function copyCookies(source: NextResponse, target: NextResponse): NextResponse {
 }
 
 /**
+ * Fast cookie presence check for Supabase SSR auth tokens (`sb-*-auth-token*`).
+ * Never trusts the cookie payload itself — only avoids an unnecessary Auth RTT
+ * when no session cookie exists at all.
+ */
+export function hasSupabaseAuthCookie(
+  request: Pick<NextRequest, "cookies">,
+): boolean {
+  return request.cookies
+    .getAll()
+    .some(
+      (cookie) =>
+        cookie.name.startsWith("sb-") &&
+        !cookie.name.endsWith("-code-verifier") &&
+        (cookie.name.includes("-auth-token") ||
+          cookie.name === "sb-access-token"),
+    );
+}
+
+/**
  * Refreshes the Supabase Auth session cookie and guards protected App Router paths.
- * Uses `supabase.auth.getUser()` (never `getSession()`) to verify session authenticity.
+ * Uses `supabase.auth.getUser()` (never `getSession()`) whenever an auth cookie is present.
  */
 export async function updateSession(request: NextRequest): Promise<NextResponse> {
   const { pathname, search } = request.nextUrl;
+
+  // Offline fallback shell must never block on an Auth network round-trip
+  if (pathname === "/offline") {
+    return NextResponse.next({ request });
+  }
+
   const env = getSupabaseEnv();
 
   if (!env) {
@@ -54,6 +79,23 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
       loginUrl.pathname = "/login";
       loginUrl.search = "";
       loginUrl.searchParams.set("setup", "1");
+      const safeNext = isSafeRelativeRedirect(`${pathname}${search}`, "");
+      if (safeNext) {
+        loginUrl.searchParams.set("next", safeNext);
+      }
+      return NextResponse.redirect(loginUrl);
+    }
+    return NextResponse.next({ request });
+  }
+
+  // Fast-path when NO Supabase auth cookie is present (0 ms, zero Auth network RTT):
+  // - Protected routes redirect immediately to /login?next=...
+  // - Public/auth routes pass straight through without instantiating Supabase SSR
+  if (!hasSupabaseAuthCookie(request)) {
+    if (matchesPrefix(pathname, PROTECTED_PREFIXES)) {
+      const loginUrl = request.nextUrl.clone();
+      loginUrl.pathname = "/login";
+      loginUrl.search = "";
       const safeNext = isSafeRelativeRedirect(`${pathname}${search}`, "");
       if (safeNext) {
         loginUrl.searchParams.set("next", safeNext);

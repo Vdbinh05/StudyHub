@@ -251,12 +251,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // 6. Fetch questions in chunks so chapter & questionType filters run cleanly before pagination
+    // 6. V3.1 P2-1: Filter chapter/questionType using ONLY narrow metadata columns before paging,
+    //    and fetch full `questions.*` ONLY for the current page's IDs (max 20-50 rows)!
     const allQuestionIds = workingProgress.map((p) => p.question_id);
-    const questions = await fetchInChunks(
+    const metaRows = await fetchInChunks(
       allQuestionIds,
       async (chunk) => {
-        let qQuery = supabase.from("questions").select("*").in("id", chunk);
+        let qQuery = supabase
+          .from("questions")
+          .select("id")
+          .in("id", chunk);
         if (query.chapter) {
           qQuery = qQuery.eq("chapter", query.chapter);
         }
@@ -268,8 +272,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       SAFE_IN_CHUNK_SIZE,
     );
 
-    const qMap = new Map(questions.map((q) => [q.id, q]));
-    const filteredProgress = workingProgress.filter((p) => qMap.has(p.question_id));
+    const existingQIds = new Set(metaRows.map((q) => q.id));
+    const filteredProgress = workingProgress.filter((p) =>
+      existingQIds.has(p.question_id),
+    );
 
     // Deterministic sort according to query.sort
     filteredProgress.sort((a, b) => {
@@ -319,12 +325,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const pageSetIds = Array.from(new Set(pagedProgress.map((p) => p.study_set_id)));
 
     const [
+      pageQuestions,
       relations,
       sets,
       sessionWrongRows,
       examWrongQuestions,
       starredRows,
     ] = await Promise.all([
+      fetchInChunks(
+        pageQIds,
+        async (chunk) => supabase.from("questions").select("*").in("id", chunk),
+        SAFE_IN_CHUNK_SIZE,
+      ),
       fetchQuestionRelationsChunked(supabase, pageQIds),
       fetchInChunks(
         pageSetIds,
@@ -367,6 +379,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         SAFE_IN_CHUNK_SIZE,
       ),
     ]);
+
+    const qMap = new Map(pageQuestions.map((q) => [q.id, q]));
 
     const attemptQMeta = new Map<string, { questionId: string; attemptId: string }>();
     const attemptQIds: string[] = [];

@@ -8,6 +8,10 @@ import {
 } from "@/lib/security/errors";
 import { normalizeAnswerText } from "@/lib/security/sanitize";
 import { upsertQuestionProgress } from "@/lib/supabase/progress-helper";
+import {
+  isMissingRpcError,
+  rpcRecordStudySessionAnswer,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import { recordSessionAnswerSchema } from "@/lib/validation/learning";
 import type { Json } from "@/types/database";
@@ -29,23 +33,59 @@ export async function POST(
     const body = await parseJsonBody(request);
     const input = recordSessionAnswerSchema.parse(body);
 
-    const { data: session, error: sessErr } = await supabase
-      .from("study_sessions")
-      .select("*")
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .maybeSingle();
+    // Fast path (Migration 0018): 1 atomic PostgreSQL RPC replaces 9-11 serial queries
+    const { data: rpcResult, error: rpcErr } =
+      await rpcRecordStudySessionAnswer(supabase, {
+        p_session_id: id,
+        p_question_id: input.question_id,
+        p_selected_option_ids: input.selected_option_ids,
+        p_typed_answer: input.typed_answer ?? null,
+        p_structured_response: input.structured_response ?? null,
+        p_is_correct: input.is_correct ?? null,
+        p_self_rating: input.self_rating ?? null,
+        p_confidence: input.confidence ?? null,
+        p_hint_used: input.hint_used ?? false,
+        p_response_time_ms: input.response_time_ms ?? null,
+        p_update_progress: input.update_progress,
+      });
+
+    if (!rpcErr && rpcResult) {
+      return apiSuccess(rpcResult, undefined, { status: 201 });
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      if (rpcErr.code === "P0002") {
+        throw new AppError("NOT_FOUND", rpcErr.message || "Resource not found.", 404);
+      }
+      if (rpcErr.code === "22023") {
+        throw new AppError(
+          "INVALID_REFERENCE",
+          rpcErr.message || "Question does not belong to this study session.",
+          400,
+        );
+      }
+      throw rpcErr;
+    }
+
+    // Fallback when Migration 0018 is not yet applied (parallelized session + question fetch)
+    const [{ data: session, error: sessErr }, { data: question, error: qErr }] =
+      await Promise.all([
+        supabase
+          .from("study_sessions")
+          .select("*")
+          .eq("id", id)
+          .eq("user_id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("questions")
+          .select("id, study_set_id, question_type, back_text")
+          .eq("id", input.question_id)
+          .maybeSingle(),
+      ]);
 
     if (sessErr) throw sessErr;
     if (!session) {
       throw new AppError("NOT_FOUND", "Study session not found.", 404);
     }
-
-    const { data: question, error: qErr } = await supabase
-      .from("questions")
-      .select("id, study_set_id, question_type, back_text")
-      .eq("id", input.question_id)
-      .maybeSingle();
 
     if (qErr) throw qErr;
     if (!question) {

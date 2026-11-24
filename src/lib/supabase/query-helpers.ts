@@ -28,25 +28,38 @@ export function chunkArray<T>(
   return chunks;
 }
 
+export const DEFAULT_CHUNK_CONCURRENCY = 4;
+
 /**
- * Runs a query across chunked ID slices and merges all returned rows cleanly.
+ * Runs a query across chunked ID slices with bounded parallelism (default concurrency = 4)
+ * and merges all returned rows in deterministic chunk order.
  */
 export async function fetchInChunks<TId, TRow>(
   ids: readonly TId[],
   fetcher: (chunk: TId[]) => Promise<{ data: TRow[] | null; error: unknown }>,
   chunkSize: number = SAFE_IN_CHUNK_SIZE,
+  concurrency: number = DEFAULT_CHUNK_CONCURRENCY,
 ): Promise<TRow[]> {
   const uniqueIds = Array.from(new Set(ids));
   if (uniqueIds.length === 0) return [];
 
   const chunks = chunkArray(uniqueIds, chunkSize);
+  const safeConcurrency = Math.max(1, Math.min(8, Math.floor(concurrency)));
   const results: TRow[] = [];
 
-  for (const chunk of chunks) {
-    const { data, error } = await fetcher(chunk);
-    if (error) throw error;
-    if (data && data.length > 0) {
-      results.push(...data);
+  for (let i = 0; i < chunks.length; i += safeConcurrency) {
+    const windowChunks = chunks.slice(i, i + safeConcurrency);
+    const settled = await Promise.all(
+      windowChunks.map(async (chunk) => {
+        const { data, error } = await fetcher(chunk);
+        if (error) throw error;
+        return data ?? [];
+      }),
+    );
+    for (const rows of settled) {
+      if (rows.length > 0) {
+        results.push(...rows);
+      }
     }
   }
 

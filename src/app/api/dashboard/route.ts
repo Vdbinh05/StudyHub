@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, handleApiError } from "@/lib/security/errors";
 import { fetchAllPages } from "@/lib/supabase/query-helpers";
-import { rpcGetMyProfile } from "@/lib/supabase/rpc";
+import {
+  isMissingRpcError,
+  rpcGetDashboardSummary,
+  rpcGetMyProfile,
+} from "@/lib/supabase/rpc";
 
 function computeCurrentStreak(activeDates: Set<string>): number {
   if (activeDates.size === 0) return 0;
@@ -25,6 +29,32 @@ function computeCurrentStreak(activeDates: Set<string>): number {
 export async function GET(): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+
+    // Fast path (Migration 0018): 1 single PostgreSQL RPC replaces 11 PostgREST queries
+    const { data: rpcSummary, error: rpcErr } =
+      await rpcGetDashboardSummary(supabase);
+    if (!rpcErr && rpcSummary) {
+      const rawProfile =
+        rpcSummary.profile && typeof rpcSummary.profile === "object"
+          ? (rpcSummary.profile as Record<string, unknown>)
+          : null;
+      return apiSuccess({
+        ...rpcSummary,
+        profile: rawProfile
+          ? {
+              ...rawProfile,
+              email:
+                typeof rawProfile.email === "string" && rawProfile.email
+                  ? rawProfile.email
+                  : (user.email ?? ""),
+            }
+          : null,
+      });
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
+
     const nowIso = new Date().toISOString();
     const fourteenDaysAgoIso = new Date(
       Date.now() - 14 * 86_400_000,
@@ -38,7 +68,6 @@ export async function GET(): Promise<NextResponse> {
       allSets,
       progressRows,
       { data: recentExams, error: examErr },
-      { data: recentSessions, error: sessErr },
       recentSessionAnswers,
       streakExams,
       streakSessions,
@@ -75,12 +104,6 @@ export async function GET(): Promise<NextResponse> {
         .neq("status", "discarded")
         .order("created_at", { ascending: false })
         .limit(20),
-      supabase
-        .from("study_sessions")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("started_at", { ascending: false })
-        .limit(10),
       fetchAllPages(async (from, to) =>
         supabase
           .from("study_session_answers")
@@ -101,9 +124,10 @@ export async function GET(): Promise<NextResponse> {
       fetchAllPages(async (from, to) =>
         supabase
           .from("study_sessions")
-          .select("started_at, completed_items")
+          .select("*")
           .eq("user_id", user.id)
           .gte("started_at", oneYearAgoIso)
+          .order("started_at", { ascending: false })
           .range(from, to),
       ),
       supabase
@@ -119,7 +143,7 @@ export async function GET(): Promise<NextResponse> {
     ]);
 
     if (examErr) throw examErr;
-    if (sessErr) throw sessErr;
+    const recentSessions = streakSessions.slice(0, 5);
 
     const totalQuestions = allSets.reduce((sum, s) => sum + s.question_count, 0);
 

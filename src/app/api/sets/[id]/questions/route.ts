@@ -27,6 +27,9 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
+const QUESTION_SUMMARY_COLUMNS =
+  "id, study_set_id, question_type, position, chapter, prompt, prompt_rich, prompt_image_url, back_text, back_rich, back_image_url, explanation, explanation_rich, hint, audio_media_id, audio_url, passage_id, diagram_id, difficulty, created_at, updated_at";
+
 export async function GET(
   request: NextRequest,
   context: RouteContext,
@@ -40,6 +43,10 @@ export async function GET(
 
     const rawParams = Object.fromEntries(request.nextUrl.searchParams.entries());
     const query = listQuestionsQuerySchema.parse(rawParams);
+    const isSummaryMode =
+      request.nextUrl.searchParams.get("fields")?.trim().toLowerCase() ===
+      "summary";
+    const questionColumns = isSummaryMode ? QUESTION_SUMMARY_COLUMNS : "*";
 
     let filterIds: string[] | null = null;
 
@@ -103,7 +110,7 @@ export async function GET(
         async (chunk) => {
           let q = supabase
             .from("questions")
-            .select("*")
+            .select(questionColumns)
             .eq("study_set_id", setId)
             .in("id", chunk);
           if (query.chapter) q = q.eq("chapter", query.chapter);
@@ -114,7 +121,10 @@ export async function GET(
               `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`,
             );
           }
-          return q;
+          return q as unknown as Promise<{
+            data: Array<Record<string, unknown> & { id: string; position: number; created_at: string }> | null;
+            error: unknown;
+          }>;
         },
         SAFE_IN_CHUNK_SIZE,
       );
@@ -124,7 +134,7 @@ export async function GET(
     } else {
       let qQuery = supabase
         .from("questions")
-        .select("*", { count: "exact" })
+        .select(questionColumns, { count: "exact" })
         .eq("study_set_id", setId);
 
       if (filterIds !== null) {
@@ -151,7 +161,9 @@ export async function GET(
         .range(from, to);
 
       if (error) throw error;
-      rows = (questions ?? []) as Array<Record<string, unknown> & { id: string }>;
+      rows = (questions ?? []) as unknown as Array<
+        Record<string, unknown> & { id: string }
+      >;
       total = count ?? rows.length;
     }
 
@@ -163,6 +175,59 @@ export async function GET(
         page: query.page,
         pageSize: query.pageSize,
         hasMore: false,
+      });
+    }
+
+    if (isSummaryMode) {
+      // Compact summary mode for Study Set Hub list preview: fetches options + starred only
+      const [options, starred] = await Promise.all([
+        fetchInChunks(
+          questionIds,
+          async (chunk) =>
+            supabase
+              .from("question_options")
+              .select(
+                "id, question_id, study_set_id, position, label, content, content_rich, image_url, media_id, image_alt, is_correct, created_at",
+              )
+              .eq("study_set_id", setId)
+              .in("question_id", chunk)
+              .order("position", { ascending: true }),
+          SAFE_IN_CHUNK_SIZE,
+        ),
+        fetchInChunks(
+          questionIds,
+          async (chunk) =>
+            supabase
+              .from("starred_questions")
+              .select("question_id")
+              .eq("user_id", user.id)
+              .in("question_id", chunk),
+          SAFE_IN_CHUNK_SIZE,
+        ),
+      ]);
+
+      const optionsByQ = new Map<string, typeof options>();
+      for (const opt of options) {
+        const arr = optionsByQ.get(opt.question_id) ?? [];
+        arr.push(opt);
+        optionsByQ.set(opt.question_id, arr);
+      }
+      const starredSet = new Set(starred.map((s) => s.question_id));
+
+      const enriched = rows.map((q) => ({
+        ...q,
+        options: optionsByQ.get(q.id) ?? [],
+        accepted_answers: [],
+        tags: [],
+        is_starred: starredSet.has(q.id),
+        progress: null,
+      }));
+
+      return apiSuccess(enriched, {
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: from + enriched.length < total,
       });
     }
 

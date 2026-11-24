@@ -105,19 +105,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // If V1 primary study_set_id was provided, read its defaults for fallback title/duration/passThreshold
-    let primaryStudySet: Awaited<ReturnType<typeof requireStudySetAccess>>["studySet"] | null =
-      null;
-    if (input.study_set_id) {
-      const access = await requireStudySetAccess(
-        supabase,
-        input.study_set_id,
-        user.id,
-        "read",
-      );
-      primaryStudySet = access.studySet;
-    }
-
     // Merge V1 top-level filters & V2 nested `filters`
     const filters: ExamFilterConfig = {
       chapters: input.filters?.chapters ?? input.chapters,
@@ -143,8 +130,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       customPercentagesBySet,
     } = extractSourceIds(normalizedSources);
 
-    const { dedupedSets, candidates: initialCandidates, recentQuestionIds } =
-      await fetchEligibleCandidates({
+    // V3.1 P1-4: Parallelize primaryStudySet access check with candidate resolution
+    const [primaryAccess, eligibleResult] = await Promise.all([
+      input.study_set_id
+        ? requireStudySetAccess(supabase, input.study_set_id, user.id, "read")
+        : Promise.resolve(null),
+      fetchEligibleCandidates({
         supabase,
         userId: user.id,
         folderIds,
@@ -153,7 +144,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         filters,
         selectionPolicy,
         explicitQuestionIds: input.question_ids,
-      });
+        requireProgress: Boolean(input.only_unmastered),
+      }),
+    ]);
+
+    const primaryStudySet = primaryAccess?.studySet ?? null;
+    const { dedupedSets, candidates: initialCandidates, recentQuestionIds } =
+      eligibleResult;
 
     let candidates = initialCandidates;
     if (input.only_unmastered) {
