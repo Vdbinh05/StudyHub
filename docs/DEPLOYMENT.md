@@ -1,11 +1,11 @@
-# StudyHub V3.0 (Complete Learning Edition) — Deployment Guide
+# StudyHub V3.1 (Mobile-First & Tokyo Co-Located Edition) — Deployment Guide
 
 > **Production Stack (100% Free-Tier, Zero AI, Zero Payments):**
-> - **Hosting:** Vercel Hobby — Project `studyhub` (`prj_ddcCZOt10qpV0RbMGltVLyNN29fN`, Team `binhs-projects-438b34e8`, Region `iad1`)
+> - **Hosting:** Vercel Hobby — Project `studyhub` (`prj_ddcCZOt10qpV0RbMGltVLyNN29fN`, Team `binhs-projects-438b34e8`, Region **`hnd1` Tokyo** pinned via `vercel.json` to co-locate with Supabase Cloud `ap-northeast-1`)
 > - **Canonical Production HTTPS URL:** `https://studyhub-three-mauve.vercel.app`
 > - **Repository:** `https://github.com/Vdbinh05/StudyHub` (Production branch: `main`, Git Fork Protection enabled)
 > - **Framework & Runtime:** Next.js `16.4.6` (App Router + Turbopack + `src/proxy.ts`) on **Node.js `24.x`**
-> - **Database, Auth & Storage:** Supabase Cloud Free (PostgreSQL `17.12`, **37/37** public tables with strict RLS across Migrations `0001`–`0017`, private `study-media` and `study-temp` Storage buckets)
+> - **Database, Auth & Storage:** Supabase Cloud Free (`ap-northeast-1` Tokyo, PostgreSQL `17.12`, **37/37** public tables with strict RLS across Migrations `0001`–`0018`, private `study-media` and `study-temp` Storage buckets)
 
 ---
 
@@ -47,9 +47,9 @@ vercel env ls --scope binhs-projects-438b34e8
 
 ---
 
-## 3. Supabase Database Migrations (`0001`–`0017`)
+## 3. Supabase Database Migrations (`0001`–`0018`)
 
-All 17 SQL migrations in `supabase/migrations/` are strictly additive and immutable once applied to production (**never** rewrite `0001`–`0017` or run `db reset` against live Supabase Cloud):
+All 18 SQL migrations in `supabase/migrations/` are strictly additive and immutable once applied to production (**never** rewrite `0001`–`0018` or run `db reset` against live Supabase Cloud):
 
 | Range | Migration Files | Scope |
 | --- | --- | --- |
@@ -57,6 +57,7 @@ All 17 SQL migrations in `supabase/migrations/` are strictly additive and immuta
 | **V2.0–V2.1 Exams & Cloud Hardening** | `0005_v2_custom_exams_and_coverage.sql` – `0012_v2_1_fix_coverage_delete_cascade.sql` | 6 V2 tables (multi-subject exams, presets, full coverage cycles), anon RPC lockdown, RLS recursion & clone fixes |
 | **V3.0 Complete Learning Edition** | `0013_v3_media_richtext_questions_schema.sql` – `0016_v3_live_fixes.sql` | 10 V3 tables (`media_assets`, `content_media_relations` with `ON DELETE RESTRICT`, `shared_passages`, `diagram_sets`, `diagram_hotspots`, `user_question_notes`, `question_reports`, `learning_session_checkpoints`, `learning_confidence_events`, `learning_sync_events`), 12-type grading, global search, scoped reset, offline sync RPCs |
 | **V3.0 Production Vercel Hardening** | `0017_v3_production_vercel_hardening.sql` | Private `study-temp` bucket (`20 MB` cap, 3 `{auth.uid()}` RLS policies for direct > 3.5 MB uploads), `public.api_rate_limits` (RLS deny-all) + `service_role`-only atomic `check_and_increment_rate_limit()` RPC with opportunistic pruning |
+| **V3.1 Performance RPCs & Indexes** | `0018_v3_1_performance_rpcs_and_indexes.sql` | 3 single-RTT `SECURITY DEFINER` RPCs (`get_dashboard_summary`, `get_study_set_summary`, `record_study_session_answer` with full SM-2/confidence/hint parity) + 5 targeted composite indexes |
 
 Total live schema state: **37/37** public tables with `ENABLE ROW LEVEL SECURITY` and **2** private Storage buckets (`study-media`, `study-temp`).
 
@@ -116,7 +117,8 @@ Vercel Hobby enforces a hard **4.5 MB** inbound request body cap at the Edge. St
   - `"/api/import/parse"`: `["./node_modules/pdfjs-dist/legacy/build/*.mjs", "./node_modules/pdfjs-dist/standard_fonts/**/*", "./node_modules/pdfjs-dist/cmaps/**/*"]` (excludes ~8.5 MB of `.mjs.map` sourcemaps)
 - **`serverExternalPackages: ["pdfjs-dist"]`** paired with leaf imports (`@/lib/import/text-utils`, `@/lib/import/zip-guard`, `@/lib/import/validator`, `@/lib/import/templates`) keeps `/api/export/pdf` and non-parse routes completely free of `pdfjs-dist` bloat.
 - **`runtime = "nodejs"` and `maxDuration = 60`** exported on all heavy import, export, media upload, exam, coverage, duplicate, restore, and sync routes.
-- **`images: { unoptimized: true }`** guarantees zero Vercel Hobby Image Optimization quota usage (images serve via authenticated 302 signed URLs direct from Supabase Storage).
+- **`images: { unoptimized: true }`** guarantees zero Vercel Hobby Image Optimization quota usage (images serve via authenticated 302 signed URLs direct from Supabase Storage with `Cache-Control: private, max-age=1800` + `Vary: Cookie`).
+- **Tokyo Region Co-Location (`vercel.json`):** Root `vercel.json` pins `"regions": ["hnd1"]` on Vercel Hobby so Serverless Functions execute in Tokyo alongside Supabase Cloud `ap-northeast-1` (eliminating cross-Pacific RTTs and cutting live API latencies by `-72%` to `-88%`; verified via `X-Vercel-Id: hkg1::hnd1::...`).
 - **Security Headers & PWA:** Production HSTS (`max-age=63072000; includeSubDomains`), strict CSP (zero `'unsafe-eval'` or `localhost`), `X-Frame-Options: DENY`, `Permissions-Policy: camera=(), microphone=(self), geolocation=()`, and `/sw.js` served with `Cache-Control: no-cache, no-store, must-revalidate` and `Service-Worker-Allowed: /`.
 
 ---
@@ -125,7 +127,7 @@ Vercel Hobby enforces a hard **4.5 MB** inbound request body cap at the Edge. St
 
 The Vercel project `studyhub` is linked directly to `https://github.com/Vdbinh05/StudyHub`:
 
-1. **Push to `main`:** Automatically triggers a **Production** build on Vercel (`iad1`, Node `24.x`) and aliases `https://studyhub-three-mauve.vercel.app` upon `READY`.
+1. **Push to `main`:** Automatically triggers a **Production** build on Vercel (`hnd1` Tokyo, Node `24.x`) and aliases `https://studyhub-three-mauve.vercel.app` upon `READY`.
 2. **Pull Requests / Feature Branches:** Automatically build isolated **Preview** deployments guarded by Vercel Deployment Protection (`vercel_authentication`) and `gitForkProtection: true`.
 3. **Manual Verification Before Pushing to `main`:**
    ```bash

@@ -1,9 +1,9 @@
-# StudyHub V3.0 — Complete Learning Edition
+# StudyHub V3.1 — Mobile-First Complete Learning Edition
 
-**Personal Study, Multimedia Flashcard, Visual Diagram, Offline PWA & Universal Mock Exam Preparation Web Application** combining the clean active-recall modes of **Quizlet** with the multi-format question-bank importing, 12-type structured exam engine, Vietnamese print-ready PDF exports, and full-coverage testing workflows of **EduQuiz**.
+**Personal Study, Multimedia Flashcard, Visual Diagram, Offline PWA & Universal Mock Exam Preparation Web Application** combining the fast, calm active-recall ergonomics of **Quizlet** with the multi-format question-bank importing, 12-type structured exam engine, Vietnamese print-ready PDF exports, and full-coverage testing workflows of **EduQuiz**.
 
-> **Live Production HTTPS:** [`https://studyhub-three-mauve.vercel.app`](https://studyhub-three-mauve.vercel.app) (Vercel Hobby + Supabase Cloud Free, `$0/month`)  
-> **100% Deterministic · Zero AI · Zero Payments · Privacy-First · Live-Verified on Supabase Cloud PostgreSQL 17.12 (`37/37` RLS Tables) · Offline-Capable PWA · Built for 10,000+ Questions & 1,000-Question Multi-Subject Exams**
+> **Live Production HTTPS:** [`https://studyhub-three-mauve.vercel.app`](https://studyhub-three-mauve.vercel.app) (Vercel Hobby **`hnd1` Tokyo** co-located with Supabase Cloud `ap-northeast-1` Free, `$0/month`)  
+> **100% Deterministic · Zero AI · Zero Payments · Privacy-First · Live-Verified on Supabase Cloud PostgreSQL 17.12 (`37/37` RLS Tables, Migrations `0001`–`0018`) · Lighthouse Mobile `97` (`/`) & `93` (`/login`) · `0.0000` Mobile CLS · Offline-Capable PWA · Built for 10,000+ Questions & 1,000-Question Multi-Subject Exams**
 
 ---
 
@@ -11,8 +11,8 @@
 
 - **Zero AI in Runtime:** No LLMs, no OpenAI/Gemini/Anthropic SDKs, no chatbots, no vector databases, no paid TTS/STT, no OCR APIs, and no probabilistic guessing. File parsing (including multimedia `.docx` & selectable-text `.pdf` with honest scanned-PDF detection), answer-key detection, 12-type exam grading, multi-subject allocation (Strategies A–E), selection policies (1–8), Full Coverage cycles, SM-2 + confidence calibration, visual diagram geometry, Vietnamese PDF export (`pdf-lib`), and offline sync are **100% deterministic**.
 - **Zero Payments or Artificial Limits:** No Stripe/billing SDKs, no paywalls, no ads, no paid trials, no Pro upgrades, and no artificial caps on study sets, imports, media assets, diagrams, offline downloads, PDF exports, exam presets, or exam attempts.
-- **Bilingual Academic Calm UI (WCAG 2.2 AA):** Vietnamese (`vi`) default with instant English (`en`) switch (persisting localized `<title>` and skip links across reloads), Light & Dark modes (31/31 AA contrast pairs), wired preferences (`PreferencesProvider` + `<MotionConfig>`), IME-safe keyboard shortcuts (`?`), `Ctrl+K` Global Search (strictly blocked during active exams), and responsive navigation (`0px` overflow & `0px` navbar overlap across `360px`–`1920px`). User study content is never auto-translated.
-- **Defense-in-Depth Security (Live-Verified on Production HTTPS):** Strict Row-Level Security (RLS) on all **37 PostgreSQL tables** across Migrations `0001`–`0017`, Supabase Cloud Security Advisor **`0` errors** (`unindexed_foreign_keys = 0`), distributed PostgreSQL rate limiting (`public.api_rate_limits`), server-verified sessions via `src/proxy.ts`, zero pre-submit answer leakage across all 12 exam types (`42501` column revocation), private `study-media` & `study-temp` Storage buckets (zero SVG/HTML, `ON DELETE RESTRICT` protecting exam snapshots, `>3.5 MB` direct signed `PUT` bypass with `finally` cleanup), TipTap JSON AST v1 sanitization + KaTeX `trust: false`, account-partitioned IndexedDB (`0`-leak A→B switch), strict `/sw.js` exclusion of `/api/*`/`/auth/*`/`/share/*`/`redirected`/`private` responses, and production HSTS/CSP/`Permissions-Policy` headers.
+- **Mobile-First Calm Academic UI (WCAG 2.2 AA, V3.1 Overhaul):** Vietnamese (`vi`) default with instant English (`en`) switch, Light & Dark modes (31/31 AA contrast pairs), clean 4-tab `64px` mobile bottom navigation (`Trang chủ / Thư viện / Thi thử / Cá nhân`, auto-hidden on focus modes), Study-First Set Hub, Direct-Start Q1 Practice, 3-step Exam Builder & Import Wizard (`0px` overflow & `0px` overlap across `360px`–`1920px`), `0.0000` mobile CLS, visible `Nộp bài` in mobile exam headers, IME-safe keyboard shortcuts (`?`), and `Ctrl+K` Global Search (strictly blocked during active exams). User study content is never auto-translated.
+- **Defense-in-Depth Security (Live-Verified on Production HTTPS):** Strict Row-Level Security (RLS) on all **37 PostgreSQL tables** across Migrations `0001`–`0018`, Supabase Cloud Security Advisor **`0` errors** (`unindexed_foreign_keys = 0`), distributed PostgreSQL rate limiting (`public.api_rate_limits`), server-verified sessions via `src/proxy.ts` (`hasSupabaseAuthCookie` fast-path rejecting forged cookies), zero pre-submit answer leakage across all 12 exam types (`42501` column revocation), private `study-media` & `study-temp` Storage buckets (zero SVG/HTML, `ON DELETE RESTRICT` protecting exam snapshots, `>3.5 MB` direct signed `PUT` bypass with `finally` cleanup), TipTap JSON AST v1 sanitization + KaTeX `trust: false`, account-partitioned IndexedDB (`0`-leak A→B switch), strict `/sw.js` exclusion of `/api/*`/`/auth/*`/`/share/*`/`redirected`/`private` responses, and production HSTS/CSP/`Permissions-Policy` headers.
 
 ---
 
@@ -54,9 +54,9 @@
 | **Framework & Language** | Next.js `16.4.6` (App Router, Turbopack, `src/proxy.ts`), React `19.3.1`, TypeScript `5.9` (`strict: true`) |
 | **Styling, Rich Text & Motion** | Tailwind CSS v4, Radix UI + shadcn/ui, Lucide React, `motion/react`, `next-themes`, `sonner`, TipTap (`@tiptap/*`, lazy-split), KaTeX (`trust: false`) |
 | **State, Scale & Offline PWA** | TanStack Query v5, TanStack Virtual v3, React Hook Form + Zod v4 (`^4.6.7`), Recharts v3 (lazy-split), `idb` (account-partitioned IndexedDB), `public/sw.js` |
-| **Backend & Database** | Supabase (`@supabase/supabase-js`, `@supabase/ssr`), PostgreSQL 15–17 (**37 RLS tables**, Migrations `0001`–`0017`, **71 API routes**, private `study-media` & `study-temp` Storage, distributed PG rate limiting) |
+| **Backend & Database** | Supabase (`@supabase/supabase-js`, `@supabase/ssr`), PostgreSQL 15–17 (**37 RLS tables**, Migrations `0001`–`0018`, **71 API routes**, Vercel **`hnd1` Tokyo** co-located with Supabase `ap-northeast-1`, private `study-media` & `study-temp` Storage, distributed PG rate limiting) |
 | **Deterministic Server Parsers & PDF** | `jszip`, `fast-xml-parser`, `mammoth`, `exceljs`, `papaparse`, `pdfjs-dist` (`serverExternalPackages`, `outputFileTracingIncludes`, `isEvalSupported: false`), `pdf-lib` + `@pdf-lib/fontkit` (`ReadableStream` streaming, **0 B** client leakage) |
-| **Testing & Quality** | Vitest `5.1` (**52 files / 388 tests** incl. live PG 17.12 & live HTTPS Vercel production suites), React Testing Library, `fake-indexeddb`, Playwright `1.58` (**22/22 live HTTPS E2E**), ESLint `9` flat config |
+| **Testing & Quality** | Vitest `5.1` (**53 files / 396 tests** PASS LIVE in `43.75s` against Vercel `hnd1` production), React Testing Library, `fake-indexeddb`, Playwright `1.58` (**22/22 live HTTPS E2E** in `4.0m` + **55/55** 5-width mobile matrix), ESLint `9` flat config |
 
 ---
 
@@ -88,16 +88,14 @@ cp .env.example .env.local
 
 > If Supabase env vars are not configured yet, public routes still build and run cleanly, protected routes redirect (`307 -> /login?setup=1`) with friendly maintenance copy, and database APIs fail closed with `503 SUPABASE_NOT_CONFIGURED` (never fake auth or mock data).
 
-### 3. Apply Supabase Database Migrations (`0001`–`0017`)
+### 3. Apply Supabase Database Migrations (`0001`–`0018`)
 
-Migrations live in `supabase/migrations/` and MUST be applied strictly in order (`0001`–`0012` are frozen V1.0–V2.1 baseline migrations; `0013`–`0017` deliver V3.0 Complete Learning Edition + Vercel Hobby production hardening):
+Migrations live in `supabase/migrations/` and MUST be applied strictly in order (`0001`–`0017` are frozen V1.0–V3.0 migrations; `0018` adds V3.1 single-RTT performance RPCs and composite indexes):
 - **`0001`–`0004` (V1.0 Baseline):** 20 core tables, RLS, triggers/RPCs, private `study-media` bucket.
 - **`0005`–`0012` (V2.0–V2.1):** +6 tables (`exam_presets`, `exam_preset_sources`, `exam_attempt_sources`, `coverage_cycles`, `coverage_cycle_questions`, `coverage_cycle_attempts`), multi-subject & Full Coverage RPCs, Cloud Advisor hardening (`pg_trgm -> extensions`, `anon` lockdown), and PG 17.12 fixes.
-- **`0013_v3_media_richtext_questions_schema.sql`:** Upgrades `study-media` to `10 MB` (4 raster + 9 audio MIMEs, zero SVG/HTML); adds `media_assets`, `content_media_relations` (`ON DELETE RESTRICT` + 6 polymorphic cleanup triggers), `shared_passages`, `diagram_sets`, `diagram_hotspots`; widens core tables; enforces column-level `42501` revocation & updated `prevent_exam_snapshot_update()`; extends `study_media_select` for historical exam media.
-- **`0014_v3_learning_notes_reports_sync_tables.sql`:** Adds `user_question_notes`, `question_reports`, `learning_session_checkpoints`, `learning_confidence_events`, `learning_sync_events` with strict `(SELECT auth.uid())` RLS & FK indexes.
-- **`0015_v3_rpcs_grading_search_reset_sync.sql`:** Adds `point_in_hotspot`, `sanitize_pre_submit_type_payload`, `grade_v3_exam_answer`, upgraded 12-type exam & clone RPCs, `reset_learning_progress()`, `global_library_search()`, and PgBouncer-safe `sync_offline_learning_events()`.
-- **`0016_v3_live_fixes.sql`:** PG 17.12 live fixes (`btrim` drop for legacy `questions_prompt_check`, SM-2 `-0.54`/`-0.59` ease restoration, confidence/hint mastery caps, JSONB `passage_id`/`diagram_id` clone remap, and stale `checkpoint_upsert` sync guard).
+- **`0013`–`0016` (V3.0 Complete Learning Edition):** +10 tables (`media_assets`, `content_media_relations` `ON DELETE RESTRICT`, `shared_passages`, `diagram_sets`, `diagram_hotspots`, `user_question_notes`, `question_reports`, `learning_session_checkpoints`, `learning_confidence_events`, `learning_sync_events`), 10 MB raster+audio Storage, 12-type grading, scoped reset, global search, offline sync, and PG 17.12 fixes.
 - **`0017_v3_production_vercel_hardening.sql`:** Private `study-temp` bucket (`20 MB`, 3 `{auth.uid()}` RLS policies for `>3.5 MB` Vercel Hobby direct-upload bypass) and `public.api_rate_limits` (table #37, deny-all RLS) + `service_role`-only atomic `check_and_increment_rate_limit()` RPC.
+- **`0018_v3_1_performance_rpcs_and_indexes.sql`:** 3 single-RTT `SECURITY DEFINER` RPCs (`get_dashboard_summary`, `get_study_set_summary`, `record_study_session_answer` with full SM-2/confidence/hint parity) + 5 targeted composite indexes.
 
 **Option A — Hosted Supabase Cloud:**
 ```bash
@@ -127,18 +125,18 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ---
 
-## Verification Commands & Current V3.0 Production Release Status
+## Verification Commands & Current V3.1 Production Release Status
 
-> **Live Production Release Verdict (`final-auditor`):** **`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`** at [`https://studyhub-three-mauve.vercel.app`](https://studyhub-three-mauve.vercel.app) (**22/22** §22 Release Gates PASS; **30/30** Live Production Functional/Bypass/Scale/Phase-7 Auth Cases PASS; **22/22** Live Production Security Tests PASS; **52/52** Vitest files / **388/388** tests verified LIVE against production HTTPS; **0** open P0/P1/P2 defects; real user data 100% preserved). See [`docs/audit/v3-production/FINAL_ACCEPTANCE.md`](docs/audit/v3-production/FINAL_ACCEPTANCE.md).
+> **Live V3.1 Release Verdict (`final-auditor`):** **`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`** at [`https://studyhub-three-mauve.vercel.app`](https://studyhub-three-mauve.vercel.app) (`hnd1` Tokyo co-located with Supabase `ap-northeast-1`, commit `cd6ac95` / `dpl_ECw8AgEdUPCp9dLq1GAJgnJCNm61`; **53/53** Vitest files / **396/396** tests PASS LIVE in **`43.75s`** [`-74.0%`]; **22/22** Playwright E2E in **`4.0m`** [`-49.4%`]; **55/55** 5-width mobile matrix PASS; Lighthouse Mobile **`97`** `/` & **`93`** `/login`; **`9/9` routes `CLS <= 0.0085`**; APIs **`-72%` to `-88%`** faster; **0** open P0/P1 defects; real user data 100% preserved). See [`docs/audit/v3.1-ux-performance/FINAL_ACCEPTANCE.md`](docs/audit/v3.1-ux-performance/FINAL_ACCEPTANCE.md).
 
 | Command | Purpose | Fresh Verified Result (`2026-11-25`) |
 | --- | --- | --- |
 | `npm run typecheck` | TypeScript strict check (`tsc --noEmit`) | **PASS** (`0` errors) |
 | `npm run lint` | ESLint 9 flat config (`eslint .`) | **PASS** (`0` errors, `0` warnings) |
-| `LIVE_API_BASE_URL=https://studyhub-three-mauve.vercel.app npm run test` | Full Vitest suite (unit, diagram, offline, PDF export, Vercel transport/hardening + **live PG 17.12 & live HTTPS Vercel suites**) | **PASS (LIVE):** **52/52 files, 388/388 tests verified LIVE** against `https://studyhub-three-mauve.vercel.app` (`live-db-rpcs` **8/8**, `live-v3-db-rpcs` **8/8**, `live-rls-security` **11/11**, `live-v3-rls-security` **11/11**, `vercel-production-hardening` **12/12**, `vercel-transport` **12/12**) |
-| `npm run build` / Vercel Production Build | Next.js 16.4.6 Turbopack production build (Node `24.x`) | **PASS** (`dpl_CUxPSwsnAfqQCVcLf8shZZwbrQDQ`, `28s`, `0` secret leaks & `0 B` server-parser leaks across `28` deployed CDN chunks) |
+| `LIVE_API_BASE_URL=https://studyhub-three-mauve.vercel.app npm run test` | Full Vitest suite (unit, diagram, offline, PDF export, Vercel transport/hardening, `0018` perf + **live PG 17.12 & live HTTPS Vercel `hnd1` suites**) | **PASS (LIVE):** **`53/53` files, `396/396` tests PASS LIVE in `43.75s`** (`live-db-rpcs` **8/8**, `live-v3-db-rpcs` **8/8**, `live-rls-security` **11/11**, `live-v3-rls-security` **11/11**, `v31-backend-performance` **7/7**, `supabase-migrations-audit` **11/11**) |
+| Vercel Production Auto-Build (`hnd1` Tokyo) | Next.js 16.4.6 Turbopack production build (Node `24.x`) | **PASS** (`dpl_ECw8AgEdUPCp9dLq1GAJgnJCNm61`, `33s`, `X-Vercel-Id: hkg1::hnd1`, `0` secret leaks across `23` deployed CDN chunks) |
 | `npm audit --omit=dev` | Production dependency vulnerability audit | **0 Critical, 0 High** (only pre-existing 2 Moderate `exceljs -> uuid@8.3.2` `SH-044`; **0 new advisories**; do NOT run `--force`) |
-| `PLAYWRIGHT_BASE_URL=https://studyhub-three-mauve.vercel.app npx playwright test --workers=1` | Full Live HTTPS Playwright E2E + `>4.5 MiB` bypass + 500Q/250Q scale + Phase 7 Auth | **PASS (LIVE):** **30/30 production cases PASS** (`22/22` Playwright E2E, `3/3` `>4.5 MiB` `study-temp` bypasses, `4/4` 500Q/250Q/Full Coverage/PDF scale, Phase 7 `/auth/confirm`, `0` skipped, `0` failed) |
+| `PLAYWRIGHT_BASE_URL=https://studyhub-three-mauve.vercel.app npx playwright test --workers=1` | Full Live HTTPS Playwright E2E + 5-width mobile matrix + throttled 4G + CLS | **PASS (LIVE):** **`22/22` E2E in `4.0m` (`-49.4%`)**, **`55/55`** mobile viewport matrix (`0px` overflow/overlap), **`9/9` routes `CLS <= 0.0085`** (`0.0000` mobile CLS on `/sets/[id]` & `/exams/new`) |
 
 ### Running Full Live Playwright E2E Tests
 With `.env.local` pointing to a migrated (`0001`–`0016`) Supabase instance (tests create & delete strictly tracked disposable `*@studyhub-test.local` accounts without touching real user data):
@@ -162,6 +160,14 @@ npx playwright test --workers=1
 ---
 
 ## Documentation & Independent Audit Index
+
+### V3.1 Mobile-First UX & Performance Overhaul Audit Suite (`docs/audit/v3.1-ux-performance/`)
+- [docs/audit/v3.1-ux-performance/FINAL_ACCEPTANCE.md](docs/audit/v3.1-ux-performance/FINAL_ACCEPTANCE.md) — **Binding V3.1 Release Verdict (`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`), Before/After Summary & §24 Budget Evaluation**
+- [docs/audit/v3.1-ux-performance/ISSUE_TRACKER.md](docs/audit/v3.1-ux-performance/ISSUE_TRACKER.md) — All 14 UX baseline issues (`UX31-01..14`), backend/frontend perf root causes, & 3 regressions closed (`0` open P0/P1)
+- [docs/audit/v3.1-ux-performance/PERFORMANCE_BEFORE_AFTER.md](docs/audit/v3.1-ux-performance/PERFORMANCE_BEFORE_AFTER.md) — Repeatable Lab Before (`iad1`) vs After (`hnd1`) APIs (`-72%` to `-88%`), Lighthouse (`97`/`93`), Mobile 4G LCP & `0.0000` mobile CLS
+- [docs/audit/v3.1-ux-performance/MOBILE_TEST_REPORT.md](docs/audit/v3.1-ux-performance/MOBILE_TEST_REPORT.md) — `22/22` live E2E (`4.0m`), `55/55` 5-width mobile matrix, throttled 4G 250Q exam & HTTPS Offline PWA
+- [docs/audit/v3.1-ux-performance/UX_AUDIT.md](docs/audit/v3.1-ux-performance/UX_AUDIT.md) & [UX_BASELINE.md](docs/audit/v3.1-ux-performance/UX_BASELINE.md) — 16-task Before/After student usability audit + `32` curated PNG screenshots (`before/` & `after/`)
+- [docs/audit/v3.1-ux-performance/SECURITY_REGRESSION.md](docs/audit/v3.1-ux-performance/SECURITY_REGRESSION.md) — `38/38` live DB/RLS tests in `37.8s`, `0018` RPCs, `proxy.ts` fast-path & `23` CDN chunks clean
 
 ### V3.0 Production Release & Vercel Hobby Audit Suite (`docs/audit/v3-production/`)
 - [docs/audit/v3-production/FINAL_ACCEPTANCE.md](docs/audit/v3-production/FINAL_ACCEPTANCE.md) — **Binding Production Release Verdict (`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`) & 22/22 §22 Release Gates**
