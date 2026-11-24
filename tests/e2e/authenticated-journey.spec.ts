@@ -66,44 +66,23 @@ async function createSetAndImport(
   const setId = match?.[1] ?? "";
   expect(setId).toBeTruthy();
 
-  // Real 6-step ImportWizard flow
+  // Real 3-step V3.1 ImportWizard flow (Step 1 Input -> Step 2 Preview & Confirm -> Step 3 Done)
   const pasteTab = page.getByRole("tab", { name: /dán văn bản|paste text/i });
   if (await pasteTab.isVisible().catch(() => false)) {
     await pasteTab.click();
   }
   await page.locator("#import-raw-textarea").fill(fixtureText);
 
-  // Step 1 -> Step 2 (Format Detection & Structure)
+  // Step 1 -> Step 2 (Analyze & Preview & Confirm)
   await page
     .getByRole("button", { name: /phân tích & tiếp tục|analyze & continue/i })
     .click();
 
-  // Step 2 -> Step 3 (Answer Detection Rule)
-  await page
-    .getByRole("button", { name: /tiếp: quy tắc đáp án|next: answer rules/i })
-    .click();
-
-  // Step 3 -> Step 4 (Parse & Preview Questions)
-  await page
-    .getByRole("button", { name: /phân tích & xem trước|parse & preview/i })
-    .click();
-
-  // Step 4: verify parsed count & advance -> Step 5 (Fix Issues & Options)
+  // Step 2: verify parsed count & commit directly to live PostgreSQL
   await expect(
     page.getByText(new RegExp(`\\b${expectedCount}\\b`)).first(),
   ).toBeVisible({ timeout: 15_000 });
-  await page
-    .getByRole("button", {
-      name: /tiếp: chỉnh sửa & tùy chọn nhập|next: fix issues/i,
-    })
-    .click();
 
-  // Step 5 -> Step 6 (Confirm & Commit)
-  await page
-    .getByRole("button", { name: /tiếp: xác nhận nhập|next: confirm & import/i })
-    .click();
-
-  // Step 6: Commit import to live PostgreSQL
   await page
     .getByRole("button", {
       name: new RegExp(
@@ -111,6 +90,7 @@ async function createSetAndImport(
         "i",
       ),
     })
+    .first()
     .click();
 
   await expect(

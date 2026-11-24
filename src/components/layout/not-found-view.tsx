@@ -4,9 +4,9 @@ import * as React from "react";
 import Link from "next/link";
 import { Compass, Home, Library } from "lucide-react";
 import { BrandLogo } from "@/components/layout/brand-logo";
+import { LandingThemeMenu } from "@/components/layout/landing-locale-shell";
 import { LanguageToggle } from "@/components/layout/language-toggle";
-import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 
 export function NotFoundView() {
@@ -21,7 +21,7 @@ export function NotFoundView() {
           </Link>
           <div className="flex items-center gap-1">
             <LanguageToggle />
-            <ThemeToggle compact />
+            <LandingThemeMenu />
           </div>
         </div>
       </header>
@@ -42,21 +42,25 @@ export function NotFoundView() {
         </p>
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
-          <Button asChild>
-            <Link href="/dashboard">
-              <Home className="size-4" aria-hidden="true" />
-              <span>{t("common.goDashboard")}</span>
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/library">
-              <Library className="size-4" aria-hidden="true" />
-              <span>{t("common.goLibrary")}</span>
-            </Link>
-          </Button>
-          <Button asChild variant="ghost">
-            <Link href="/">{t("common.goHome")}</Link>
-          </Button>
+          <Link
+            href="/dashboard"
+            prefetch={false}
+            className={buttonVariants()}
+          >
+            <Home className="size-4" aria-hidden="true" />
+            <span>{t("common.goDashboard")}</span>
+          </Link>
+          <Link
+            href="/library"
+            prefetch={false}
+            className={buttonVariants({ variant: "outline" })}
+          >
+            <Library className="size-4" aria-hidden="true" />
+            <span>{t("common.goLibrary")}</span>
+          </Link>
+          <Link href="/" className={buttonVariants({ variant: "ghost" })}>
+            {t("common.goHome")}
+          </Link>
         </div>
       </main>
     </div>

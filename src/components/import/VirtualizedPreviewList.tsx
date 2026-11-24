@@ -166,37 +166,47 @@ export function VirtualizedPreviewList({
 
   return (
     <div className="space-y-4">
-      {/* Summary KPI Strip */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      {/* Compact Mobile-Safe Summary KPI Strip */}
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         <SummaryKpi
           label={locale === "en" ? "Total Detected" : "Tổng phát hiện"}
           value={summary.totalDetected}
           tone="neutral"
         />
         <SummaryKpi
-          label={locale === "en" ? "Valid" : "Hợp lệ"}
+          label={locale === "en" ? "Ready" : "Hợp lệ"}
           value={summary.validCount}
           tone="success"
         />
         <SummaryKpi
-          label={locale === "en" ? "Missing Answer" : "Thiếu đáp án"}
-          value={summary.missingAnswerCount}
-          tone={summary.missingAnswerCount > 0 ? "error" : "neutral"}
-        />
-        <SummaryKpi
-          label={locale === "en" ? "Format Errors" : "Tổng câu lỗi"}
+          label={
+            summary.missingAnswerCount > 0
+              ? locale === "en"
+                ? `Errors (${summary.missingAnswerCount} no key)`
+                : `Cần sửa (${summary.missingAnswerCount} thiếu ĐA)`
+              : locale === "en"
+                ? "Errors"
+                : "Cần sửa"
+          }
           value={summary.errorCount}
           tone={summary.errorCount > 0 ? "error" : "neutral"}
         />
         <SummaryKpi
-          label={locale === "en" ? "Conflicts" : "Xung đột"}
-          value={summary.conflictCount}
-          tone={summary.conflictCount > 0 ? "warning" : "neutral"}
-        />
-        <SummaryKpi
-          label={locale === "en" ? "Duplicates" : "Trùng lặp"}
+          label={
+            summary.conflictCount > 0
+              ? locale === "en"
+                ? `Duplicates · ${summary.conflictCount} conflicts`
+                : `Trùng lặp · ${summary.conflictCount} xung đột`
+              : locale === "en"
+                ? "Duplicates"
+                : "Trùng lặp"
+          }
           value={summary.duplicateCount}
-          tone={summary.duplicateCount > 0 ? "warning" : "neutral"}
+          tone={
+            summary.duplicateCount > 0 || summary.conflictCount > 0
+              ? "warning"
+              : "neutral"
+          }
         />
       </div>
 
@@ -282,7 +292,7 @@ export function VirtualizedPreviewList({
       ) : (
         <div
           ref={scrollParentRef}
-          className="h-[540px] overflow-y-auto rounded-xl border border-border bg-muted/20 p-3"
+          className="h-[420px] overflow-y-auto rounded-xl border border-border bg-muted/20 p-2.5 sm:h-[520px] sm:p-3"
           tabIndex={0}
           aria-label={locale === "en" ? "Parsed questions list" : "Danh sách câu hỏi xem trước"}
         >
@@ -316,7 +326,7 @@ export function VirtualizedPreviewList({
                 >
                   <div
                     className={cn(
-                      "rounded-xl border bg-card p-4 transition-colors",
+                      "min-w-0 overflow-hidden rounded-xl border bg-card p-3.5 transition-colors sm:p-4",
                       q.excluded && "opacity-55",
                       hasError
                         ? "border-destructive/50"
@@ -456,8 +466,8 @@ export function VirtualizedPreviewList({
                         onMoveMediaToQuestion={onMoveMediaToQuestion}
                       />
                     ) : (
-                      <div className="space-y-2.5">
-                        <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-foreground">
+                      <div className="min-w-0 space-y-2.5">
+                        <p className="break-words whitespace-pre-wrap text-sm font-medium leading-relaxed text-foreground">
                           {q.prompt || (
                             <span className="italic text-destructive">
                               {locale === "en" ? "(Empty prompt)" : "(Trống nội dung câu hỏi)"}
@@ -604,6 +614,8 @@ export function VirtualizedPreviewList({
                                             key={m.id}
                                             src={m.dataUrl}
                                             alt={m.alt ?? m.fileName}
+                                            loading="lazy"
+                                            decoding="async"
                                             className="h-14 max-w-[120px] rounded border border-border object-contain bg-background"
                                           />
                                         ) : (
@@ -720,6 +732,8 @@ function MediaPreviewChip({
         <img
           src={media.dataUrl}
           alt={media.alt ?? media.fileName}
+          loading="lazy"
+          decoding="async"
           className="h-20 max-w-[160px] rounded object-contain bg-background"
         />
       ) : (
@@ -1005,6 +1019,8 @@ function InlineQuestionEditor({
                   <img
                     src={media.dataUrl}
                     alt={media.alt ?? media.fileName}
+                    loading="lazy"
+                    decoding="async"
                     className="h-10 w-14 rounded border border-border object-contain bg-background"
                   />
                 ) : (

@@ -3,7 +3,6 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -100,10 +99,30 @@ interface PracticeClientProps {
   setId: string;
 }
 
+function subscribePracticeDesktopLg(callback: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia("(min-width: 1024px)");
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getPracticeDesktopLgSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(min-width: 1024px)").matches;
+}
+
+function getPracticeDesktopLgServerSnapshot(): boolean {
+  return false;
+}
+
 export function PracticeClient({ setId }: PracticeClientProps) {
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
-  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
+  const isDesktopLg = React.useSyncExternalStore(
+    subscribePracticeDesktopLg,
+    getPracticeDesktopLgSnapshot,
+    getPracticeDesktopLgServerSnapshot,
+  );
   const searchParams = useSearchParams();
   const {
     data: bundle,
@@ -314,30 +333,29 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     ],
   );
 
-  // Auto-launch if deep-linked with explicit questionIds or ?autostart=1
+  // Direct-Start Practice (UX31-07): immediately launch Q1 with sensible defaults unless `?setup=1` is requested
+  const wantsManualSetup = searchParams.get("setup") === "1";
   React.useEffect(() => {
     if (
       !bundle ||
       autoLaunchedRef.current ||
       phase !== "config" ||
-      filteredQuestions.length === 0
+      filteredQuestions.length === 0 ||
+      wantsManualSetup
     ) {
       return;
     }
-    if (searchParams.get("autostart") === "1" || initialQuestionIdsParam) {
-      autoLaunchedRef.current = true;
-      const timer = setTimeout(() => {
-        void startPracticeSession(filteredQuestions);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
+    autoLaunchedRef.current = true;
+    const timer = setTimeout(() => {
+      void startPracticeSession(filteredQuestions);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [
     bundle,
     filteredQuestions,
-    initialQuestionIdsParam,
     phase,
-    searchParams,
     startPracticeSession,
+    wantsManualSetup,
   ]);
 
   const currentItem = items[currentIndex] ?? null;
@@ -768,6 +786,18 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       headerRight={
         phase === "active" ? (
           <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="min-h-9 gap-1 px-2 text-xs sm:px-2.5 sm:text-sm"
+              onClick={() => setPhase("config")}
+            >
+              <Settings2 className="size-4 shrink-0" aria-hidden="true" />
+              <span className="hidden sm:inline">
+                {lText(locale, "Tùy chỉnh", "Customize")}
+              </span>
+            </Button>
             <Sheet open={navSheetOpen} onOpenChange={setNavSheetOpen}>
               <SheetTrigger asChild>
                 <Button
@@ -783,7 +813,9 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                 <SheetHeader>
                   <SheetTitle>{t("exam.questionNavigator")}</SheetTitle>
                 </SheetHeader>
-                <div className="px-4 pb-6">{renderNavigatorGrid()}</div>
+                <div className="px-4 pb-6">
+                  {navSheetOpen ? renderNavigatorGrid() : null}
+                </div>
               </SheetContent>
             </Sheet>
             <Button
@@ -795,10 +827,25 @@ export function PracticeClient({ setId }: PracticeClientProps) {
               {t("common.finish")}
             </Button>
           </div>
+        ) : phase === "config" && items.length > 0 ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-9"
+            onClick={() => setPhase("active")}
+          >
+            {lText(locale, "Quay lại bài làm", "Resume Session")}
+          </Button>
         ) : null
       }
     >
-      {phase === "config" ? (
+      {phase === "config" &&
+      !wantsManualSetup &&
+      items.length === 0 &&
+      filteredQuestions.length > 0 ? (
+        <StudyLoadingSkeleton />
+      ) : phase === "config" ? (
         <div className="mx-auto w-full max-w-2xl space-y-6">
           <Card>
             <CardHeader>
@@ -1118,7 +1165,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                   return (
                     <div
                       key={item.question.id}
-                      className="rounded-lg border border-border p-4 space-y-2"
+                      className="cv-auto rounded-lg border border-border p-4 space-y-2"
                     >
                       <div className="flex items-start gap-1.5 text-sm font-medium">
                         <span className="shrink-0 tabular-nums">{idx + 1}.</span>
@@ -1195,17 +1242,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         <StudyEmptyState setId={setId} />
       ) : (
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
-          {/* Active Question Card */}
+          {/* Active Question Card (instant 0ms switch — no AnimatePresence mode="wait" delay!) */}
           <div className="mx-auto w-full max-w-3xl space-y-4">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={currentItem.question.id}
-                initial={{ opacity: 0, y: prefersReducedMotion ? 0 : 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: prefersReducedMotion ? 0 : -8 }}
-                transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
-              >
-                <Card>
+            <div key={currentItem.question.id}>
+              <Card>
                   <CardContent className="space-y-5 py-6">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1588,8 +1628,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                     </div>
                   </CardContent>
                 </Card>
-              </motion.div>
-            </AnimatePresence>
+            </div>
 
             {/* Bottom Prev / Next bar */}
             <div className="flex items-center justify-between gap-3">
@@ -1611,13 +1650,15 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             </div>
           </div>
 
-          {/* Desktop Right Navigator */}
-          <aside className="hidden lg:block sticky top-20 rounded-xl border border-border bg-card p-4 shadow-xs">
-            <h2 className="mb-3 text-sm font-semibold">
-              {t("exam.questionNavigator")}
-            </h2>
-            {renderNavigatorGrid()}
-          </aside>
+          {/* Desktop Right Navigator (Conditionally mounted ONLY on >=1024px — P1-4!) */}
+          {isDesktopLg ? (
+            <aside className="sticky top-20 rounded-xl border border-border bg-card p-4 shadow-xs">
+              <h2 className="mb-3 text-sm font-semibold">
+                {t("exam.questionNavigator")}
+              </h2>
+              {renderNavigatorGrid()}
+            </aside>
+          ) : null}
         </div>
       )}
 

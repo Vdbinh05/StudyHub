@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -84,10 +83,32 @@ interface FlashcardsClientProps {
   setId: string;
 }
 
+function subscribeReducedMotion(callback: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getReducedMotionSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function getReducedMotionServerSnapshot(): boolean {
+  return false;
+}
+
 export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
-  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
+  const systemReducedMotion = React.useSyncExternalStore(
+    subscribeReducedMotion,
+    getReducedMotionSnapshot,
+    getReducedMotionServerSnapshot,
+  );
+  const prefersReducedMotion =
+    systemReducedMotion || preferences.reduced_motion;
   const {
     data: bundle,
     isLoading,
@@ -1004,17 +1025,10 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
           </Card>
         ) : activeCard ? (
           <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5">
-            {/* 3D Flip Card Container */}
+            {/* 3D Flip Card Container (GPU-composited CSS 3D flip, 0ms card-switch exit delay) */}
             <div style={{ perspective: 1200 }} className="w-full">
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={activeCard.questionId}
-                  initial={{ opacity: 0, x: prefersReducedMotion ? 0 : 12 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: prefersReducedMotion ? 0 : -12 }}
-                  transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
-                >
-                  <div className="relative">
+              <div key={activeCard.questionId}>
+                <div className="relative">
                     {/* Top overlay controls (outside flip button to keep valid semantic HTML) */}
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1223,11 +1237,14 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                         </div>
                       ) : (
                         /* CSS Grid single-cell stacking so height expands naturally for tall content with ZERO clipping! */
-                        <motion.div
-                          animate={{ rotateY: isFlipped ? 180 : 0 }}
-                          transition={{ duration: 0.3, ease: [0.2, 0, 0, 1] }}
-                          style={{ transformStyle: "preserve-3d" }}
-                          className="grid grid-cols-1 grid-rows-1 w-full"
+                        <div
+                          style={{
+                            transformStyle: "preserve-3d",
+                            transform: isFlipped
+                              ? "rotateY(180deg)"
+                              : "rotateY(0deg)",
+                          }}
+                          className="grid w-full grid-cols-1 grid-rows-1 transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none"
                         >
                           {/* Front face */}
                           <div
@@ -1404,12 +1421,11 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                               </Button>
                             </div>
                           </div>
-                        </motion.div>
+                        </div>
                       )}
                     </article>
                   </div>
-                </motion.div>
-              </AnimatePresence>
+              </div>
             </div>
 
             {/* All 4 SM-2 Rating Controls (1=Again, 2=Hard, 3=Good, 4=Easy — SH-021!) */}

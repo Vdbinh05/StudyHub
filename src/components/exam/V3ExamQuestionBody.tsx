@@ -92,7 +92,7 @@ export interface V3ExamQuestionBodyProps {
   ) => void;
 }
 
-export function V3ExamQuestionBody({
+function V3ExamQuestionBodyInner({
   question,
   record,
   onSelectOption,
@@ -270,7 +270,7 @@ export function V3ExamQuestionBody({
               </div>
 
               {hasOptImage ? (
-                <div className="w-full pt-1">
+                <div className="flex min-h-24 w-full items-center justify-center pt-1">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={opt.image_url ?? ""}
@@ -279,6 +279,8 @@ export function V3ExamQuestionBody({
                       opt.content ||
                       `Option ${displayLetter}`
                     }
+                    loading="lazy"
+                    decoding="async"
                     className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
                   />
                 </div>
@@ -686,13 +688,15 @@ export function V3ExamQuestionBody({
           {isSafeDisplayImageUrl(
             payload.image_url || question.prompt_image_url_snapshot,
           ) ? (
-            <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-border bg-muted/20">
+            <div className="relative inline-flex min-h-48 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/20">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={
                   payload.image_url || question.prompt_image_url_snapshot || ""
                 }
                 alt={lText(locale, "Sơ đồ điểm đánh dấu", "Hotspot diagram")}
+                loading="lazy"
+                decoding="async"
                 className="max-h-[420px] w-auto cursor-crosshair object-contain select-none"
                 onClick={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -836,3 +840,5 @@ export function V3ExamQuestionBody({
     </div>
   );
 }
+
+export const V3ExamQuestionBody = React.memo(V3ExamQuestionBodyInner);

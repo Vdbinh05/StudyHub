@@ -1,10 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, ArrowRight, CheckCircle2, RefreshCw, ScanSearch } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { CheckCircle2, RefreshCw, ScanSearch } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -58,7 +56,9 @@ const ANSWER_RULES: AnswerRuleMode[] = [
   "docx_underline",
 ];
 
-export interface StepFormatConfigProps {
+const UNMAPPED_VALUE = "__UNMAPPED__";
+
+export interface FormatConfigSectionProps {
   locale: Locale;
   detectedFormat: ImportFormat;
   formatOverride: ImportFormat | undefined;
@@ -87,14 +87,10 @@ export interface StepFormatConfigProps {
   isScannedPdf?: boolean;
   pdfPageCount?: number;
   isParsing: boolean;
-  onBack: () => void;
-  onNext: () => void;
-  headingRef?: React.Ref<HTMLHeadingElement>;
+  onApplyReparse: () => void;
 }
 
-const UNMAPPED_VALUE = "__UNMAPPED__";
-
-export function StepFormatConfig({
+export function FormatConfigSection({
   locale,
   detectedFormat,
   formatOverride,
@@ -123,10 +119,8 @@ export function StepFormatConfig({
   isScannedPdf = false,
   pdfPageCount,
   isParsing,
-  onBack,
-  onNext,
-  headingRef,
-}: StepFormatConfigProps) {
+  onApplyReparse,
+}: FormatConfigSectionProps) {
   const activeFormat = formatOverride ?? detectedFormat;
   const isTabular =
     activeFormat === "xlsx_wayground" ||
@@ -165,386 +159,367 @@ export function StepFormatConfig({
   ];
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <CardTitle>
-              <h2
-                ref={headingRef}
-                data-import-step="2"
-                tabIndex={-1}
-                className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                {locale === "en"
-                  ? "Step 2: Format Detection & Structure"
-                  : "Bước 2: Định dạng & Cấu trúc dữ liệu"}
-              </h2>
-            </CardTitle>
-            <CardDescription className="mt-1">
-              {locale === "en"
-                ? "Confirm the auto-detected format or adjust delimiters and column mappings."
-                : "Xác nhận định dạng tự nhận diện hoặc tùy chỉnh ký tự phân cách và ánh xạ cột."}
-            </CardDescription>
-          </div>
-          <Badge variant="secondary" className="gap-1.5">
-            <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
-            {locale === "en" ? "Auto-detected:" : "Tự nhận diện:"}{" "}
-            {getFormatLabel(detectedFormat, locale)}
-          </Badge>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">
+            {locale === "en" ? "Format & Structure" : "Định dạng & Cấu trúc tệp"}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {locale === "en"
+              ? "Change format, Excel sheet, column mapping, or PDF layout if needed."
+              : "Điều chỉnh định dạng, trang tính Excel, ánh xạ cột hoặc bố cục PDF khi cần."}
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="import-format-select">
-              {locale === "en" ? "Import Format" : "Định dạng nguồn"}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="min-h-[38px]"
+          disabled={isParsing}
+          onClick={onApplyReparse}
+        >
+          <RefreshCw
+            className={cn("mr-1.5 size-3.5", isParsing && "animate-spin")}
+            aria-hidden="true"
+          />
+          {isParsing
+            ? locale === "en"
+              ? "Updating…"
+              : "Đang cập nhật…"
+            : locale === "en"
+              ? "Apply & Re-parse"
+              : "Áp dụng & Phân tích lại"}
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="min-w-0 space-y-1.5">
+          <Label htmlFor="import-format-select" className="text-xs">
+            {locale === "en" ? "Source Format" : "Định dạng nguồn"}
+          </Label>
+          <Select
+            value={activeFormat}
+            onValueChange={(v) => onFormatOverrideChange(v as ImportFormat)}
+          >
+            <SelectTrigger id="import-format-select" className="min-h-[42px] w-full min-w-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ALL_FORMATS.map((fmt) => (
+                <SelectItem key={fmt} value={fmt}>
+                  {getFormatLabel(fmt, locale)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {sheetNames && sheetNames.length > 0 && (
+          <div className="min-w-0 space-y-1.5">
+            <Label htmlFor="import-sheet-select" className="text-xs">
+              {locale === "en" ? "Excel Worksheet" : "Trang tính (Sheet)"}
             </Label>
             <Select
-              value={activeFormat}
-              onValueChange={(v) => onFormatOverrideChange(v as ImportFormat)}
+              value={selectedSheet ?? sheetNames[0]}
+              onValueChange={onSheetChange}
             >
-              <SelectTrigger id="import-format-select" className="min-h-[44px]">
+              <SelectTrigger id="import-sheet-select" className="min-h-[42px] w-full min-w-0">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {ALL_FORMATS.map((fmt) => (
-                  <SelectItem key={fmt} value={fmt}>
-                    {getFormatLabel(fmt, locale)}
+                {sheetNames.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
+        )}
+      </div>
 
-          {sheetNames && sheetNames.length > 0 && (
-            <div className="space-y-2">
-              <Label htmlFor="import-sheet-select">
-                {locale === "en" ? "Excel Worksheet" : "Trang tính (Sheet)"}
-              </Label>
-              <Select
-                value={selectedSheet ?? sheetNames[0]}
-                onValueChange={onSheetChange}
-              >
-                <SelectTrigger id="import-sheet-select" className="min-h-[44px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {sheetNames.map((name) => (
-                    <SelectItem key={name} value={name}>
-                      {name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+      {/* PDF Selectable-Text Options */}
+      {isPdf && (
+        <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3.5">
+          {isScannedPdf && (
+            <div
+              role="alert"
+              className="rounded-lg border border-warning/50 bg-warning-subtle px-3 py-2 text-xs text-warning-subtle-foreground"
+            >
+              {locale === "en"
+                ? "This PDF appears to be scanned / image-only with no selectable text layer. StudyHub does not run AI OCR — please export as selectable-text PDF or Word (.docx) before importing."
+                : "Tệp PDF này là bản quét (scan / chỉ gồm hình ảnh), không có lớp văn bản chọn được. StudyHub không dùng AI OCR — vui lòng chuyển sang PDF có văn bản hoặc tệp Word (.docx) trước khi nhập."}
             </div>
           )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="min-w-0 space-y-1.5">
+              <Label htmlFor="pdf-page-range" className="text-xs">
+                {locale === "en"
+                  ? `Page range (optional${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`
+                  : `Khoảng trang (tùy chọn${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`}
+              </Label>
+              <Input
+                id="pdf-page-range"
+                value={pdfPageRange}
+                onChange={(e) => onPdfPageRangeChange?.(e.target.value)}
+                placeholder={locale === "en" ? "e.g. 1-5, 8" : "VD: 1-5, 8"}
+              />
+            </div>
+            <div className="flex items-center gap-3 self-end pb-1">
+              <Switch
+                id="pdf-two-column"
+                checked={pdfTwoColumn}
+                onCheckedChange={(v) => onPdfTwoColumnChange?.(v)}
+              />
+              <Label htmlFor="pdf-two-column" className="text-xs sm:text-sm">
+                {locale === "en"
+                  ? "Two-column reading order (left then right)"
+                  : "Bố cục 2 cột (đọc cột trái trước, phải sau)"}
+              </Label>
+            </div>
+          </div>
         </div>
+      )}
 
-        {/* PDF Selectable-Text Options */}
-        {isPdf && (
-          <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-4">
-            {isScannedPdf && (
-              <div
-                role="alert"
-                className="rounded-lg border border-warning/50 bg-warning-subtle px-3.5 py-2.5 text-xs text-warning-subtle-foreground"
-              >
-                {locale === "en"
-                  ? "This PDF appears to be scanned / image-only with no selectable text layer. StudyHub does not run AI OCR — please export as selectable-text PDF or Word (.docx) before importing."
-                  : "Tệp PDF này có vẻ là bản quét (scan / chỉ gồm hình ảnh), không có lớp văn bản chọn được. StudyHub không sử dụng AI OCR — vui lòng chuyển sang PDF có văn bản hoặc tệp Word (.docx) trước khi nhập."}
-              </div>
-            )}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="pdf-page-range">
-                  {locale === "en"
-                    ? `Page range (optional${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`
-                    : `Khoảng trang (tùy chọn${pdfPageCount ? `, 1–${pdfPageCount}` : ""})`}
-                </Label>
-                <Input
-                  id="pdf-page-range"
-                  value={pdfPageRange}
-                  onChange={(e) => onPdfPageRangeChange?.(e.target.value)}
-                  placeholder={locale === "en" ? "e.g. 1-5, 8" : "VD: 1-5, 8"}
-                />
-              </div>
-              <div className="flex items-center gap-3 self-end pb-1">
-                <Switch
-                  id="pdf-two-column"
-                  checked={pdfTwoColumn}
-                  onCheckedChange={(v) => onPdfTwoColumnChange?.(v)}
-                />
-                <Label htmlFor="pdf-two-column" className="text-sm">
-                  {locale === "en"
-                    ? "Two-column reading order (left then right)"
-                    : "Bố cục 2 cột (đọc cột trái trước, phải sau)"}
-                </Label>
-              </div>
-            </div>
+      {/* Quizlet Delimiter Configuration */}
+      {isQuizlet && (
+        <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-muted/30 p-3.5 sm:grid-cols-2">
+          <div className="min-w-0 space-y-1.5">
+            <Label htmlFor="quizlet-term-delim" className="text-xs">
+              {locale === "en"
+                ? "Between Term & Definition"
+                : "Ngăn cách Thuật ngữ & Định nghĩa"}
+            </Label>
+            <Select
+              value={
+                ["\\t", ",", ";", "-", "|"].includes(termDelimiter)
+                  ? termDelimiter
+                  : "custom"
+              }
+              onValueChange={(v) => {
+                if (v !== "custom") onTermDelimiterChange(v);
+              }}
+            >
+              <SelectTrigger id="quizlet-term-delim" className="min-h-[42px] w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="\t">Tab (\t)</SelectItem>
+                <SelectItem value=",">{locale === "en" ? "Comma (,)" : "Dấu phẩy (,)"}</SelectItem>
+                <SelectItem value=";">{locale === "en" ? "Semicolon (;)" : "Dấu chấm phẩy (;)"}</SelectItem>
+                <SelectItem value="-">{locale === "en" ? "Dash (-)" : "Dấu gạch ngang (-)"}</SelectItem>
+                <SelectItem value="|">{locale === "en" ? "Pipe (|)" : "Dấu gạch đứng (|)"}</SelectItem>
+                <SelectItem value="custom">{locale === "en" ? "Custom…" : "Tùy chỉnh…"}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              aria-label={locale === "en" ? "Custom term delimiter" : "Ký tự ngăn cách tùy chỉnh"}
+              value={termDelimiter}
+              onChange={(e) => onTermDelimiterChange(e.target.value)}
+              placeholder="\t"
+            />
           </div>
-        )}
 
-        {/* Quizlet Delimiter Configuration */}
-        {isQuizlet && (
-          <div className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-muted/30 p-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="quizlet-term-delim">
-                {locale === "en"
-                  ? "Between Term & Definition"
-                  : "Ký tự ngăn cách Thuật ngữ & Định nghĩa"}
-              </Label>
-              <Select
-                value={["\\t", ",", ";", "-", "|"].includes(termDelimiter) ? termDelimiter : "custom"}
-                onValueChange={(v) => {
-                  if (v !== "custom") onTermDelimiterChange(v);
-                }}
-              >
-                <SelectTrigger id="quizlet-term-delim" className="min-h-[44px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="\t">Tab (\t)</SelectItem>
-                  <SelectItem value=",">{locale === "en" ? "Comma (,)" : "Dấu phẩy (,)"}</SelectItem>
-                  <SelectItem value=";">{locale === "en" ? "Semicolon (;)" : "Dấu chấm phẩy (;)"}</SelectItem>
-                  <SelectItem value="-">{locale === "en" ? "Dash (-)" : "Dấu gạch ngang (-)"}</SelectItem>
-                  <SelectItem value="|">{locale === "en" ? "Pipe (|)" : "Dấu gạch đứng (|)"}</SelectItem>
-                  <SelectItem value="custom">{locale === "en" ? "Custom…" : "Tùy chỉnh…"}</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                aria-label={locale === "en" ? "Custom term delimiter" : "Ký tự ngăn cách tùy chỉnh"}
-                value={termDelimiter}
-                onChange={(e) => onTermDelimiterChange(e.target.value)}
-                placeholder="\t"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="quizlet-card-delim">
-                {locale === "en" ? "Between Cards" : "Ký tự ngăn cách giữa các thẻ"}
-              </Label>
-              <Select
-                value={["\\n", "\\n\\n", ";"].includes(cardDelimiter) ? cardDelimiter : "custom"}
-                onValueChange={(v) => {
-                  if (v !== "custom") onCardDelimiterChange(v);
-                }}
-              >
-                <SelectTrigger id="quizlet-card-delim" className="min-h-[44px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="\n">{locale === "en" ? "New line (\\n)" : "Xuống dòng (\\n)"}</SelectItem>
-                  <SelectItem value="\n\n">{locale === "en" ? "Blank line (\\n\\n)" : "Dòng trống (\\n\\n)"}</SelectItem>
-                  <SelectItem value=";">{locale === "en" ? "Semicolon (;)" : "Dấu chấm phẩy (;)"}</SelectItem>
-                  <SelectItem value="custom">{locale === "en" ? "Custom…" : "Tùy chỉnh…"}</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                aria-label={locale === "en" ? "Custom card delimiter" : "Ký tự ngăn cách thẻ tùy chỉnh"}
-                value={cardDelimiter}
-                onChange={(e) => onCardDelimiterChange(e.target.value)}
-                placeholder="\n"
-              />
-            </div>
+          <div className="min-w-0 space-y-1.5">
+            <Label htmlFor="quizlet-card-delim" className="text-xs">
+              {locale === "en" ? "Between Cards" : "Ngăn cách giữa các thẻ"}
+            </Label>
+            <Select
+              value={
+                ["\\n", "\\n\\n", ";"].includes(cardDelimiter)
+                  ? cardDelimiter
+                  : "custom"
+              }
+              onValueChange={(v) => {
+                if (v !== "custom") onCardDelimiterChange(v);
+              }}
+            >
+              <SelectTrigger id="quizlet-card-delim" className="min-h-[42px] w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="\n">{locale === "en" ? "New line (\\n)" : "Xuống dòng (\\n)"}</SelectItem>
+                <SelectItem value="\n\n">{locale === "en" ? "Blank line (\\n\\n)" : "Dòng trống (\\n\\n)"}</SelectItem>
+                <SelectItem value=";">{locale === "en" ? "Semicolon (;)" : "Dấu chấm phẩy (;)"}</SelectItem>
+                <SelectItem value="custom">{locale === "en" ? "Custom…" : "Tùy chỉnh…"}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              aria-label={locale === "en" ? "Custom card delimiter" : "Ký tự ngăn cách thẻ tùy chỉnh"}
+              value={cardDelimiter}
+              onChange={(e) => onCardDelimiterChange(e.target.value)}
+              placeholder="\n"
+            />
           </div>
-        )}
+        </div>
+      )}
 
-        {/* CSV & XLSX Column Mapping + Sample Rows */}
-        {isTabular && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-muted/30 p-3.5">
-              <div className="flex items-center gap-3">
-                <Switch
-                  id="import-header-row"
-                  checked={hasHeaderRow}
-                  onCheckedChange={onHasHeaderRowChange}
-                />
-                <Label htmlFor="import-header-row">
-                  {locale === "en"
-                    ? "First row contains column headers"
-                    : "Hàng đầu tiên là tiêu đề cột"}
-                </Label>
-              </div>
-              {hasHeaderRow &&
-                (activeFormat === "xlsx_generic" || activeFormat === "xlsx_wayground") &&
-                onHeaderRowCountChange && (
-                  <div className="flex items-center gap-2">
-                    <Label htmlFor="xlsx-header-rows" className="text-xs text-muted-foreground">
-                      {locale === "en" ? "Header rows:" : "Số hàng tiêu đề:"}
-                    </Label>
-                    <Select
-                      value={String(headerRowCount)}
-                      onValueChange={(v) =>
-                        onHeaderRowCountChange(v === "2" ? 2 : 1)
-                      }
-                    >
-                      <SelectTrigger id="xlsx-header-rows" className="w-44">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1">
-                          {locale === "en" ? "1 row (Standard)" : "1 hàng (Chuẩn)"}
-                        </SelectItem>
-                        <SelectItem value="2">
-                          {locale === "en"
-                            ? "2 rows (Merged headers)"
-                            : "2 hàng (Tiêu đề gộp)"}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-              {activeFormat === "csv" && (
-                <div className="flex items-center gap-2">
-                  <Label htmlFor="csv-delim" className="text-xs text-muted-foreground">
-                    {locale === "en" ? "Delimiter:" : "Phân tách:"}
+      {/* CSV & XLSX Column Mapping + Sample Rows */}
+      {isTabular && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/30 p-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <Switch
+                id="import-header-row"
+                checked={hasHeaderRow}
+                onCheckedChange={onHasHeaderRowChange}
+              />
+              <Label htmlFor="import-header-row" className="text-xs sm:text-sm">
+                {locale === "en"
+                  ? "First row contains column headers"
+                  : "Hàng đầu tiên là tiêu đề cột"}
+              </Label>
+            </div>
+            {hasHeaderRow &&
+              (activeFormat === "xlsx_generic" || activeFormat === "xlsx_wayground") &&
+              onHeaderRowCountChange && (
+                <div className="flex min-w-0 items-center gap-2">
+                  <Label
+                    htmlFor="xlsx-header-rows"
+                    className="shrink-0 text-xs text-muted-foreground"
+                  >
+                    {locale === "en" ? "Header rows:" : "Số hàng tiêu đề:"}
                   </Label>
                   <Select
-                    value={csvDelimiter || "auto"}
-                    onValueChange={(v) => onCsvDelimiterChange(v === "auto" ? "" : v)}
+                    value={String(headerRowCount)}
+                    onValueChange={(v) => onHeaderRowCountChange(v === "2" ? 2 : 1)}
                   >
-                    <SelectTrigger id="csv-delim" className="w-32">
+                    <SelectTrigger id="xlsx-header-rows" className="w-full min-w-0 sm:w-44">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="auto">{locale === "en" ? "Auto" : "Tự động"}</SelectItem>
-                      <SelectItem value=",">Comma (,)</SelectItem>
-                      <SelectItem value=";">Semicolon (;)</SelectItem>
-                      <SelectItem value="\t">Tab</SelectItem>
+                      <SelectItem value="1">
+                        {locale === "en" ? "1 row (Standard)" : "1 hàng (Chuẩn)"}
+                      </SelectItem>
+                      <SelectItem value="2">
+                        {locale === "en"
+                          ? "2 rows (Merged headers)"
+                          : "2 hàng (Tiêu đề gộp)"}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               )}
-            </div>
-
-            {detectedColumns && detectedColumns.length > 0 && (
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-foreground">
-                  {locale === "en" ? "Column Mapping" : "Ánh xạ cột dữ liệu"}
-                </h3>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {mappingFields.map((field) => (
-                    <div key={field.key} className="space-y-1.5">
-                      <Label
-                        htmlFor={`map-${field.key}`}
-                        className="text-xs text-muted-foreground"
-                      >
-                        {locale === "en" ? field.labelEn : field.labelVi}
-                        {field.required && <span className="ml-1 text-destructive">*</span>}
-                      </Label>
-                      <Select
-                        value={columnMapping[field.key] ?? UNMAPPED_VALUE}
-                        onValueChange={(val) => updateMapField(field.key, val)}
-                      >
-                        <SelectTrigger id={`map-${field.key}`}>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={UNMAPPED_VALUE}>
-                            {locale === "en" ? "— Not mapped —" : "— Không ánh xạ —"}
-                          </SelectItem>
-                          {detectedColumns.map((col, colIdx) => (
-                            <SelectItem key={`${colIdx}-${col}`} value={col}>
-                              {col}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {detectedColumns && sampleRows && sampleRows.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-muted-foreground">
-                  {locale === "en"
-                    ? "Sample Rows Preview (first 5 rows)"
-                    : "Xem nhanh 5 dòng dữ liệu đầu tiên"}
-                </p>
-                <div className="overflow-x-auto rounded-lg border border-border">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        {detectedColumns.map((col, idx) => (
-                          <TableHead key={`${col}-${idx}`} className="whitespace-nowrap text-xs">
-                            {col}
-                          </TableHead>
-                        ))}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {sampleRows.slice(0, 5).map((row, rIdx) => (
-                        <TableRow key={rIdx}>
-                          {detectedColumns.map((_, cIdx) => (
-                            <TableCell
-                              key={cIdx}
-                              className="max-w-[220px] truncate text-xs"
-                            >
-                              {row[cIdx] ?? ""}
-                            </TableCell>
-                          ))}
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+            {activeFormat === "csv" && (
+              <div className="flex min-w-0 items-center gap-2">
+                <Label htmlFor="csv-delim" className="shrink-0 text-xs text-muted-foreground">
+                  {locale === "en" ? "Delimiter:" : "Phân tách:"}
+                </Label>
+                <Select
+                  value={csvDelimiter || "auto"}
+                  onValueChange={(v) => onCsvDelimiterChange(v === "auto" ? "" : v)}
+                >
+                  <SelectTrigger id="csv-delim" className="w-full min-w-0 sm:w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">{locale === "en" ? "Auto" : "Tự động"}</SelectItem>
+                    <SelectItem value=",">Comma (,)</SelectItem>
+                    <SelectItem value=";">Semicolon (;)</SelectItem>
+                    <SelectItem value="\t">Tab</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             )}
           </div>
-        )}
 
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-          <Button type="button" variant="outline" className="min-h-[44px]" onClick={onBack}>
-            <ArrowLeft className="mr-2 size-4" aria-hidden="true" />
-            {locale === "en" ? "Back" : "Quay lại"}
-          </Button>
-          <Button
-            type="button"
-            className="min-h-[44px]"
-            disabled={isParsing}
-            onClick={onNext}
-          >
-            {isParsing ? (
-              <>
-                <RefreshCw className="mr-2 size-4 animate-spin" aria-hidden="true" />
-                {locale === "en" ? "Re-parsing…" : "Đang phân tích lại…"}
-              </>
-            ) : (
-              <>
-                {locale === "en" ? "Next: Answer Rules" : "Tiếp: Quy tắc đáp án"}
-                <ArrowRight className="ml-2 size-4" aria-hidden="true" />
-              </>
-            )}
-          </Button>
+          {detectedColumns && detectedColumns.length > 0 && (
+            <div className="space-y-2.5">
+              <p className="text-xs font-semibold text-foreground">
+                {locale === "en" ? "Column Mapping" : "Ánh xạ cột dữ liệu"}
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {mappingFields.map((field) => (
+                  <div key={field.key} className="min-w-0 space-y-1">
+                    <Label
+                      htmlFor={`map-${field.key}`}
+                      className="text-xs text-muted-foreground"
+                    >
+                      {locale === "en" ? field.labelEn : field.labelVi}
+                      {field.required && <span className="ml-1 text-destructive">*</span>}
+                    </Label>
+                    <Select
+                      value={columnMapping[field.key] ?? UNMAPPED_VALUE}
+                      onValueChange={(val) => updateMapField(field.key, val)}
+                    >
+                      <SelectTrigger id={`map-${field.key}`} className="w-full min-w-0">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={UNMAPPED_VALUE}>
+                          {locale === "en" ? "— Not mapped —" : "— Không ánh xạ —"}
+                        </SelectItem>
+                        {detectedColumns.map((col, colIdx) => (
+                          <SelectItem key={`${colIdx}-${col}`} value={col}>
+                            {col}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {detectedColumns && sampleRows && sampleRows.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">
+                {locale === "en"
+                  ? "Sample Rows Preview (first 5 rows)"
+                  : "Xem nhanh 5 dòng đầu tiên"}
+              </p>
+              <div className="max-w-full overflow-x-auto rounded-lg border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      {detectedColumns.map((col, idx) => (
+                        <TableHead key={`${col}-${idx}`} className="whitespace-nowrap text-xs">
+                          {col}
+                        </TableHead>
+                      ))}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sampleRows.slice(0, 5).map((row, rIdx) => (
+                      <TableRow key={rIdx}>
+                        {detectedColumns.map((_, cIdx) => (
+                          <TableCell
+                            key={cIdx}
+                            className="max-w-[200px] truncate text-xs"
+                          >
+                            {row[cIdx] ?? ""}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
         </div>
-      </CardContent>
-    </Card>
+      )}
+    </div>
   );
 }
 
-export interface StepAnswerRuleProps {
+export interface AnswerRuleSectionProps {
   locale: Locale;
   activeFormat: ImportFormat;
   answerRule: AnswerRule;
   onAnswerRuleChange: (rule: AnswerRule) => void;
   isParsing: boolean;
-  onBack: () => void;
-  onNext: () => void;
-  headingRef?: React.Ref<HTMLHeadingElement>;
 }
 
-export function StepAnswerRule({
+export function AnswerRuleSection({
   locale,
   activeFormat,
   answerRule,
   onAnswerRuleChange,
   isParsing,
-  onBack,
-  onNext,
-  headingRef,
-}: StepAnswerRuleProps) {
+}: AnswerRuleSectionProps) {
   const isDocx = activeFormat === "docx_ooxml" || activeFormat === "docx_multimedia";
   const isTabularOrJson =
     activeFormat === "xlsx_wayground" ||
@@ -558,115 +533,81 @@ export function StepAnswerRule({
     : ["auto", "asterisk_prefix", "inline_answer_key", "end_answer_key"];
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          <h2
-            ref={headingRef}
-            data-import-step="3"
-            tabIndex={-1}
-            className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            {locale === "en"
-              ? "Step 3: Answer Detection Rule"
-              : "Bước 3: Chọn quy tắc nhận diện đáp án đúng"}
-          </h2>
-        </CardTitle>
-        <CardDescription>
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground">
+          {locale === "en" ? "Answer Detection Rule" : "Cách nhận diện đáp án đúng"}
+        </h3>
+        <p className="text-xs text-muted-foreground">
           {locale === "en"
-            ? "Tell StudyHub exactly how correct answers are marked in your document. Zero guesswork — conflicts are always flagged for manual review."
-            : "Chọn cách đánh dấu đáp án đúng trong tài liệu của bạn. Không đoán mò — mọi xung đột tín hiệu đều được cảnh báo rõ ràng."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        {isTabularOrJson ? (
-          <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm text-foreground">
-            <div className="flex items-start gap-3">
-              <ScanSearch className="mt-0.5 size-5 shrink-0 text-primary" aria-hidden="true" />
-              <div>
-                <p className="font-medium">
-                  {locale === "en"
-                    ? "Explicit Structured Answer Mapping Active"
-                    : "Đang sử dụng ánh xạ đáp án cấu trúc trực tiếp"}
-                </p>
-                <p className="mt-1 text-muted-foreground">
-                  {locale === "en"
-                    ? "Correct answers are read deterministically from your mapped Answer / Back column or JSON isCorrect fields."
-                    : "Đáp án đúng được đọc trực tiếp từ cột Đáp án / Mặt sau đã ánh xạ hoặc trường isCorrect trong JSON."}
-                </p>
-              </div>
+            ? "Choose how correct answers are marked in your document. Selecting a rule re-checks your preview immediately."
+            : "Chọn cách đánh dấu đáp án đúng trong tài liệu. Chọn quy tắc mới sẽ cập nhật ngay danh sách xem trước."}
+        </p>
+      </div>
+
+      {isTabularOrJson ? (
+        <div className="rounded-lg border border-border bg-muted/30 p-3.5 text-xs text-foreground sm:text-sm">
+          <div className="flex items-start gap-2.5">
+            <ScanSearch className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
+            <div>
+              <p className="font-medium">
+                {locale === "en"
+                  ? "Reading answers directly from your spreadsheet / JSON column"
+                  : "Đang đọc đáp án trực tiếp từ cột Đáp án / Mặt sau hoặc tệp JSON"}
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {locale === "en"
+                  ? "Adjust column mapping above if answers are in a different column."
+                  : "Nếu đáp án nằm ở cột khác, bạn có thể đổi ở phần Ánh xạ cột phía trên."}
+              </p>
             </div>
           </div>
-        ) : (
-          <div
-            role="radiogroup"
-            aria-label={
-              locale === "en" ? "Answer detection rule" : "Quy tắc nhận diện đáp án"
-            }
-            className="grid grid-cols-1 gap-3 md:grid-cols-2"
-          >
-            {visibleRules.map((mode) => {
-              const info = getAnswerRuleLabel(mode, locale);
-              const selected = answerRule.mode === mode;
-              return (
-                <button
-                  key={mode}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  onClick={() => onAnswerRuleChange({ mode })}
-                  className={cn(
-                    "flex min-h-[44px] flex-col items-start rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    selected
-                      ? "border-primary bg-primary/5 ring-1 ring-primary"
-                      : "border-border bg-card hover:border-primary/40 hover:bg-muted/40",
-                  )}
-                >
-                  <div className="flex w-full items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-foreground">
-                      {info.title}
-                    </span>
-                    {selected && (
-                      <CheckCircle2
-                        className="size-4 shrink-0 text-primary"
-                        aria-hidden="true"
-                      />
-                    )}
-                  </div>
-                  <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                    {info.description}
-                  </p>
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-          <Button type="button" variant="outline" className="min-h-[44px]" onClick={onBack}>
-            <ArrowLeft className="mr-2 size-4" aria-hidden="true" />
-            {locale === "en" ? "Back" : "Quay lại"}
-          </Button>
-          <Button
-            type="button"
-            className="min-h-[44px]"
-            disabled={isParsing}
-            onClick={onNext}
-          >
-            {isParsing ? (
-              <>
-                <RefreshCw className="mr-2 size-4 animate-spin" aria-hidden="true" />
-                {locale === "en" ? "Parsing…" : "Đang phân tích…"}
-              </>
-            ) : (
-              <>
-                {locale === "en" ? "Parse & Preview Questions" : "Phân tích & Xem trước"}
-                <ArrowRight className="ml-2 size-4" aria-hidden="true" />
-              </>
-            )}
-          </Button>
         </div>
-      </CardContent>
-    </Card>
+      ) : (
+        <div
+          role="radiogroup"
+          aria-label={
+            locale === "en" ? "Answer detection rule" : "Cách nhận diện đáp án đúng"
+          }
+          className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+        >
+          {visibleRules.map((mode) => {
+            const info = getAnswerRuleLabel(mode, locale);
+            const selected = answerRule.mode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={isParsing}
+                onClick={() => onAnswerRuleChange({ mode })}
+                className={cn(
+                  "flex min-h-[44px] flex-col items-start rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60",
+                  selected
+                    ? "border-primary bg-primary/5 ring-1 ring-primary"
+                    : "border-border bg-background hover:border-primary/40 hover:bg-muted/40",
+                )}
+              >
+                <div className="flex w-full items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-foreground sm:text-sm">
+                    {info.title}
+                  </span>
+                  {selected && (
+                    <CheckCircle2
+                      className="size-4 shrink-0 text-primary"
+                      aria-hidden="true"
+                    />
+                  )}
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  {info.description}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

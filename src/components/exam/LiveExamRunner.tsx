@@ -92,6 +92,129 @@ interface LiveExamRunnerProps {
 
 const DRAFT_KEY_PREFIX = "studyhub-exam-draft-v2-";
 
+const EMPTY_LOCAL_RECORD: LocalAnswerRecord = {
+  selectedOptionIds: [],
+  typedAnswer: "",
+  isFlagged: false,
+  clientSeq: 0,
+  updatedAtMs: 0,
+};
+
+type ExamSyncState = "saved" | "saving" | "pending_offline" | "error";
+
+interface SyncStatusStore {
+  get: () => ExamSyncState;
+  set: (next: ExamSyncState) => void;
+  subscribe: (listener: () => void) => () => void;
+}
+
+function createSyncStatusStore(): SyncStatusStore {
+  let state: ExamSyncState = "saved";
+  const listeners = new Set<() => void>();
+  return {
+    get: () => state,
+    set: (next) => {
+      if (next === state) return;
+      state = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+function subscribeDesktopLg(callback: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia("(min-width: 1024px)");
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getDesktopLgSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(min-width: 1024px)").matches;
+}
+
+function getDesktopLgServerSnapshot(): boolean {
+  return false;
+}
+
+const SyncStatusPill = React.memo(function SyncStatusPill({
+  store,
+  onRetry,
+}: {
+  store: SyncStatusStore;
+  onRetry: () => void;
+}) {
+  const { locale } = useI18n();
+  const syncState = React.useSyncExternalStore(
+    store.subscribe,
+    store.get,
+    store.get,
+  );
+
+  if (syncState === "error") {
+    return (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-8 gap-1 border-destructive/60 bg-destructive-subtle px-2 text-xs text-destructive-subtle-foreground"
+        onClick={onRetry}
+      >
+        <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="hidden sm:inline">
+          {lText(locale, "Lỗi lưu", "Save error")}
+        </span>
+        <RefreshCw className="size-3 shrink-0" aria-hidden="true" />
+        <span>{lText(locale, "Thử lại", "Retry")}</span>
+      </Button>
+    );
+  }
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] sm:text-xs font-medium",
+        syncState === "saved" &&
+          "bg-success-subtle text-success-subtle-foreground",
+        syncState === "saving" && "bg-secondary text-muted-foreground",
+        syncState === "pending_offline" &&
+          "bg-warning-subtle text-warning-subtle-foreground",
+      )}
+    >
+      {syncState === "saving" ? (
+        <>
+          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+          <span className="hidden sm:inline">
+            {lText(locale, "Đang lưu", "Saving")}
+          </span>
+        </>
+      ) : syncState === "pending_offline" ? (
+        <>
+          <CloudOff className="size-3" aria-hidden="true" />
+          <span className="hidden sm:inline">
+            {lText(locale, "Ngoại tuyến", "Offline")}
+          </span>
+        </>
+      ) : (
+        <>
+          <Cloud className="size-3" aria-hidden="true" />
+          <span className="hidden sm:inline">
+            {lText(locale, "Đã lưu", "Saved")}
+          </span>
+        </>
+      )}
+    </span>
+  );
+});
+
 function readLocalDraft(
   attemptId: string,
 ): Record<string, LocalAnswerRecord> | null {
@@ -166,9 +289,12 @@ export function LiveExamRunner({
   const [isOnline, setIsOnline] = React.useState<boolean>(() =>
     typeof navigator !== "undefined" ? navigator.onLine : true,
   );
-  const [syncState, setSyncState] = React.useState<
-    "saved" | "saving" | "pending_offline" | "error"
-  >("saved");
+  const [syncStore] = React.useState<SyncStatusStore>(createSyncStatusStore);
+  const isDesktopLg = React.useSyncExternalStore(
+    subscribeDesktopLg,
+    getDesktopLgSnapshot,
+    getDesktopLgServerSnapshot,
+  );
   const [serverClockOffsetMs, setServerClockOffsetMs] = React.useState(0);
   const [confirmSubmitOpen, setConfirmSubmitOpen] = React.useState(false);
   const [exitModalOpen, setExitModalOpen] = React.useState(false);
@@ -197,6 +323,7 @@ export function LiveExamRunner({
   const draftWriteTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const draftIdleIdRef = React.useRef<number | null>(null);
   const clientSeqRef = React.useRef<number>(1);
   const submittingRef = React.useRef<boolean>(false);
   const initializedAnswersRef = React.useRef<boolean>(false);
@@ -288,22 +415,26 @@ export function LiveExamRunner({
   // Flush autosave queue in <=150 chunks with monotonic client_seq (fixes SH-010!)
   const flushDirtyQueue = React.useCallback(async (): Promise<boolean> => {
     if (dirtyQueueRef.current.size === 0) {
-      setSyncState("saved");
+      syncStore.set("saved");
       return true;
     }
     if (typeof navigator !== "undefined" && !navigator.onLine) {
-      setSyncState("pending_offline");
+      syncStore.set("pending_offline");
       return false;
     }
 
     const batch = Array.from(dirtyQueueRef.current.values());
-    setSyncState("saving");
+    syncStore.set("saving");
     try {
       const res = await saveExamAnswers(attemptId, batch);
       if (res.server_now) {
         const srvMs = Date.parse(res.server_now);
         if (!Number.isNaN(srvMs)) {
-          setServerClockOffsetMs(srvMs - Date.now());
+          const nextOffset = srvMs - Date.now();
+          // Guard >1500ms drift so routine autosaves NEVER restart ExamTimer or re-render parent (P1-4)
+          setServerClockOffsetMs((prev) =>
+            Math.abs(nextOffset - prev) > 1500 ? nextOffset : prev,
+          );
         }
       }
       // Clear only items that were not superseded mid-flight
@@ -313,7 +444,7 @@ export function LiveExamRunner({
           dirtyQueueRef.current.delete(item.attempt_question_id);
         }
       }
-      setSyncState(dirtyQueueRef.current.size === 0 ? "saved" : "saving");
+      syncStore.set(dirtyQueueRef.current.size === 0 ? "saved" : "saving");
       return true;
     } catch (err) {
       if (
@@ -330,14 +461,14 @@ export function LiveExamRunner({
         router.replace(resultsPath);
         return false;
       }
-      setSyncState(
+      syncStore.set(
         typeof navigator !== "undefined" && !navigator.onLine
           ? "pending_offline"
           : "error",
       );
       return false;
     }
-  }, [attemptId, locale, resultsPath, router]);
+  }, [attemptId, locale, resultsPath, router, syncStore]);
 
   // Flush merged local draft once hydrated if there are unsynced offline items
   React.useEffect(() => {
@@ -353,24 +484,43 @@ export function LiveExamRunner({
     ) => {
       dirtyQueueRef.current.set(item.attempt_question_id, item);
 
-      // Debounce localStorage JSON serialization (300ms) to keep 500Q clicks <1ms!
+      // Debounce + idle localStorage serialization so 250–500Q clicks never block main thread (P1-4)
       if (draftWriteTimerRef.current) clearTimeout(draftWriteTimerRef.current);
+      if (
+        draftIdleIdRef.current !== null &&
+        typeof window !== "undefined" &&
+        "cancelIdleCallback" in window
+      ) {
+        window.cancelIdleCallback(draftIdleIdRef.current);
+        draftIdleIdRef.current = null;
+      }
       draftWriteTimerRef.current = setTimeout(() => {
-        writeLocalDraft(attemptId, nextFullMap);
+        draftWriteTimerRef.current = null;
+        if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+          draftIdleIdRef.current = window.requestIdleCallback(
+            () => {
+              draftIdleIdRef.current = null;
+              writeLocalDraft(attemptId, nextFullMap);
+            },
+            { timeout: 1000 },
+          );
+        } else {
+          writeLocalDraft(attemptId, nextFullMap);
+        }
       }, 300);
 
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
       if (typeof navigator !== "undefined" && !navigator.onLine) {
-        setSyncState("pending_offline");
+        syncStore.set("pending_offline");
         return;
       }
 
-      setSyncState("saving");
+      syncStore.set("saving");
       debounceTimerRef.current = setTimeout(() => {
         void flushDirtyQueue();
       }, 400);
     },
-    [attemptId, flushDirtyQueue],
+    [attemptId, flushDirtyQueue, syncStore],
   );
 
   // Monitor online / offline events and auto-resync cleanly when network returns
@@ -388,7 +538,7 @@ export function LiveExamRunner({
     };
     const handleOffline = () => {
       setIsOnline(false);
-      setSyncState("pending_offline");
+      syncStore.set("pending_offline");
     };
 
     window.addEventListener("online", handleOnline);
@@ -398,8 +548,16 @@ export function LiveExamRunner({
       window.removeEventListener("offline", handleOffline);
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
       if (draftWriteTimerRef.current) clearTimeout(draftWriteTimerRef.current);
+      if (
+        draftIdleIdRef.current !== null &&
+        typeof window !== "undefined" &&
+        "cancelIdleCallback" in window
+      ) {
+        window.cancelIdleCallback(draftIdleIdRef.current);
+        draftIdleIdRef.current = null;
+      }
     };
-  }, [flushDirtyQueue, locale]);
+  }, [flushDirtyQueue, locale, syncStore]);
 
   // Idempotent Exam Submit — NEVER swallows failed answer flush!
   const executeSubmit = React.useCallback(
@@ -500,44 +658,32 @@ export function LiveExamRunner({
 
   const currentQuestion = questions[currentIndex] ?? null;
   const currentRecord: LocalAnswerRecord = currentQuestion
-    ? answerMap[currentQuestion.id] ?? {
-        selectedOptionIds: [],
-        typedAnswer: "",
-        isFlagged: false,
-        clientSeq: 0,
-        updatedAtMs: 0,
-      }
-    : {
-        selectedOptionIds: [],
-        typedAnswer: "",
-        isFlagged: false,
-        clientSeq: 0,
-        updatedAtMs: 0,
-      };
+    ? (answerMap[currentQuestion.id] ?? EMPTY_LOCAL_RECORD)
+    : EMPTY_LOCAL_RECORD;
+
+  const currentQuestionRef = React.useRef(currentQuestion);
+  React.useEffect(() => {
+    currentQuestionRef.current = currentQuestion;
+  }, [currentQuestion]);
 
   const updateCurrentRecord = React.useCallback(
     (updater: (prev: LocalAnswerRecord) => LocalAnswerRecord) => {
-      if (!currentQuestion || submittingRef.current) return;
+      const q = currentQuestionRef.current;
+      if (!q || submittingRef.current) return;
       const nextSeq = clientSeqRef.current++;
       const nowMs = Date.now();
       setAnswerMap((prevMap) => {
-        const prevRec = prevMap[currentQuestion.id] ?? {
-          selectedOptionIds: [],
-          typedAnswer: "",
-          isFlagged: false,
-          clientSeq: 0,
-          updatedAtMs: 0,
-        };
+        const prevRec = prevMap[q.id] ?? EMPTY_LOCAL_RECORD;
         const updated = updater(prevRec);
         const nextRec: LocalAnswerRecord = {
           ...updated,
           clientSeq: nextSeq,
           updatedAtMs: nowMs,
         };
-        const nextMap = { ...prevMap, [currentQuestion.id]: nextRec };
+        const nextMap = { ...prevMap, [q.id]: nextRec };
         scheduleAutosave(
           {
-            attempt_question_id: currentQuestion.id,
+            attempt_question_id: q.id,
             selected_option_ids: nextRec.selectedOptionIds,
             typed_answer: nextRec.typedAnswer.trim() ? nextRec.typedAnswer : null,
             structured_response: nextRec.structuredResponse ?? null,
@@ -550,15 +696,16 @@ export function LiveExamRunner({
         return nextMap;
       });
     },
-    [currentQuestion, scheduleAutosave],
+    [scheduleAutosave],
   );
 
   const handleSelectOption = React.useCallback(
     (optionId: string) => {
-      if (!currentQuestion) return;
-      const payload = currentQuestion.type_payload_snapshot;
+      const q = currentQuestionRef.current;
+      if (!q) return;
+      const payload = q.type_payload_snapshot;
       const isMulti =
-        currentQuestion.question_type === "multiple_choice" ||
+        q.question_type === "multiple_choice" ||
         (payload?.type === "image_choice" &&
           payload.selection_mode === "multiple") ||
         (payload?.type === "reading_passage" &&
@@ -581,8 +728,34 @@ export function LiveExamRunner({
         };
       });
     },
-    [currentQuestion, updateCurrentRecord],
+    [updateCurrentRecord],
   );
+
+  const handleChangeTyped = React.useCallback(
+    (val: string) => {
+      updateCurrentRecord((prev) => ({
+        ...prev,
+        typedAnswer: val,
+        structuredResponse: { kind: "text", value: val },
+      }));
+    },
+    [updateCurrentRecord],
+  );
+
+  const handleChangeStructured = React.useCallback(
+    (resp: StructuredAnswerResponse, mirrorTyped?: string) => {
+      updateCurrentRecord((prev) => ({
+        ...prev,
+        structuredResponse: resp,
+        typedAnswer: mirrorTyped !== undefined ? mirrorTyped : prev.typedAnswer,
+      }));
+    },
+    [updateCurrentRecord],
+  );
+
+  const handleRetryFlush = React.useCallback(() => {
+    void flushDirtyQueue();
+  }, [flushDirtyQueue]);
 
   const handleToggleFlag = React.useCallback(() => {
     if (!allowMarkForReview) return;
@@ -611,15 +784,56 @@ export function LiveExamRunner({
     setConfirmSubmitOpen(true);
   }, []);
 
+  // Stable ref-driven keydown listener — NEVER re-binds on every Q change (P1-4)!
+  const keyStateRef = React.useRef({
+    confirmSubmitOpen,
+    exitModalOpen,
+    navSheetOpen,
+    shortcutsOpen,
+    currentIndex,
+    questionsLength: questions.length,
+    allowNavigation,
+    allowMarkForReview,
+    handleSelectOption,
+    handleToggleFlag,
+  });
+  React.useEffect(() => {
+    keyStateRef.current = {
+      confirmSubmitOpen,
+      exitModalOpen,
+      navSheetOpen,
+      shortcutsOpen,
+      currentIndex,
+      questionsLength: questions.length,
+      allowNavigation,
+      allowMarkForReview,
+      handleSelectOption,
+      handleToggleFlag,
+    };
+  }, [
+    allowMarkForReview,
+    allowNavigation,
+    confirmSubmitOpen,
+    currentIndex,
+    exitModalOpen,
+    handleSelectOption,
+    handleToggleFlag,
+    navSheetOpen,
+    questions.length,
+    shortcutsOpen,
+  ]);
+
   // Keyboard shortcuts strictly guarded against inputs AND ALL open modals/sheets (SH-028)!
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const st = keyStateRef.current;
+      const q = currentQuestionRef.current;
       if (
-        confirmSubmitOpen ||
-        exitModalOpen ||
-        navSheetOpen ||
-        shortcutsOpen ||
-        !currentQuestion ||
+        st.confirmSubmitOpen ||
+        st.exitModalOpen ||
+        st.navSheetOpen ||
+        st.shortcutsOpen ||
+        !q ||
         submittingRef.current
       ) {
         return;
@@ -650,14 +864,14 @@ export function LiveExamRunner({
 
       if (
         (event.key === "ArrowLeft" || event.key === "j" || event.key === "J") &&
-        currentIndex > 0 &&
-        allowNavigation
+        st.currentIndex > 0 &&
+        st.allowNavigation
       ) {
         event.preventDefault();
         setCurrentIndex((i) => i - 1);
       } else if (
         (event.key === "ArrowRight" || event.key === "k" || event.key === "K") &&
-        currentIndex + 1 < questions.length
+        st.currentIndex + 1 < st.questionsLength
       ) {
         event.preventDefault();
         setCurrentIndex((i) => i + 1);
@@ -666,38 +880,26 @@ export function LiveExamRunner({
           event.key === "M" ||
           event.key === "f" ||
           event.key === "F") &&
-        allowMarkForReview
+        st.allowMarkForReview
       ) {
         event.preventDefault();
-        handleToggleFlag();
-      } else if (currentQuestion.options_snapshot.length > 0) {
+        st.handleToggleFlag();
+      } else if (q.options_snapshot.length > 0) {
         let idx = -1;
         if (/^[1-6]$/.test(event.key)) idx = Number(event.key) - 1;
         else if (/^[a-fA-F]$/.test(event.key)) {
           idx = event.key.toUpperCase().charCodeAt(0) - 65;
         }
-        if (idx >= 0 && idx < currentQuestion.options_snapshot.length) {
+        if (idx >= 0 && idx < q.options_snapshot.length) {
           event.preventDefault();
-          handleSelectOption(currentQuestion.options_snapshot[idx].id);
+          st.handleSelectOption(q.options_snapshot[idx].id);
         }
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    allowMarkForReview,
-    allowNavigation,
-    confirmSubmitOpen,
-    currentIndex,
-    currentQuestion,
-    exitModalOpen,
-    handleSelectOption,
-    handleToggleFlag,
-    navSheetOpen,
-    questions.length,
-    shortcutsOpen,
-  ]);
+  }, []);
 
   const navigatorItems = React.useMemo<NavigatorQuestionItem[]>(() => {
     return questions.map((q) => {
@@ -771,59 +973,8 @@ export function LiveExamRunner({
       className="pb-24 lg:pb-8"
       headerRight={
         <div className="flex items-center gap-1.5 sm:gap-2">
-          {/* Visible Autosave Status Pill on BOTH Mobile & Desktop + Retry on Error (SH-010 / SH-028) */}
-          {syncState === "error" ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 gap-1 border-destructive/60 bg-destructive-subtle px-2 text-xs text-destructive-subtle-foreground"
-              onClick={() => void flushDirtyQueue()}
-            >
-              <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
-              <span className="hidden sm:inline">
-                {lText(locale, "Lỗi lưu", "Save error")}
-              </span>
-              <RefreshCw className="size-3 shrink-0" aria-hidden="true" />
-              <span>{lText(locale, "Thử lại", "Retry")}</span>
-            </Button>
-          ) : (
-            <span
-              role="status"
-              aria-live="polite"
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] sm:text-xs font-medium",
-                syncState === "saved" &&
-                  "bg-success-subtle text-success-subtle-foreground",
-                syncState === "saving" && "bg-secondary text-muted-foreground",
-                syncState === "pending_offline" &&
-                  "bg-warning-subtle text-warning-subtle-foreground",
-              )}
-            >
-              {syncState === "saving" ? (
-                <>
-                  <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-                  <span className="hidden xs:inline sm:inline">
-                    {lText(locale, "Đang lưu", "Saving")}
-                  </span>
-                </>
-              ) : syncState === "pending_offline" ? (
-                <>
-                  <CloudOff className="size-3" aria-hidden="true" />
-                  <span className="hidden sm:inline">
-                    {lText(locale, "Ngoại tuyến", "Offline")}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <Cloud className="size-3" aria-hidden="true" />
-                  <span className="hidden sm:inline">
-                    {lText(locale, "Đã lưu", "Saved")}
-                  </span>
-                </>
-              )}
-            </span>
-          )}
+          {/* Isolated Autosave Status Pill (ZERO parent re-renders on save transitions — P1-4) */}
+          <SyncStatusPill store={syncStore} onRetry={handleRetryFlush} />
 
           {/* Isolated Memoized Countdown Timer (ZERO parent re-renders!) */}
           <ExamTimer
@@ -846,16 +997,16 @@ export function LiveExamRunner({
             <Keyboard className="size-4" aria-hidden="true" />
           </Button>
 
-          {/* Desktop Quick Submit */}
+          {/* Always-Visible Quick Submit on BOTH Mobile & Desktop (fixes UX31-10!) */}
           <Button
             type="button"
             size="sm"
-            className="hidden sm:inline-flex min-h-9"
+            className="inline-flex min-h-9 shrink-0 gap-1 px-2.5 text-xs sm:px-3 sm:text-sm"
             disabled={isSubmitting}
             onClick={handleOpenSubmitModal}
           >
-            <Send className="size-3.5" aria-hidden="true" />
-            {t("exam.submitExam")}
+            <Send className="size-3.5 shrink-0" aria-hidden="true" />
+            <span>{t("exam.submitExam")}</span>
           </Button>
         </div>
       }
@@ -968,26 +1119,13 @@ export function LiveExamRunner({
                 compact
               />
 
-              {/* All 12 V3 Exam Question Types Renderer */}
+              {/* All 12 V3 Exam Question Types Renderer (React.memo + stable callbacks — P1-4) */}
               <V3ExamQuestionBody
                 question={currentQuestion}
                 record={currentRecord}
                 onSelectOption={handleSelectOption}
-                onChangeTyped={(val) =>
-                  updateCurrentRecord((prev) => ({
-                    ...prev,
-                    typedAnswer: val,
-                    structuredResponse: { kind: "text", value: val },
-                  }))
-                }
-                onChangeStructured={(resp, mirrorTyped) =>
-                  updateCurrentRecord((prev) => ({
-                    ...prev,
-                    structuredResponse: resp,
-                    typedAnswer:
-                      mirrorTyped !== undefined ? mirrorTyped : prev.typedAnswer,
-                  }))
-                }
+                onChangeTyped={handleChangeTyped}
+                onChangeStructured={handleChangeStructured}
               />
             </CardContent>
           </Card>
@@ -1030,23 +1168,25 @@ export function LiveExamRunner({
           </div>
         </div>
 
-        {/* Desktop Right Navigator Rail (Memoized, Zero-Drift Virtualized!) */}
-        <aside className="hidden lg:block sticky top-20 rounded-xl border border-border bg-card p-4 shadow-xs">
-          <h2 className="mb-3 text-sm font-semibold">
-            {t("exam.questionNavigator")}
-          </h2>
-          <ExamNavigatorGrid
-            items={navigatorItems}
-            currentIndex={currentIndex}
-            answeredCount={answeredCount}
-            flaggedCount={flaggedCount}
-            onSelectIndex={handleSelectNavIndex}
-            onRequestSubmit={handleOpenSubmitModal}
-            isSubmitting={isSubmitting}
-            allowNavigation={allowNavigation}
-            jumpInputRef={jumpInputRef}
-          />
-        </aside>
+        {/* Desktop Right Navigator Rail (Conditionally mounted ONLY on >=1024px — P1-4!) */}
+        {isDesktopLg ? (
+          <aside className="sticky top-20 rounded-xl border border-border bg-card p-4 shadow-xs">
+            <h2 className="mb-3 text-sm font-semibold">
+              {t("exam.questionNavigator")}
+            </h2>
+            <ExamNavigatorGrid
+              items={navigatorItems}
+              currentIndex={currentIndex}
+              answeredCount={answeredCount}
+              flaggedCount={flaggedCount}
+              onSelectIndex={handleSelectNavIndex}
+              onRequestSubmit={handleOpenSubmitModal}
+              isSubmitting={isSubmitting}
+              allowNavigation={allowNavigation}
+              jumpInputRef={jumpInputRef}
+            />
+          </aside>
+        ) : null}
       </div>
 
       {/* Mobile Sticky Bottom Action Bar (<lg, compact single row <12% viewport height) */}
@@ -1109,16 +1249,18 @@ export function LiveExamRunner({
                 <SheetTitle>{t("exam.questionNavigator")}</SheetTitle>
               </SheetHeader>
               <div className="px-4 pb-6 pt-2">
-                <ExamNavigatorGrid
-                  items={navigatorItems}
-                  currentIndex={currentIndex}
-                  answeredCount={answeredCount}
-                  flaggedCount={flaggedCount}
-                  onSelectIndex={handleSelectNavIndexFromSheet}
-                  onRequestSubmit={handleOpenSubmitModal}
-                  isSubmitting={isSubmitting}
-                  allowNavigation={allowNavigation}
-                />
+                {navSheetOpen ? (
+                  <ExamNavigatorGrid
+                    items={navigatorItems}
+                    currentIndex={currentIndex}
+                    answeredCount={answeredCount}
+                    flaggedCount={flaggedCount}
+                    onSelectIndex={handleSelectNavIndexFromSheet}
+                    onRequestSubmit={handleOpenSubmitModal}
+                    isSubmitting={isSubmitting}
+                    allowNavigation={allowNavigation}
+                  />
+                ) : null}
               </div>
             </SheetContent>
           </Sheet>

@@ -13,11 +13,9 @@ import {
   History,
   Home,
   Keyboard,
-  Layers,
   Library,
   LogIn,
   LogOut,
-  Menu,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -72,20 +70,21 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   labelVi: string;
   labelEn: string;
-  shortLabelVi?: string;
-  shortLabelEn?: string;
-  group: "core" | "study" | "activity" | "social" | "system";
+  group: "primary" | "secondary";
+  prefetch?: boolean;
   match: (pathname: string, searchParams: URLSearchParams) => boolean;
 }
 
+// V3.1 Clean 2-Group Student Sidebar — zero duplicate CTAs, prefetch={false} on secondary links
 const NAV_ITEMS: NavItem[] = [
   {
     id: "dashboard",
     href: "/dashboard",
     icon: Home,
-    labelVi: "Tổng quan",
-    labelEn: "Dashboard",
-    group: "core",
+    labelVi: "Trang chủ",
+    labelEn: "Home",
+    group: "primary",
+    prefetch: true,
     match: (p) => p === "/dashboard",
   },
   {
@@ -94,24 +93,35 @@ const NAV_ITEMS: NavItem[] = [
     icon: Library,
     labelVi: "Thư viện",
     labelEn: "Library",
-    group: "core",
+    group: "primary",
+    prefetch: true,
     match: (p) =>
       p === "/library" ||
       p === "/folders" ||
       p.startsWith("/folders/") ||
       p === "/import" ||
-      p === "/sets/new",
+      p === "/sets/new" ||
+      p.startsWith("/sets/"),
   },
   {
-    id: "custom-exam",
+    id: "exams",
     href: "/exams/new",
     icon: FileCheck2,
-    labelVi: "Thi thử tùy chỉnh",
-    labelEn: "Custom Exam",
-    shortLabelVi: "Thi thử mới",
-    shortLabelEn: "Custom Exam",
-    group: "study",
-    match: (p) => p === "/exams/new",
+    labelVi: "Thi thử",
+    labelEn: "Mock Exam",
+    group: "primary",
+    prefetch: false,
+    match: (p) => p === "/exams/new" || p === "/exams",
+  },
+  {
+    id: "review",
+    href: "/review",
+    icon: RotateCcw,
+    labelVi: "Ôn lỗi sai",
+    labelEn: "Mistakes",
+    group: "primary",
+    prefetch: false,
+    match: (p) => p === "/review",
   },
   {
     id: "practice",
@@ -119,30 +129,9 @@ const NAV_ITEMS: NavItem[] = [
     icon: BookOpenCheck,
     labelVi: "Luyện tập",
     labelEn: "Practice",
-    group: "study",
+    group: "primary",
+    prefetch: false,
     match: (p) => p === "/practice",
-  },
-  {
-    id: "exams-hub",
-    href: "/exams",
-    icon: Layers,
-    labelVi: "Đề & Chu kỳ thi",
-    labelEn: "Exams & Cycles",
-    shortLabelVi: "Đề & Chu kỳ",
-    shortLabelEn: "Exams & Cycles",
-    group: "study",
-    match: (p) => p === "/exams",
-  },
-  {
-    id: "review",
-    href: "/review",
-    icon: RotateCcw,
-    labelVi: "Câu đã sai",
-    labelEn: "Review Mistakes",
-    shortLabelVi: "Ôn câu sai",
-    shortLabelEn: "Mistakes",
-    group: "study",
-    match: (p) => p === "/review",
   },
   {
     id: "starred",
@@ -150,9 +139,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: Star,
     labelVi: "Đánh dấu sao",
     labelEn: "Starred",
-    shortLabelVi: "Gắn sao",
-    shortLabelEn: "Starred",
-    group: "study",
+    group: "secondary",
+    prefetch: false,
     match: (p) => p === "/starred",
   },
   {
@@ -161,7 +149,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: History,
     labelVi: "Lịch sử",
     labelEn: "History",
-    group: "activity",
+    group: "secondary",
+    prefetch: false,
     match: (p) => p === "/history",
   },
   {
@@ -170,7 +159,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: BarChart3,
     labelVi: "Thống kê",
     labelEn: "Statistics",
-    group: "activity",
+    group: "secondary",
+    prefetch: false,
     match: (p) => p === "/statistics",
   },
   {
@@ -179,7 +169,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: Share2,
     labelVi: "Được chia sẻ",
     labelEn: "Shared",
-    group: "social",
+    group: "secondary",
+    prefetch: false,
     match: (p) => p === "/shared",
   },
   {
@@ -188,7 +179,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: Users,
     labelVi: "Bạn bè",
     labelEn: "Friends",
-    group: "social",
+    group: "secondary",
+    prefetch: false,
     match: (p) => p === "/friends",
   },
   {
@@ -197,7 +189,8 @@ const NAV_ITEMS: NavItem[] = [
     icon: Settings,
     labelVi: "Cài đặt",
     labelEn: "Settings",
-    group: "system",
+    group: "secondary",
+    prefetch: false,
     // Strictly match /settings so /profile does NOT wrongly highlight Settings
     match: (p) => p === "/settings",
   },
@@ -258,6 +251,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { locale, t } = useI18n();
+  const vi = locale === "vi";
   const { updatePreferences } = useUserPreferences();
   const { openSearch, openHelp, isExamRoute } = useShortcuts();
   const pwa = useOptionalPwa();
@@ -267,7 +261,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     readSidebarCollapsed,
     () => false,
   );
-  const [mobileMoreOpen, setMobileMoreOpen] = React.useState(false);
+  const [personalSheetOpen, setPersonalSheetOpen] = React.useState(false);
   const [signingOut, setSigningOut] = React.useState(false);
 
   const toggleSidebar = () => {
@@ -313,7 +307,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
       router.refresh();
     } catch {
       toast.error(
-        locale === "vi"
+        vi
           ? "Không thể đăng xuất lúc này. Vui lòng thử lại."
           : "Unable to sign out right now. Please try again.",
       );
@@ -335,7 +329,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const displayName =
     profile?.display_name ||
     profile?.username ||
-    (locale === "vi" ? "Tài khoản" : "Account");
+    (vi ? "Tài khoản" : "Account");
 
   const showConfigBanner =
     !supabaseConfigured ||
@@ -349,12 +343,13 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const renderNavLink = (item: NavItem, onNavigate?: () => void) => {
     const active = item.match(pathname, searchParams);
     const Icon = item.icon;
-    const label = locale === "vi" ? item.labelVi : item.labelEn;
+    const label = vi ? item.labelVi : item.labelEn;
 
     const linkEl = (
       <Link
         key={item.id}
         href={item.href}
+        prefetch={item.prefetch ?? false}
         onClick={onNavigate}
         aria-current={active ? "page" : undefined}
         aria-label={collapsed ? label : undefined}
@@ -388,113 +383,106 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     return linkEl;
   };
 
-  // Mobile 1-hand 5-tab bar: Dashboard | Library | Custom Exam (center) | Review | More
-  const mobileTabs = [
+  // Mobile 4-Tab Bottom Navigation: Trang chủ | Thư viện | Thi thử | Cá nhân
+  const mobilePrimaryTabs = [
     {
       href: "/dashboard",
       icon: Home,
-      label: locale === "vi" ? "Tổng quan" : "Home",
+      label: vi ? "Trang chủ" : "Home",
       active: pathname === "/dashboard",
-      featured: false,
+      prefetch: true,
     },
     {
       href: "/library",
       icon: Library,
-      label: locale === "vi" ? "Thư viện" : "Library",
+      label: vi ? "Thư viện" : "Library",
       active:
         pathname.startsWith("/library") ||
         pathname.startsWith("/folders") ||
+        pathname.startsWith("/sets/") ||
         pathname === "/import",
-      featured: false,
+      prefetch: true,
     },
     {
       href: "/exams/new",
       icon: FileCheck2,
-      label: locale === "vi" ? "Thi thử" : "Exam",
+      label: vi ? "Thi thử" : "Exam",
       active: pathname === "/exams/new" || pathname === "/exams",
-      featured: true,
-    },
-    {
-      href: "/review",
-      icon: RotateCcw,
-      label: locale === "vi" ? "Ôn sai" : "Review",
-      active: pathname === "/review" || pathname === "/practice",
-      featured: false,
+      prefetch: false,
     },
   ];
 
-  // Mobile "More" sheet items with crisp non-truncating labels
-  const mobileSheetLinks = [
+  const isPersonalRoute =
+    pathname === "/review" ||
+    pathname === "/starred" ||
+    pathname === "/practice" ||
+    pathname === "/history" ||
+    pathname === "/statistics" ||
+    pathname === "/shared" ||
+    pathname === "/friends" ||
+    pathname === "/profile" ||
+    pathname === "/settings";
+
+  // Compact Mobile Personal Sheet — zero desktop Shortcuts, zero duplicate VI/Theme toggles
+  const mobilePersonalLinks = [
     {
-      href: "/exams",
-      icon: Layers,
-      label: locale === "vi" ? "Đề & Chu kỳ" : "Exams & Cycles",
-      active: pathname === "/exams",
-    },
-    {
-      href: "/practice",
-      icon: BookOpenCheck,
-      label: locale === "vi" ? "Luyện tập" : "Practice",
-      active: pathname === "/practice",
+      href: "/review",
+      icon: RotateCcw,
+      label: vi ? "Ôn lỗi sai" : "Mistakes",
+      active: pathname === "/review",
     },
     {
       href: "/starred",
       icon: Star,
-      label: locale === "vi" ? "Gắn sao" : "Starred",
+      label: vi ? "Câu đánh dấu" : "Starred",
       active: pathname === "/starred",
+    },
+    {
+      href: "/practice",
+      icon: BookOpenCheck,
+      label: vi ? "Luyện tập" : "Practice",
+      active: pathname === "/practice",
     },
     {
       href: "/history",
       icon: History,
-      label: locale === "vi" ? "Lịch sử thi" : "History",
+      label: vi ? "Lịch sử thi" : "History",
       active: pathname === "/history",
     },
     {
       href: "/statistics",
       icon: BarChart3,
-      label: locale === "vi" ? "Thống kê" : "Statistics",
+      label: vi ? "Thống kê" : "Statistics",
       active: pathname === "/statistics",
     },
     {
       href: "/shared",
       icon: Share2,
-      label: locale === "vi" ? "Được chia sẻ" : "Shared",
+      label: vi ? "Chia sẻ" : "Shared",
       active: pathname === "/shared",
     },
     {
       href: "/friends",
       icon: Users,
-      label: locale === "vi" ? "Bạn bè" : "Friends",
+      label: vi ? "Bạn bè" : "Friends",
       active: pathname === "/friends",
-    },
-    {
-      href: "/import",
-      icon: Upload,
-      label: locale === "vi" ? "Nhập từ file" : "Import File",
-      active: pathname === "/import",
     },
     {
       href: "/profile",
       icon: User,
-      label: locale === "vi" ? "Hồ sơ" : "Profile",
+      label: vi ? "Hồ sơ" : "Profile",
       active: pathname === "/profile",
-    },
-    {
-      href: "/settings",
-      icon: Settings,
-      label: locale === "vi" ? "Cài đặt" : "Settings",
-      active: pathname === "/settings",
     },
   ];
 
   return (
     <div className="bg-background text-foreground flex min-h-dvh w-full overflow-x-clip">
-      {/* Desktop Collapsible Sidebar */}
+      {/* Desktop Collapsible 2-Group Sidebar */}
       <aside
-        aria-label={locale === "vi" ? "Chính" : "Primary"}
+        aria-label={vi ? "Điều hướng chính" : "Primary"}
         className={cn(
           "border-sidebar-border bg-sidebar hidden shrink-0 flex-col border-r lg:sticky lg:top-0 lg:flex lg:h-dvh",
-          collapsed ? "w-[68px]" : "w-[248px]",
+          collapsed ? "w-[68px]" : "w-[236px]",
         )}
       >
         <div
@@ -515,7 +503,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               variant="ghost"
               size="icon-sm"
               onClick={toggleSidebar}
-              aria-label={locale === "vi" ? "Thu gọn thanh bên" : "Collapse sidebar"}
+              aria-label={vi ? "Thu gọn thanh bên" : "Collapse sidebar"}
               className="text-muted-foreground"
             >
               <PanelLeftClose className="size-4" aria-hidden="true" />
@@ -523,50 +511,22 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           )}
         </div>
 
-        <div className="p-2.5">
-          {collapsed ? (
-            <Tooltip delayDuration={150}>
-              <TooltipTrigger asChild>
-                <Button asChild variant="outline" size="icon" className="w-full">
-                  <Link href="/exams/new" aria-label={t("nav.customExam")}>
-                    <FileCheck2 className="size-4" aria-hidden="true" />
-                    <span className="sr-only">{t("nav.customExam")}</span>
-                  </Link>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">{t("nav.customExam")}</TooltipContent>
-            </Tooltip>
-          ) : (
-            <Button asChild variant="outline" className="w-full justify-start gap-2">
-              <Link href="/exams/new">
-                <FileCheck2 className="text-primary size-4" aria-hidden="true" />
-                <span>{t("nav.customExam")}</span>
-              </Link>
-            </Button>
-          )}
-        </div>
-
         <nav
-          aria-label={locale === "vi" ? "Danh mục học tập" : "Study sections"}
-          className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4"
+          aria-label={vi ? "Danh mục học tập" : "Study sections"}
+          className="flex-1 space-y-1 overflow-y-auto px-2.5 py-3"
         >
-          {NAV_ITEMS.filter((i) => i.group === "core").map((item) =>
+          {NAV_ITEMS.filter((i) => i.group === "primary").map((item) =>
             renderNavLink(item),
           )}
-          <Separator className="my-2" />
-          {NAV_ITEMS.filter((i) => i.group === "study").map((item) =>
-            renderNavLink(item),
+
+          <Separator className="my-3" />
+
+          {!collapsed && (
+            <p className="text-muted-foreground px-3 pb-1 text-[11px] font-semibold tracking-wide uppercase">
+              {vi ? "Cá nhân" : "Personal"}
+            </p>
           )}
-          <Separator className="my-2" />
-          {NAV_ITEMS.filter((i) => i.group === "activity").map((item) =>
-            renderNavLink(item),
-          )}
-          <Separator className="my-2" />
-          {NAV_ITEMS.filter((i) => i.group === "social").map((item) =>
-            renderNavLink(item),
-          )}
-          <Separator className="my-2" />
-          {NAV_ITEMS.filter((i) => i.group === "system").map((item) =>
+          {NAV_ITEMS.filter((i) => i.group === "secondary").map((item) =>
             renderNavLink(item),
           )}
         </nav>
@@ -577,7 +537,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               variant="ghost"
               size="icon"
               onClick={toggleSidebar}
-              aria-label={locale === "vi" ? "Mở rộng thanh bên" : "Expand sidebar"}
+              aria-label={vi ? "Mở rộng thanh bên" : "Expand sidebar"}
               className="text-muted-foreground w-full"
             >
               <PanelLeftOpen className="size-4" aria-hidden="true" />
@@ -588,7 +548,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
       {/* Main Content Area */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top Context Bar */}
+        {/* Top Context Bar — compact single row (< 56px), zero tablet/mobile overlap */}
         <header className="border-border bg-card/95 sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b px-3 backdrop-blur-xs sm:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <Link
@@ -623,6 +583,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             {/* Online / Offline / Sync Status Pill (desktop/tablet) */}
             <Link
               href={isOnline ? "/settings?tab=offline" : "/offline"}
+              prefetch={false}
               aria-label={
                 isOnline
                   ? isSyncing
@@ -671,41 +632,42 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                   variant="outline"
                   size="sm"
                   className="min-h-11 min-w-11 gap-1.5 px-2.5 sm:min-h-9 sm:min-w-0 sm:px-3"
-                  aria-label={locale === "vi" ? "Tạo nhanh" : "Quick create"}
+                  aria-label={vi ? "Tạo mới" : "Quick create"}
                 >
                   <Plus className="size-4" aria-hidden="true" />
                   <span className="hidden sm:inline">
-                    {locale === "vi" ? "Tạo mới" : "Create"}
+                    {vi ? "Tạo mới" : "Create"}
                   </span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
-                  {locale === "vi" ? "Tạo nhanh" : "Quick Create"}
+                  {vi ? "Tạo nhanh" : "Quick Create"}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
-                  <Link href="/exams/new">
-                    <FileCheck2 className="size-4" aria-hidden="true" />
-                    <span>{t("nav.customExam")}</span>
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/sets/new">
+                  <Link href="/sets/new" prefetch={false}>
                     <Plus className="size-4" aria-hidden="true" />
                     <span>{t("library.newSet")}</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem asChild>
-                  <Link href="/import">
+                  <Link href="/import" prefetch={false}>
                     <Upload className="size-4" aria-hidden="true" />
                     <span>{t("library.importSet")}</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem asChild>
-                  <Link href="/library?create=folder">
+                  <Link href="/library?create=folder" prefetch={false}>
                     <FolderPlus className="size-4" aria-hidden="true" />
                     <span>{t("library.newFolder")}</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link href="/exams/new" prefetch={false}>
+                    <FileCheck2 className="size-4" aria-hidden="true" />
+                    <span>{vi ? "Tạo đề thi thử" : "Create Mock Exam"}</span>
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -724,7 +686,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             {/* User Menu or Sign-In Link */}
             {!profile && !profileLoading ? (
               <Button asChild size="sm" variant="ghost" className="min-h-11 sm:min-h-9">
-                <Link href="/login">
+                <Link href="/login" prefetch={false}>
                   <LogIn className="size-4" aria-hidden="true" />
                   <span className="hidden sm:inline">{t("nav.signIn")}</span>
                 </Link>
@@ -736,7 +698,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     variant="ghost"
                     size="sm"
                     className="min-h-11 min-w-11 gap-2 rounded-full px-1.5 sm:min-h-9 sm:min-w-0 lg:pr-2 lg:pl-1"
-                    aria-label={locale === "vi" ? "Menu tài khoản" : "Account menu"}
+                    aria-label={vi ? "Menu tài khoản" : "Account menu"}
                   >
                     <Avatar className="size-7">
                       {profile?.avatar_url ? (
@@ -766,24 +728,24 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem asChild>
-                    <Link href="/profile">
+                    <Link href="/profile" prefetch={false}>
                       <User className="size-4" aria-hidden="true" />
                       <span>{t("settings.profileTab")}</span>
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuItem asChild>
-                    <Link href="/settings">
+                    <Link href="/settings" prefetch={false}>
                       <Settings className="size-4" aria-hidden="true" />
                       <span>{t("nav.settings")}</span>
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuItem asChild>
-                    <Link href="/history">
+                    <Link href="/history" prefetch={false}>
                       <Clock className="size-4" aria-hidden="true" />
                       <span>{t("nav.history")}</span>
                     </Link>
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={openHelp}>
+                  <DropdownMenuItem onClick={openHelp} className="hidden lg:flex">
                     <Keyboard className="size-4" aria-hidden="true" />
                     <span>{t("study.keyboardShortcuts")}</span>
                   </DropdownMenuItem>
@@ -804,64 +766,72 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
         {showConfigBanner && <ServiceSetupNotice compact />}
 
-        {/* Primary Page Content — generous mobile bottom padding so bottom nav never clips content */}
+        {/* Primary Page Content — generous mobile bottom padding so bottom nav never clips */}
         <main
           id="main-content"
-          className="mx-auto w-full max-w-7xl flex-1 px-4 pt-5 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))] sm:px-6 sm:pt-6 md:pb-24 lg:pb-10"
+          className="mx-auto w-full max-w-6xl flex-1 px-4 pt-5 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))] sm:px-6 sm:pt-6 md:pb-24 lg:pb-10"
         >
           {children}
         </main>
       </div>
 
-      {/* Mobile One-Hand Bottom Navigation (< 1024px) */}
+      {/* Mobile 4-Tab Bottom Navigation (< 1024px) — Crisp Vietnamese diacritics & >=44px targets */}
       <nav
-        aria-label={locale === "vi" ? "Thanh dưới" : "Bottom bar"}
+        aria-label={vi ? "Điều hướng di động" : "Mobile navigation"}
         className="border-border bg-card/95 fixed inset-x-0 bottom-0 z-40 border-t backdrop-blur-xs lg:hidden"
         style={{ paddingBottom: "max(0.25rem, env(safe-area-inset-bottom, 0px))" }}
       >
-        <div className="grid h-16 grid-cols-5 items-stretch px-1">
-          {mobileTabs.map((tab) => {
+        <div className="grid h-16 grid-cols-4 items-stretch px-1">
+          {mobilePrimaryTabs.map((tab) => {
             const Icon = tab.icon;
             return (
               <Link
                 key={tab.href}
                 href={tab.href}
+                prefetch={tab.prefetch}
                 aria-current={tab.active ? "page" : undefined}
                 className={cn(
-                  "flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 px-1 py-1.5 text-[11px] font-medium transition-colors",
+                  "flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 px-1 py-1.5 text-xs font-medium transition-colors",
                   tab.active
                     ? "border-primary text-primary font-semibold"
                     : "text-muted-foreground hover:text-foreground border-transparent",
-                  tab.featured && !tab.active && "text-foreground",
                 )}
               >
                 <Icon className="size-5 shrink-0" aria-hidden="true" />
-                <span className="max-w-full truncate leading-none">{tab.label}</span>
+                <span className="max-w-full truncate leading-normal">{tab.label}</span>
               </Link>
             );
           })}
 
-          <Sheet open={mobileMoreOpen} onOpenChange={setMobileMoreOpen}>
+          <Sheet open={personalSheetOpen} onOpenChange={setPersonalSheetOpen}>
             <SheetTrigger asChild>
               <button
                 type="button"
-                className="text-muted-foreground hover:text-foreground flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 border-transparent px-1 py-1.5 text-[11px] font-medium transition-colors"
-                aria-label={t("common.more")}
+                aria-current={isPersonalRoute ? "page" : undefined}
+                className={cn(
+                  "flex min-h-11 flex-col items-center justify-center gap-1 border-t-2 px-1 py-1.5 text-xs font-medium transition-colors",
+                  isPersonalRoute
+                    ? "border-primary text-primary font-semibold"
+                    : "text-muted-foreground hover:text-foreground border-transparent",
+                )}
+                aria-label={vi ? "Cá nhân" : "Personal"}
               >
-                <Menu className="size-5 shrink-0" aria-hidden="true" />
-                <span className="leading-none">{t("common.more")}</span>
+                <User className="size-5 shrink-0" aria-hidden="true" />
+                <span className="max-w-full truncate leading-normal">
+                  {vi ? "Cá nhân" : "Me"}
+                </span>
               </button>
             </SheetTrigger>
             <SheetContent
               side="bottom"
-              className="max-h-[84dvh] overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]"
+              className="max-h-[82dvh] overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]"
             >
               <SheetHeader>
-                <SheetTitle>{locale === "vi" ? "Tất cả mục" : "More"}</SheetTitle>
+                <SheetTitle>{vi ? "Cá nhân & Tiện ích" : "Personal"}</SheetTitle>
                 <SheetDescription>
-                  {locale === "vi"
-                    ? "Truy cập nhanh các tính năng ôn tập, chia sẻ và cài đặt."
-                    : "Quick access to study modes, sharing, and account settings."}
+                  {vi
+                    ? "Ôn lỗi sai, lịch sử thi, thống kê, bạn bè và cài đặt học ngoại tuyến."
+                    : "Mistakes review, exam history, statistics, sharing, and offline settings."}
                 </SheetDescription>
               </SheetHeader>
 
@@ -871,7 +841,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     type="button"
                     variant="outline"
                     onClick={() => {
-                      setMobileMoreOpen(false);
+                      setPersonalSheetOpen(false);
                       openSearch();
                     }}
                     className="text-muted-foreground min-h-11 w-full justify-start gap-2 font-normal"
@@ -880,57 +850,50 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     <span className="truncate">{t("search.triggerPlaceholder")}</span>
                   </Button>
                 )}
-                <div className="flex items-center gap-2">
-                  <Link
-                    href={isOnline ? "/settings?tab=offline" : "/offline"}
-                    onClick={() => setMobileMoreOpen(false)}
-                    className={cn(
-                      "flex min-h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-medium",
-                      !isOnline
-                        ? "border-warning/40 bg-warning-subtle text-warning-subtle-foreground"
-                        : "border-border bg-card text-foreground",
-                    )}
-                  >
+
+                <Link
+                  href={isOnline ? "/settings?tab=offline" : "/offline"}
+                  prefetch={false}
+                  onClick={() => setPersonalSheetOpen(false)}
+                  className={cn(
+                    "flex min-h-11 items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm font-medium",
+                    !isOnline
+                      ? "border-warning/40 bg-warning-subtle text-warning-subtle-foreground"
+                      : "border-border bg-card text-foreground hover:bg-secondary",
+                  )}
+                >
+                  <span className="flex items-center gap-2">
                     {isOnline ? (
-                      <Wifi className="text-success size-3.5 shrink-0" aria-hidden="true" />
+                      <Wifi className="text-success size-4 shrink-0" aria-hidden="true" />
                     ) : (
-                      <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />
+                      <WifiOff className="size-4 shrink-0" aria-hidden="true" />
                     )}
                     <span>
-                      {!isOnline
-                        ? t("pwa.offline")
-                        : pendingSyncCount > 0
-                          ? t("pwa.pendingSyncCount", { count: pendingSyncCount })
-                          : t("pwa.online")}
+                      {vi ? "Cài đặt & Ngoại tuyến" : "Settings & Offline"}
                     </span>
-                  </Link>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setMobileMoreOpen(false);
-                      openHelp();
-                    }}
-                    className="min-h-10 shrink-0 gap-1.5"
-                  >
-                    <Keyboard className="size-3.5" aria-hidden="true" />
-                    <span>{t("study.keyboardShortcuts")}</span>
-                  </Button>
-                </div>
+                  </span>
+                  <span className="text-muted-foreground text-xs">
+                    {!isOnline
+                      ? t("pwa.offline")
+                      : pendingSyncCount > 0
+                        ? t("pwa.pendingSyncCount", { count: pendingSyncCount })
+                        : t("pwa.online")}
+                  </span>
+                </Link>
               </div>
 
               <div className="mt-3 grid grid-cols-2 gap-2">
-                {mobileSheetLinks.map((item) => {
+                {mobilePersonalLinks.map((item) => {
                   const Icon = item.icon;
                   return (
                     <Link
                       key={item.href}
                       href={item.href}
-                      onClick={() => setMobileMoreOpen(false)}
+                      prefetch={false}
+                      onClick={() => setPersonalSheetOpen(false)}
                       aria-current={item.active ? "page" : undefined}
                       className={cn(
-                        "flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors",
+                        "flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
                         item.active
                           ? "border-primary bg-accent text-accent-foreground font-semibold"
                           : "border-border bg-card text-foreground hover:bg-secondary",
@@ -943,37 +906,36 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                 })}
               </div>
 
-              <Separator className="my-3" />
-
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
-                <div className="flex items-center gap-2">
-                  <LanguageToggle
-                    onPersist={(next: Locale) =>
-                      void updatePreferences({ language: next })
-                    }
-                  />
-                  <ThemeToggle
-                    onPersist={(next: ThemePreference) =>
-                      void updatePreferences({ theme: next })
-                    }
-                  />
-                </div>
-                {profile && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={signingOut}
-                    onClick={() => {
-                      setMobileMoreOpen(false);
-                      void handleSignOut();
-                    }}
-                    className="text-destructive border-destructive/30 hover:bg-destructive-subtle min-h-11"
-                  >
-                    <LogOut className="size-4" aria-hidden="true" />
-                    <span>{t("nav.signOut")}</span>
-                  </Button>
-                )}
-              </div>
+              {profile && (
+                <>
+                  <Separator className="my-3" />
+                  <div className="flex items-center justify-between gap-3 pb-1">
+                    <div className="min-w-0">
+                      <p className="text-foreground truncate text-sm font-semibold">
+                        {displayName}
+                      </p>
+                      {profile.email && (
+                        <p className="text-muted-foreground truncate text-xs">
+                          {profile.email}
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={signingOut}
+                      onClick={() => {
+                        setPersonalSheetOpen(false);
+                        void handleSignOut();
+                      }}
+                      className="text-destructive border-destructive/30 hover:bg-destructive-subtle min-h-11 shrink-0"
+                    >
+                      <LogOut className="size-4" aria-hidden="true" />
+                      <span>{t("nav.signOut")}</span>
+                    </Button>
+                  </div>
+                </>
+              )}
             </SheetContent>
           </Sheet>
         </div>

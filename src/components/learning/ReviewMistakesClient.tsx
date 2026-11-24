@@ -472,7 +472,14 @@ export function ReviewMistakesClient() {
   const primarySetForSingleMode =
     selectedSetId !== "all" ? selectedSetId : affectedSetIds[0] ?? null;
 
-  const renderMistakeCard = (item: MistakeItem) => {
+  const activeTotalFilterCount =
+    activeAdvancedFilterCount +
+    (selectedSetId !== "all" ? 1 : 0) +
+    (selectedChapter !== "all" ? 1 : 0) +
+    (minWrongCount > 1 ? 1 : 0) +
+    (daysFilter !== "all" ? 1 : 0);
+
+  const renderMistakeCard = (item: MistakeItem, idx: number) => {
     const q = item.question;
     const setTitle =
       item.study_set_title ??
@@ -488,8 +495,11 @@ export function ReviewMistakesClient() {
       (q.type_payload?.type === "listening" ? q.type_payload.audio_url : null);
 
     return (
-      <Card key={item.question_id}>
-        <CardContent className="space-y-4 p-5">
+      <Card
+        key={item.question_id}
+        className={idx >= 2 ? "cv-auto" : undefined}
+      >
+        <CardContent className="space-y-4 p-4 sm:p-5">
           {/* Badges & Top Actions */}
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -692,132 +702,172 @@ export function ReviewMistakesClient() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6">
-      {/* Header + Action Strip */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {lText(locale, "Ôn tập & Phân tích Câu sai", "Advanced Review & Mistakes")}
+    <div className="mx-auto w-full max-w-6xl space-y-4">
+      {/* Compact Header + 1-Tap Hero CTA (UX31-08: wrong questions visible on Screen 1!) */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-xl font-bold tracking-tight sm:text-2xl">
+            {lText(locale, "Ôn tập câu sai", "Review Mistakes")}
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground sm:text-sm">
             {lText(
               locale,
-              "15 bộ lọc chuyên sâu, tách biệt lỗi chưa khắc phục với toàn bộ lịch sử (không bao giờ xóa lịch sử sai), ghi chú cá nhân và ôn SM-2.",
-              "15 targeted filters, separating unresolved errors from preserved history, personal notes, and SM-2 spaced repetition.",
+              "Lịch sử câu sai luôn được giữ nguyên để theo dõi tiến bộ và ôn SM-2.",
+              "Mistake history is preserved so you can resolve errors and review with SM-2.",
             )}
           </p>
         </div>
 
         {affectedSetIds.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
-            <Button asChild className="min-h-10">
+            <Button asChild className="min-h-11 px-4">
               <Link href={buildActionHref("/practice")}>
                 <Play className="size-4" aria-hidden="true" />
-                {lText(locale, "Luyện tất cả câu lọc", "Practice Filtered")}
+                {lText(locale, "Ôn câu sai", "Practice Mistakes")}
               </Link>
             </Button>
-            <Button variant="secondary" asChild className="min-h-10">
-              <Link href={buildActionHref("/practice", { count: "20" })}>
-                <Shuffle className="size-4" aria-hidden="true" />
-                {lText(locale, "Luyện 20 câu ngẫu nhiên", "Practice 20 Random")}
-              </Link>
-            </Button>
-            {primarySetForSingleMode ? (
-              <>
-                <Button variant="outline" asChild className="min-h-10">
-                  <Link href={`/sets/${primarySetForSingleMode}/learn`}>
-                    <Brain className="size-4" aria-hidden="true" />
-                    {lText(locale, "Học thích ứng", "Learn")}
-                  </Link>
-                </Button>
-                <Button variant="outline" asChild className="min-h-10">
-                  <Link href={`/sets/${primarySetForSingleMode}/flashcards`}>
-                    <Layers className="size-4" aria-hidden="true" />
-                    {lText(locale, "Flashcards", "Flashcards")}
-                  </Link>
-                </Button>
-              </>
-            ) : null}
-            <Button variant="outline" asChild className="min-h-10">
-              <Link href={buildActionHref("/exams/new")}>
+            <Button
+              variant="outline"
+              size="sm"
+              asChild
+              className="hidden min-h-10 sm:inline-flex"
+            >
+              <Link href={buildActionHref("/exams/new")} prefetch={false}>
                 <ClipboardList className="size-4" aria-hidden="true" />
                 {lText(locale, "Thi thử câu sai", "Custom Exam")}
               </Link>
             </Button>
+            <details className="relative">
+              <summary className="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md border border-input bg-background px-3 text-xs font-medium hover:bg-secondary/60 select-none [&::-webkit-details-marker]:hidden">
+                <span>{lText(locale, "Khác", "More")}</span>
+                <ChevronDown className="size-3.5" aria-hidden="true" />
+              </summary>
+              <div className="absolute right-0 z-20 mt-1.5 flex w-56 flex-col gap-1 rounded-lg border border-border bg-card p-1.5 shadow-md">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  className="min-h-10 justify-start text-xs"
+                >
+                  <Link
+                    href={buildActionHref("/practice", { count: "20" })}
+                    prefetch={false}
+                  >
+                    <Shuffle className="size-3.5" aria-hidden="true" />
+                    {lText(locale, "Luyện 20 câu ngẫu nhiên", "Practice 20 Random")}
+                  </Link>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  className="min-h-10 justify-start text-xs sm:hidden"
+                >
+                  <Link href={buildActionHref("/exams/new")} prefetch={false}>
+                    <ClipboardList className="size-3.5" aria-hidden="true" />
+                    {lText(locale, "Thi thử câu sai", "Custom Exam")}
+                  </Link>
+                </Button>
+                {primarySetForSingleMode ? (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      asChild
+                      className="min-h-10 justify-start text-xs"
+                    >
+                      <Link
+                        href={`/sets/${primarySetForSingleMode}/learn`}
+                        prefetch={false}
+                      >
+                        <Brain className="size-3.5" aria-hidden="true" />
+                        {lText(locale, "Học thích ứng", "Adaptive Learn")}
+                      </Link>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      asChild
+                      className="min-h-10 justify-start text-xs"
+                    >
+                      <Link
+                        href={`/sets/${primarySetForSingleMode}/flashcards`}
+                        prefetch={false}
+                      >
+                        <Layers className="size-3.5" aria-hidden="true" />
+                        {lText(locale, "Flashcards", "Flashcards")}
+                      </Link>
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            </details>
           </div>
         ) : null}
       </div>
 
-      {/* KPI Summary Strip */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Card>
-          <CardContent className="flex items-center justify-between py-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground">
-                {lText(locale, "Chưa khắc phục", "Unresolved")}
-              </p>
-              <p className="mt-1 text-2xl font-bold text-destructive tabular-nums">
-                {unresolvedItems.length}
-              </p>
-            </div>
-            <div className="flex size-10 items-center justify-center rounded-lg bg-destructive-subtle text-destructive-subtle-foreground">
-              <XCircle className="size-5" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
+      {/* Compact Single-Band KPI Strip (keeps wrong questions immediately visible on mobile Screen 1!) */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2">
+          <span className="truncate text-xs text-muted-foreground">
+            {lText(locale, "Chưa khắc phục", "Unresolved")}
+          </span>
+          <span className="ml-2 flex items-center gap-1 text-base font-bold text-destructive tabular-nums">
+            <XCircle className="size-3.5 shrink-0" aria-hidden="true" />
+            {unresolvedItems.length}
+          </span>
+        </div>
 
-        <Card>
-          <CardContent className="flex items-center justify-between py-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground">
-                {lText(locale, "Sai tự tin cao", "Misconceptions")}
-              </p>
-              <p className="mt-1 text-2xl font-bold text-warning-subtle-foreground tabular-nums">
-                {misconceptionCount}
-              </p>
-            </div>
-            <div className="flex size-10 items-center justify-center rounded-lg bg-warning-subtle text-warning-subtle-foreground">
-              <ShieldAlert className="size-5" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2">
+          <span className="truncate text-xs text-muted-foreground">
+            {lText(locale, "Sai tự tin cao", "Misconceptions")}
+          </span>
+          <span className="ml-2 flex items-center gap-1 text-base font-bold text-warning-subtle-foreground tabular-nums">
+            <ShieldAlert className="size-3.5 shrink-0" aria-hidden="true" />
+            {misconceptionCount}
+          </span>
+        </div>
 
-        <Card>
-          <CardContent className="flex items-center justify-between py-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground">
-                {lText(locale, "Đã khắc phục", "Corrected")}
-              </p>
-              <p className="mt-1 text-2xl font-bold text-success tabular-nums">
-                {correctedItems.length}
-              </p>
-            </div>
-            <div className="flex size-10 items-center justify-center rounded-lg bg-success-subtle text-success-subtle-foreground">
-              <CheckCheck className="size-5" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2">
+          <span className="truncate text-xs text-muted-foreground">
+            {lText(locale, "Đã khắc phục", "Corrected")}
+          </span>
+          <span className="ml-2 flex items-center gap-1 text-base font-bold text-success tabular-nums">
+            <CheckCheck className="size-3.5 shrink-0" aria-hidden="true" />
+            {correctedItems.length}
+          </span>
+        </div>
 
-        <Card>
-          <CardContent className="flex items-center justify-between py-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground">
-                {lText(locale, "Đến hạn SM-2", "SM-2 Due")}
-              </p>
-              <p className="mt-1 text-2xl font-bold text-primary tabular-nums">
-                {dueItems.length}
-              </p>
-            </div>
-            <div className="flex size-10 items-center justify-center rounded-lg bg-accent text-accent-foreground">
-              <Clock className="size-5" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2">
+          <span className="truncate text-xs text-muted-foreground">
+            {lText(locale, "Đến hạn SM-2", "SM-2 Due")}
+          </span>
+          <span className="ml-2 flex items-center gap-1 text-base font-bold text-primary tabular-nums">
+            <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+            {dueItems.length}
+          </span>
+        </div>
       </div>
 
-      {/* Primary + Collapsible 15-Filter Panel */}
-      <Card>
-        <CardContent className="space-y-4 py-4">
+      {/* All 15 Filters Collapsed Cleanly Inside Native <details> (closed by default — UX31-08) */}
+      <details className="group rounded-xl border border-border bg-card shadow-2xs">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-2.5 text-xs font-semibold text-foreground select-none sm:text-sm [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center gap-2">
+            <Filter className="size-4 text-primary" aria-hidden="true" />
+            {lText(locale, "Bộ lọc nâng cao (15)", "Advanced Filters (15)")}
+            {activeTotalFilterCount > 0 ? (
+              <Badge variant="default" className="text-[10px] tabular-nums">
+                {activeTotalFilterCount}
+              </Badge>
+            ) : null}
+          </span>
+          <ChevronDown
+            className="size-4 text-muted-foreground transition-transform group-open:rotate-180"
+            aria-hidden="true"
+          />
+        </summary>
+
+        <div className="space-y-4 border-t border-border p-3.5 sm:p-4">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="space-y-1.5">
               <Label htmlFor="rev-set" className="text-xs">
@@ -916,26 +966,7 @@ export function ReviewMistakesClient() {
             </div>
           </div>
 
-          {/* Native <details> Advanced Filter Drawer (11 more filters -> 15 total!) */}
-          <details className="rounded-lg border border-border bg-secondary/20 p-3">
-            <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-semibold text-foreground">
-              <span className="flex items-center gap-1.5">
-                <Filter className="size-3.5 text-primary" aria-hidden="true" />
-                {lText(
-                  locale,
-                  "Bộ lọc nâng cao (Môn học, Thẻ, Loại câu, Đề thi gần đây, Tự tin, SM-2...)",
-                  "Advanced Filters (Subject, Tag, Question Type, Recent Exam, Confidence, Mastery...)",
-                )}
-                {activeAdvancedFilterCount > 0 ? (
-                  <Badge variant="default" className="ml-1 text-[10px]">
-                    {activeAdvancedFilterCount}
-                  </Badge>
-                ) : null}
-              </span>
-              <ChevronDown className="size-4 text-muted-foreground" aria-hidden="true" />
-            </summary>
-
-            <div className="mt-4 space-y-4">
+          <div className="space-y-4 border-t border-border pt-4">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="space-y-1">
                   <Label htmlFor="rev-subject" className="text-xs">
@@ -1141,32 +1172,41 @@ export function ReviewMistakesClient() {
                   {lText(locale, "Đặt lại tất cả bộ lọc", "Reset all 15 filters")}
                 </Button>
               </div>
-            </div>
-          </details>
-        </CardContent>
-      </Card>
+          </div>
+        </div>
+      </details>
 
       {/* Tabs: Unresolved / Corrected / Full Historical / SM-2 Due */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="overflow-x-auto pb-1">
-          <TabsList className="inline-flex w-max flex-nowrap">
-            <TabsTrigger value="unresolved">
-              {lText(locale, "Chưa khắc phục", "Unresolved")} (
-              {unresolvedItems.length})
-            </TabsTrigger>
-            <TabsTrigger value="corrected">
-              {lText(locale, "Đã khắc phục", "Corrected")} (
-              {correctedItems.length})
-            </TabsTrigger>
-            <TabsTrigger value="historical">
-              {lText(locale, "Toàn bộ lịch sử", "All Historical")} (
-              {filteredMistakes.length})
-            </TabsTrigger>
-            <TabsTrigger value="due">
-              {lText(locale, "Đến hạn SM-2", "SM-2 Due")} ({dueItems.length})
-            </TabsTrigger>
-          </TabsList>
-        </div>
+        <TabsList className="grid h-auto w-full grid-cols-2 gap-1 p-1 sm:inline-flex sm:w-auto">
+          <TabsTrigger
+            value="unresolved"
+            className="min-h-9 px-2.5 text-xs sm:text-sm"
+          >
+            {lText(locale, "Chưa khắc phục", "Unresolved")} (
+            {unresolvedItems.length})
+          </TabsTrigger>
+          <TabsTrigger
+            value="corrected"
+            className="min-h-9 px-2.5 text-xs sm:text-sm"
+          >
+            {lText(locale, "Đã khắc phục", "Corrected")} (
+            {correctedItems.length})
+          </TabsTrigger>
+          <TabsTrigger
+            value="historical"
+            className="min-h-9 px-2.5 text-xs sm:text-sm"
+          >
+            {lText(locale, "Toàn bộ lịch sử", "All Historical")} (
+            {filteredMistakes.length})
+          </TabsTrigger>
+          <TabsTrigger
+            value="due"
+            className="min-h-9 px-2.5 text-xs sm:text-sm"
+          >
+            {lText(locale, "Đến hạn SM-2", "SM-2 Due")} ({dueItems.length})
+          </TabsTrigger>
+        </TabsList>
 
         {(["unresolved", "corrected", "historical"] as const).map((tabKey) => {
           const list =

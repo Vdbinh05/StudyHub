@@ -2,14 +2,23 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { AnimatePresence, motion } from "motion/react";
-import { ArrowLeft, ArrowRight, Check } from "lucide-react";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { useI18n } from "@/lib/i18n";
 import {
-  buildVercelSafeCommitChunks,
-} from "@/lib/import/commit-chunker";
+  AlertCircle,
+  AlertTriangle,
+  ArrowLeft,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  FileCheck2,
+  SlidersHorizontal,
+  UploadCloud,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { useI18n } from "@/lib/i18n";
+import { buildVercelSafeCommitChunks } from "@/lib/import/commit-chunker";
 import {
   computeImportSummary,
   validateImportBatch,
@@ -28,10 +37,11 @@ import type {
   ImportPreviewSummary,
   ParsedQuestion,
 } from "@/types/import";
-import { getImportStepLabels } from "./import-copy";
-import { StepAnswerRule, StepFormatConfig } from "./StepFormatAndRules";
+import { getFormatLabel, getImportStepLabels } from "./import-copy";
+import { AnswerRuleSection, FormatConfigSection } from "./StepFormatAndRules";
 import {
   ImportOptionsPanel,
+  ReplaceConfirmDialog,
   StepCommit,
   type CommitProgressState,
   type DuplicatePolicy,
@@ -84,6 +94,27 @@ const EMPTY_MAPPING: ColumnMapping = {
   correctAnswer: null,
 };
 
+const EMPTY_SUMMARY: ImportPreviewSummary = {
+  totalDetected: 0,
+  validCount: 0,
+  warningCount: 0,
+  errorCount: 0,
+  duplicateCount: 0,
+  missingAnswerCount: 0,
+  conflictCount: 0,
+};
+
+const IDLE_COMMIT_PROGRESS: CommitProgressState = {
+  status: "idle",
+  completedChunks: 0,
+  totalChunks: 0,
+  importedCount: 0,
+  skippedCount: 0,
+  replacedCount: 0,
+  totalSetQuestions: 0,
+  errorMessage: null,
+};
+
 function hasAnyMapping(mapping: ColumnMapping | undefined): boolean {
   if (!mapping) return false;
   return Boolean(
@@ -95,10 +126,7 @@ function hasAnyMapping(mapping: ColumnMapping | undefined): boolean {
   );
 }
 
-function buildParseCacheKey(
-  sourceVersion: number,
-  opts: ImportOptions,
-): string {
+function buildParseCacheKey(sourceVersion: number, opts: ImportOptions): string {
   return JSON.stringify({
     v: sourceVersion,
     fmt: opts.formatOverride ?? null,
@@ -125,13 +153,13 @@ export function ImportWizard({
   const { locale } = useI18n();
   const steps = React.useMemo(() => getImportStepLabels(locale), [locale]);
 
-  const [step, setStep] = React.useState<number>(1);
+  const [step, setStep] = React.useState<1 | 2 | 3>(1);
   const [sourceMode, setSourceMode] = React.useState<"file" | "paste">("file");
   const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
   const [rawText, setRawText] = React.useState("");
   const [sourceVersion, setSourceVersion] = React.useState<number>(0);
 
-  // Parse configuration state
+  // Parse configuration state (housed inside Step 2 collapsible Advanced Options)
   const [detectedFormat, setDetectedFormat] = React.useState<ImportFormat>("eduquiz_txt");
   const [formatOverride, setFormatOverride] = React.useState<ImportFormat | undefined>(undefined);
   const [sheetNames, setSheetNames] = React.useState<string[] | undefined>(undefined);
@@ -149,54 +177,41 @@ export function ImportWizard({
   const [isScannedPdf, setIsScannedPdf] = React.useState<boolean>(false);
   const [pdfPageCount, setPdfPageCount] = React.useState<number | undefined>(undefined);
   const [answerRule, setAnswerRule] = React.useState<AnswerRule>({ mode: "auto" });
+  const [advancedOpen, setAdvancedOpen] = React.useState<boolean>(false);
 
   // Parsed preview state
   const [questions, setQuestions] = React.useState<ParsedQuestion[]>([]);
-  const [summary, setSummary] = React.useState<ImportPreviewSummary>({
-    totalDetected: 0,
-    validCount: 0,
-    warningCount: 0,
-    errorCount: 0,
-    duplicateCount: 0,
-    missingAnswerCount: 0,
-    conflictCount: 0,
-  });
+  const [summary, setSummary] = React.useState<ImportPreviewSummary>(EMPTY_SUMMARY);
   const [detectedChapters, setDetectedChapters] = React.useState<string[]>([]);
   const [fileSizeBytes, setFileSizeBytes] = React.useState<number>(0);
   const [parsedFileName, setParsedFileName] = React.useState<string>("import.txt");
 
-  // Import options state (Step 5)
+  // Import save options (inside Step 2 collapsible Advanced Options)
   const [mode, setMode] = React.useState<"append" | "replace">("append");
   const [duplicatePolicy, setDuplicatePolicy] = React.useState<DuplicatePolicy>("skip");
   const [skipInvalidRows, setSkipInvalidRows] = React.useState<boolean>(false);
   const [defaultChapter, setDefaultChapter] = React.useState<string>("");
   const [defaultTagsText, setDefaultTagsText] = React.useState<string>("");
+  const [confirmReplaceOpen, setConfirmReplaceOpen] = React.useState<boolean>(false);
 
   // Loading & Error states
   const [isParsing, setIsParsing] = React.useState(false);
   const [parseError, setParseError] = React.useState<string | null>(null);
 
-  // Commit progress state (Step 6)
-  const [commitProgress, setCommitProgress] = React.useState<CommitProgressState>({
-    status: "idle",
-    completedChunks: 0,
-    totalChunks: 0,
-    importedCount: 0,
-    skippedCount: 0,
-    replacedCount: 0,
-    totalSetQuestions: 0,
-    errorMessage: null,
-  });
+  // Step 3 commit progress state
+  const [commitProgress, setCommitProgress] =
+    React.useState<CommitProgressState>(IDLE_COMMIT_PROGRESS);
 
   // Stable session seed for idempotency keys across retries of the same import
   const commitBatchIdRef = React.useRef<string>(crypto.randomUUID());
-  // Parse cache key to eliminate 3x redundant re-parses across Steps 1 -> 4 (SH-038)
+  const sourceVersionRef = React.useRef<number>(sourceVersion);
+  // Parse cache key to avoid redundant re-parses when options haven't changed
   const lastParsedKeyRef = React.useRef<string | null>(null);
   const hasParsedQuestionsRef = React.useRef<boolean>(false);
-  // Debounced cross-batch revalidation timer for Step-5 edits (SH-038)
+  // Debounced cross-batch revalidation timer for inline edits
   const revalidateTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestQuestionsRef = React.useRef<ParsedQuestion[]>(questions);
-  // Step-transition focus management: skips initial mount, moves focus to the newly mounted step <h2> (I-02)
+  // Step-transition focus management: moves focus cleanly to the mounted step <h2>
   const previousStepRef = React.useRef<number>(step);
   const pendingFocusStepRef = React.useRef<number | null>(null);
   const stepHeadingElRef = React.useRef<HTMLHeadingElement | null>(null);
@@ -238,6 +253,10 @@ export function ImportWizard({
   }, [questions]);
 
   React.useEffect(() => {
+    sourceVersionRef.current = sourceVersion;
+  }, [sourceVersion]);
+
+  React.useEffect(() => {
     return () => {
       if (revalidateTimerRef.current) {
         clearTimeout(revalidateTimerRef.current);
@@ -245,30 +264,46 @@ export function ImportWizard({
     };
   }, []);
 
-  const flushBatchRevalidation = React.useCallback(() => {
+  const flushBatchRevalidation = React.useCallback((): ParsedQuestion[] => {
     if (revalidateTimerRef.current) {
       clearTimeout(revalidateTimerRef.current);
       revalidateTimerRef.current = null;
       const revalidated = validateImportBatch(latestQuestionsRef.current);
+      latestQuestionsRef.current = revalidated.questions;
       setQuestions(revalidated.questions);
       setSummary(revalidated.summary);
       setDetectedChapters(revalidated.detectedChapters);
+      return revalidated.questions;
     }
+    return latestQuestionsRef.current;
   }, []);
 
   const runServerParse = React.useCallback(
     async (
       overrideOpts?: Partial<ImportOptions>,
-      control?: { force?: boolean; resetMapping?: boolean },
-    ): Promise<boolean> => {
+      control?: {
+        force?: boolean;
+        resetMapping?: boolean;
+        fileOverride?: File;
+        nextSourceVersion?: number;
+      },
+    ): Promise<ParseApiResponse["data"] | null> => {
+      const activeFile = control?.fileOverride ?? selectedFile;
+      const activeSourceMode = control?.fileOverride ? "file" : sourceMode;
+      const activeVersion = control?.nextSourceVersion ?? sourceVersionRef.current;
+
       const effectiveFormatOverride =
         overrideOpts && "formatOverride" in overrideOpts
           ? overrideOpts.formatOverride
-          : formatOverride;
+          : control?.fileOverride
+            ? undefined
+            : formatOverride;
       const effectiveSheetName =
         overrideOpts && "sheetName" in overrideOpts
           ? overrideOpts.sheetName
-          : selectedSheet;
+          : control?.fileOverride
+            ? undefined
+            : selectedSheet;
       const effectiveHasHeaderRow =
         overrideOpts && "hasHeaderRow" in overrideOpts
           ? overrideOpts.hasHeaderRow
@@ -276,7 +311,9 @@ export function ImportWizard({
       const effectiveHeaderRowCount =
         overrideOpts && "headerRowCount" in overrideOpts
           ? overrideOpts.headerRowCount
-          : headerRowCount;
+          : control?.fileOverride
+            ? undefined
+            : headerRowCount;
       const effectiveAnswerRule =
         overrideOpts && "answerRule" in overrideOpts
           ? overrideOpts.answerRule
@@ -324,13 +361,19 @@ export function ImportWizard({
         preserveMediaPreviews: true,
       };
 
-      const requestKey = buildParseCacheKey(sourceVersion, effectiveOptions);
+      const requestKey = buildParseCacheKey(activeVersion, effectiveOptions);
       if (
         !control?.force &&
         lastParsedKeyRef.current === requestKey &&
         hasParsedQuestionsRef.current
       ) {
-        return true;
+        return {
+          format: detectedFormat,
+          questions: latestQuestionsRef.current,
+          summary,
+          ruleUsed: answerRule,
+          isScannedPdf,
+        };
       }
 
       setIsParsing(true);
@@ -338,13 +381,13 @@ export function ImportWizard({
 
       try {
         let response: Response;
-        if (sourceMode === "file" && selectedFile) {
-          if (selectedFile.size > VERCEL_SAFE_DIRECT_PAYLOAD_BYTES) {
+        if (activeSourceMode === "file" && activeFile) {
+          if (activeFile.size > VERCEL_SAFE_DIRECT_PAYLOAD_BYTES) {
             const staged = await uploadFileToTempStorage({
-              file: selectedFile,
-              fileName: selectedFile.name,
+              file: activeFile,
+              fileName: activeFile.name,
               purpose: "import",
-              contentType: selectedFile.type || undefined,
+              contentType: activeFile.type || undefined,
               studySetId,
             });
             response = await fetch("/api/import/parse", {
@@ -353,14 +396,14 @@ export function ImportWizard({
               body: JSON.stringify({
                 storagePath: staged.storagePath,
                 fileName: staged.fileName,
-                fileSizeBytes: selectedFile.size,
+                fileSizeBytes: activeFile.size,
                 studySetId,
                 options: effectiveOptions,
               }),
             });
           } else {
             const form = new FormData();
-            form.append("file", selectedFile);
+            form.append("file", activeFile);
             form.append("studySetId", studySetId);
             form.append("options", JSON.stringify(effectiveOptions));
             response = await fetch("/api/import/parse", {
@@ -409,11 +452,11 @@ export function ImportWizard({
           const msg =
             payload.error?.message ??
             (locale === "en"
-              ? "Failed to parse input. Please check file format."
-              : "Không thể phân tích dữ liệu. Vui lòng kiểm tra định dạng tệp.");
+              ? "Failed to read input. Please check your file format."
+              : "Không thể đọc dữ liệu. Vui lòng kiểm tra định dạng tệp.");
           setParseError(msg);
           toast.error(msg);
-          return false;
+          return null;
         }
 
         const data = payload.data;
@@ -432,14 +475,14 @@ export function ImportWizard({
         setIsScannedPdf(Boolean(data.isScannedPdf));
         setPdfPageCount(data.pdfPageCount);
         setQuestions(data.questions);
+        latestQuestionsRef.current = data.questions;
         setSummary(data.summary);
         setDetectedChapters(data.detectedChapters ?? []);
         setFileSizeBytes(data.fileSizeBytes ?? 0);
-        setParsedFileName(data.fileName ?? selectedFile?.name ?? "pasted-input.txt");
+        setParsedFileName(data.fileName ?? activeFile?.name ?? "pasted-input.txt");
         commitBatchIdRef.current = crypto.randomUUID();
 
-        // Store cache key matching the resolved state so unchanged Next clicks skip re-parsing
-        lastParsedKeyRef.current = buildParseCacheKey(sourceVersion, {
+        lastParsedKeyRef.current = buildParseCacheKey(activeVersion, {
           ...effectiveOptions,
           sheetName: data.selectedSheet ?? effectiveSheetName,
           headerRowCount: data.headerRowCount ?? effectiveHeaderRowCount,
@@ -447,17 +490,17 @@ export function ImportWizard({
             ? resolvedMapping
             : undefined,
         });
-        return true;
+        return data;
       } catch (err) {
         const msg =
           err instanceof Error
             ? err.message
             : locale === "en"
-              ? "Network error while parsing."
-              : "Lỗi kết nối khi phân tích tệp.";
+              ? "Network error while reading file."
+              : "Lỗi kết nối khi đọc tệp.";
         setParseError(msg);
         toast.error(msg);
-        return false;
+        return null;
       } finally {
         setIsParsing(false);
       }
@@ -467,9 +510,11 @@ export function ImportWizard({
       cardDelimiter,
       columnMapping,
       csvDelimiter,
+      detectedFormat,
       formatOverride,
       hasHeaderRow,
       headerRowCount,
+      isScannedPdf,
       locale,
       pdfPageRange,
       pdfTwoColumn,
@@ -477,13 +522,63 @@ export function ImportWizard({
       selectedFile,
       selectedSheet,
       sourceMode,
-      sourceVersion,
       studySetId,
+      summary,
       termDelimiter,
     ],
   );
 
-  // O(1) immediate single-item validation + debounced batch duplicate revalidation (fixes 105ms freeze on 10k rows)
+  const openStep2WithResult = React.useCallback(
+    (data: NonNullable<ParseApiResponse["data"]>) => {
+      const needsAdvanced =
+        Boolean(data.isScannedPdf) ||
+        data.summary.totalDetected === 0 ||
+        (data.summary.missingAnswerCount > 0 && data.summary.validCount === 0);
+      setAdvancedOpen(needsAdvanced);
+      setStep(2);
+    },
+    [],
+  );
+
+  // Instant file auto-parse on pick/drop -> drops student straight into Step 2!
+  const handleSelectFile = React.useCallback(
+    async (file: File | null) => {
+      setSelectedFile(file);
+      setFormatOverride(undefined);
+      setSelectedSheet(undefined);
+      setHeaderRowCount(undefined);
+      setColumnMapping(EMPTY_MAPPING);
+      setAnswerRule({ mode: "auto" });
+      setParseError(null);
+      const nextVer = sourceVersionRef.current + 1;
+      sourceVersionRef.current = nextVer;
+      setSourceVersion(nextVer);
+      lastParsedKeyRef.current = null;
+
+      if (!file) return;
+
+      const data = await runServerParse(
+        {
+          formatOverride: undefined,
+          sheetName: undefined,
+          headerRowCount: undefined,
+          answerRule: { mode: "auto" },
+        },
+        {
+          force: true,
+          resetMapping: true,
+          fileOverride: file,
+          nextSourceVersion: nextVer,
+        },
+      );
+      if (data) {
+        openStep2WithResult(data);
+      }
+    },
+    [openStep2WithResult, runServerParse],
+  );
+
+  // O(1) immediate single-item validation + debounced batch duplicate revalidation
   const handleUpdateQuestion = React.useCallback(
     (tempId: string, updater: (q: ParsedQuestion) => ParsedQuestion) => {
       setQuestions((prev) => {
@@ -505,6 +600,7 @@ export function ImportWizard({
       revalidateTimerRef.current = setTimeout(() => {
         revalidateTimerRef.current = null;
         const revalidated = validateImportBatch(latestQuestionsRef.current);
+        latestQuestionsRef.current = revalidated.questions;
         setQuestions(revalidated.questions);
         setSummary(revalidated.summary);
         setDetectedChapters(revalidated.detectedChapters);
@@ -578,180 +674,280 @@ export function ImportWizard({
     [],
   );
 
-  const readyToImportQuestions = React.useMemo(() => {
-    return questions.filter((q) => {
-      if (q.excluded) return false;
-      if (skipInvalidRows && q.issues.some((i) => i.severity === "error")) {
-        return false;
-      }
-      return true;
-    });
-  }, [questions, skipInvalidRows]);
+  const filterReadyQuestions = React.useCallback(
+    (list: ParsedQuestion[]): ParsedQuestion[] => {
+      return list.filter((q) => {
+        if (q.excluded) return false;
+        if (skipInvalidRows && q.issues.some((i) => i.severity === "error")) {
+          return false;
+        }
+        return true;
+      });
+    },
+    [skipInvalidRows],
+  );
 
-  const handleStartCommit = React.useCallback(async () => {
-    const activeRows = readyToImportQuestions;
+  const readyToImportQuestions = React.useMemo(
+    () => filterReadyQuestions(questions),
+    [filterReadyQuestions, questions],
+  );
+
+  const blockedByErrors = summary.errorCount > 0 && !skipInvalidRows;
+
+  const executeCommit = React.useCallback(
+    async (overrideRows?: ParsedQuestion[]) => {
+      const latestAll = overrideRows ? overrideRows : filterReadyQuestions(flushBatchRevalidation());
+      if (latestAll.length === 0) return;
+
+      // Keep every JSON commit chunk <= 2.5 MB and <= 500 questions across ALL formats
+      // so multi-chunk commits never exceed Vercel Hobby's 4.5 MB request body cap.
+      const chunks: ParsedQuestion[][] = buildVercelSafeCommitChunks(latestAll);
+      const defaultTags = defaultTagsText
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      setStep(3);
+      setCommitProgress({
+        status: "committing",
+        completedChunks: 0,
+        totalChunks: chunks.length,
+        importedCount: 0,
+        skippedCount: 0,
+        replacedCount: 0,
+        totalSetQuestions: 0,
+        errorMessage: null,
+      });
+
+      let importJobId: string | undefined;
+      let totalImported = 0;
+      let totalSkipped = 0;
+      let totalReplaced = 0;
+      let finalSetTotal = 0;
+
+      try {
+        for (let i = 0; i < chunks.length; i += 1) {
+          const chunk = chunks[i];
+          const idempotencyKey = `${commitBatchIdRef.current}-chunk-${i}`;
+
+          const response = await fetch("/api/import/commit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              studySetId,
+              idempotencyKey,
+              importJobId,
+              isFirstChunk: i === 0,
+              isFinalChunk: i === chunks.length - 1,
+              sourceFormat: formatOverride ?? detectedFormat,
+              fileName: parsedFileName,
+              fileSizeBytes,
+              answerRule,
+              mode,
+              duplicatePolicy,
+              skipInvalidRows,
+              defaultChapter: defaultChapter.trim() || undefined,
+              defaultTags: defaultTags.length > 0 ? defaultTags : undefined,
+              totalDetectedOverall: latestQuestionsRef.current.length,
+              questions: chunk,
+            }),
+          });
+
+          const payload = (await response.json()) as CommitApiResponse;
+          if (!response.ok || !payload.data) {
+            throw new Error(
+              payload.error?.message ??
+                (locale === "en"
+                  ? `Batch ${i + 1} failed to save.`
+                  : `Lỗi khi lưu lô dữ liệu thứ ${i + 1}.`),
+            );
+          }
+
+          if (payload.data.importJobId) {
+            importJobId = payload.data.importJobId;
+          }
+          totalImported += payload.data.importedCount;
+          totalSkipped += payload.data.skippedCount;
+          totalReplaced += payload.data.replacedCount;
+          finalSetTotal = payload.data.totalSetQuestions;
+
+          setCommitProgress({
+            status: i === chunks.length - 1 ? "completed" : "committing",
+            completedChunks: i + 1,
+            totalChunks: chunks.length,
+            importedCount: totalImported,
+            skippedCount: totalSkipped,
+            replacedCount: totalReplaced,
+            totalSetQuestions: finalSetTotal,
+            errorMessage: null,
+          });
+        }
+
+        toast.success(
+          locale === "en"
+            ? `Imported ${totalImported.toLocaleString()} question(s) successfully.`
+            : `Đã nhập thành công ${totalImported.toLocaleString()} câu hỏi.`,
+        );
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : locale === "en"
+              ? "Import failed while saving."
+              : "Quá trình lưu dữ liệu gặp lỗi.";
+        setCommitProgress((prev) => ({
+          ...prev,
+          status: "error",
+          errorMessage: msg,
+        }));
+        toast.error(msg);
+      }
+    },
+    [
+      answerRule,
+      defaultChapter,
+      defaultTagsText,
+      detectedFormat,
+      duplicatePolicy,
+      fileSizeBytes,
+      filterReadyQuestions,
+      flushBatchRevalidation,
+      formatOverride,
+      locale,
+      mode,
+      parsedFileName,
+      skipInvalidRows,
+      studySetId,
+    ],
+  );
+
+  const handleRequestImport = React.useCallback(() => {
+    const flushed = flushBatchRevalidation();
+    const activeRows = filterReadyQuestions(flushed);
     if (activeRows.length === 0) return;
 
-    // Keep every JSON commit chunk <= 2.5 MB and <= 500 questions across ALL formats
-    // so multi-chunk commits never exceed Vercel Hobby's 4.5 MB request body cap.
-    const chunks: ParsedQuestion[][] = buildVercelSafeCommitChunks(activeRows);
-    const defaultTags = defaultTagsText
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-
-    setCommitProgress({
-      status: "committing",
-      completedChunks: 0,
-      totalChunks: chunks.length,
-      importedCount: 0,
-      skippedCount: 0,
-      replacedCount: 0,
-      totalSetQuestions: 0,
-      errorMessage: null,
-    });
-
-    let importJobId: string | undefined;
-    let totalImported = 0;
-    let totalSkipped = 0;
-    let totalReplaced = 0;
-    let finalSetTotal = 0;
-
-    try {
-      for (let i = 0; i < chunks.length; i += 1) {
-        const chunk = chunks[i];
-        const idempotencyKey = `${commitBatchIdRef.current}-chunk-${i}`;
-
-        const response = await fetch("/api/import/commit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            studySetId,
-            idempotencyKey,
-            importJobId,
-            isFirstChunk: i === 0,
-            isFinalChunk: i === chunks.length - 1,
-            sourceFormat: formatOverride ?? detectedFormat,
-            fileName: parsedFileName,
-            fileSizeBytes,
-            answerRule,
-            mode,
-            duplicatePolicy,
-            skipInvalidRows,
-            defaultChapter: defaultChapter.trim() || undefined,
-            defaultTags: defaultTags.length > 0 ? defaultTags : undefined,
-            totalDetectedOverall: questions.length,
-            questions: chunk,
-          }),
-        });
-
-        const payload = (await response.json()) as CommitApiResponse;
-        if (!response.ok || !payload.data) {
-          throw new Error(
-            payload.error?.message ??
-              (locale === "en"
-                ? `Chunk ${i + 1} failed to save.`
-                : `Lỗi khi lưu lô dữ liệu thứ ${i + 1}.`),
-          );
-        }
-
-        if (payload.data.importJobId) {
-          importJobId = payload.data.importJobId;
-        }
-        totalImported += payload.data.importedCount;
-        totalSkipped += payload.data.skippedCount;
-        totalReplaced += payload.data.replacedCount;
-        finalSetTotal = payload.data.totalSetQuestions;
-
-        setCommitProgress({
-          status: i === chunks.length - 1 ? "completed" : "committing",
-          completedChunks: i + 1,
-          totalChunks: chunks.length,
-          importedCount: totalImported,
-          skippedCount: totalSkipped,
-          replacedCount: totalReplaced,
-          totalSetQuestions: finalSetTotal,
-          errorMessage: null,
-        });
-      }
-
-      toast.success(
-        locale === "en"
-          ? `Imported ${totalImported.toLocaleString()} question(s) successfully.`
-          : `Đã nhập thành công ${totalImported.toLocaleString()} câu hỏi.`,
-      );
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : locale === "en"
-            ? "Import commit failed."
-            : "Quá trình nhập dữ liệu gặp lỗi.";
-      setCommitProgress((prev) => ({
-        ...prev,
-        status: "error",
-        errorMessage: msg,
-      }));
-      toast.error(msg);
+    if (mode === "replace") {
+      setConfirmReplaceOpen(true);
+      return;
     }
-  }, [
-    answerRule,
-    defaultChapter,
-    defaultTagsText,
-    detectedFormat,
-    duplicatePolicy,
-    fileSizeBytes,
-    formatOverride,
-    locale,
-    mode,
-    parsedFileName,
-    questions.length,
-    readyToImportQuestions,
-    skipInvalidRows,
-    studySetId,
-  ]);
+    void executeCommit(activeRows);
+  }, [executeCommit, filterReadyQuestions, flushBatchRevalidation, mode]);
+
+  const handleImportAnother = React.useCallback(() => {
+    setSelectedFile(null);
+    setRawText("");
+    setQuestions([]);
+    latestQuestionsRef.current = [];
+    setSummary(EMPTY_SUMMARY);
+    setDetectedChapters([]);
+    setFormatOverride(undefined);
+    setSelectedSheet(undefined);
+    setHeaderRowCount(undefined);
+    setColumnMapping(EMPTY_MAPPING);
+    setAnswerRule({ mode: "auto" });
+    setMode("append");
+    setDuplicatePolicy("skip");
+    setSkipInvalidRows(false);
+    setIsScannedPdf(false);
+    setParseError(null);
+    setAdvancedOpen(false);
+    setCommitProgress(IDLE_COMMIT_PROGRESS);
+    const nextVer = sourceVersionRef.current + 1;
+    sourceVersionRef.current = nextVer;
+    setSourceVersion(nextVer);
+    lastParsedKeyRef.current = null;
+    commitBatchIdRef.current = crypto.randomUUID();
+    setStep(1);
+  }, []);
+
+  const activeFormat = formatOverride ?? detectedFormat;
+  const activeStepMeta = steps[step - 1] ?? steps[0];
+  const progressPercent = Math.round((step / steps.length) * 100);
+
+  const importButtonLabel =
+    mode === "replace"
+      ? locale === "en"
+        ? `Replace & Import ${readyToImportQuestions.length.toLocaleString()} Question(s)`
+        : `Thay thế & Nhập ${readyToImportQuestions.length.toLocaleString()} câu hỏi`
+      : locale === "en"
+        ? `Import ${readyToImportQuestions.length.toLocaleString()} Question(s)`
+        : `Nhập ${readyToImportQuestions.length.toLocaleString()} câu hỏi`;
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-6">
+    <div className="mx-auto w-full max-w-5xl min-w-0 space-y-5">
       {/* Top Breadcrumb & Heading */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <Link
-            href={`/sets/${studySetId}`}
-            className="mb-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" aria-hidden="true" />
-            {studySetTitle}
-          </Link>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            {locale === "en"
-              ? "Bulk Question Import Wizard"
-              : "Trình nhập ngân hàng câu hỏi"}
-          </h1>
-        </div>
+      <div className="min-w-0">
+        <Link
+          href={`/sets/${studySetId}`}
+          className="mb-1 inline-flex max-w-full items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="truncate">{studySetTitle}</span>
+        </Link>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
+          {locale === "en" ? "Import Questions" : "Nhập câu hỏi vào học phần"}
+        </h1>
       </div>
 
-      {/* 6-Step Progress Stepper */}
+      {/* Responsive 3-Step Progress Indicator (0px horizontal overflow at 320px/360px/390px) */}
       <nav
-        aria-label={locale === "en" ? "Import wizard progress" : "Tiến trình nhập dữ liệu"}
-        className="overflow-x-auto pb-1"
+        aria-label={locale === "en" ? "Import progress" : "Tiến trình nhập dữ liệu"}
+        className="w-full min-w-0"
       >
-        <ol className="flex min-w-[540px] items-center justify-between gap-2">
+        {/* Mobile compact progress bar (< sm) */}
+        <div className="space-y-2 rounded-xl border border-border bg-card p-3 sm:hidden">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="font-semibold text-primary tabular-nums">
+              {locale === "en" ? `Step ${step} / 3` : `Bước ${step} / 3`}
+            </span>
+            <span className="min-w-0 truncate font-medium text-foreground">
+              {activeStepMeta.title}
+            </span>
+          </div>
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-valuenow={step}
+            aria-valuemin={1}
+            aria-valuemax={3}
+          >
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-200"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Desktop & Tablet 3-pill strip (sm+) */}
+        <ol className="hidden grid-cols-3 gap-2 sm:grid">
           {steps.map((s) => {
             const isActive = step === s.step;
             const isCompleted = step > s.step;
+            const canGoBack =
+              s.step < step &&
+              commitProgress.status !== "committing" &&
+              !(step === 3 && commitProgress.status === "completed");
+
             return (
-              <li key={s.step} className="flex flex-1 items-center gap-2">
+              <li key={s.step} className="min-w-0">
                 <button
                   type="button"
                   aria-current={isActive ? "step" : undefined}
-                  disabled={s.step > step || commitProgress.status === "committing"}
-                  onClick={() => s.step < step && setStep(s.step)}
+                  disabled={!canGoBack}
+                  onClick={() => canGoBack && setStep(s.step)}
                   className={cn(
-                    "flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    isActive && "font-semibold text-foreground",
-                    isCompleted && "text-primary hover:bg-muted",
-                    !isActive && !isCompleted && "cursor-not-allowed text-muted-foreground",
+                    "flex min-h-[44px] w-full min-w-0 items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    isActive &&
+                      "border-primary/50 bg-primary/5 font-semibold text-foreground",
+                    isCompleted &&
+                      canGoBack &&
+                      "border-border bg-card text-primary hover:bg-muted/60",
+                    isCompleted &&
+                      !canGoBack &&
+                      "border-border bg-card text-muted-foreground",
+                    !isActive &&
+                      !isCompleted &&
+                      "cursor-not-allowed border-border/60 bg-muted/20 text-muted-foreground",
                   )}
                 >
                   <span
@@ -759,7 +955,9 @@ export function ImportWizard({
                       "flex size-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold tabular-nums",
                       isCompleted && "border-primary bg-primary text-primary-foreground",
                       isActive && "border-primary bg-primary/10 text-primary",
-                      !isActive && !isCompleted && "border-border bg-muted text-muted-foreground",
+                      !isActive &&
+                        !isCompleted &&
+                        "border-border bg-muted text-muted-foreground",
                     )}
                   >
                     {isCompleted ? (
@@ -768,306 +966,336 @@ export function ImportWizard({
                       s.step
                     )}
                   </span>
-                  <span className="sr-only md:not-sr-only md:whitespace-nowrap">
-                    {s.short}
-                  </span>
+                  <span className="min-w-0 truncate">{s.title}</span>
                 </button>
-                {s.step < steps.length && (
-                  <div
-                    className={cn(
-                      "h-px flex-1",
-                      isCompleted ? "bg-primary" : "bg-border",
-                    )}
-                    aria-hidden="true"
-                  />
-                )}
               </li>
             );
           })}
         </ol>
       </nav>
 
-      {/* Step Content */}
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={step}
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -6 }}
-          transition={{ duration: 0.16 }}
-        >
-          {step === 1 && (
-            <StepSourceInput
-              locale={locale}
-              sourceMode={sourceMode}
-              onSourceModeChange={(m) => {
-                setSourceMode(m);
-                setSourceVersion((v) => v + 1);
-                lastParsedKeyRef.current = null;
-              }}
-              selectedFile={selectedFile}
-              onSelectFile={(f) => {
-                setSelectedFile(f);
-                setFormatOverride(undefined);
-                setSelectedSheet(undefined);
-                setHeaderRowCount(undefined);
-                setColumnMapping(EMPTY_MAPPING);
-                setSourceVersion((v) => v + 1);
-                lastParsedKeyRef.current = null;
-              }}
-              rawText={rawText}
-              onRawTextChange={(txt) => {
-                setRawText(txt);
-                setSourceVersion((v) => v + 1);
-                lastParsedKeyRef.current = null;
-              }}
-              isParsing={isParsing}
-              errorMessage={parseError}
-              headingRef={handleStepHeadingMount}
-              onContinue={async () => {
-                const ok = await runServerParse(undefined, { resetMapping: true });
-                if (ok) setStep(2);
-              }}
-            />
-          )}
+      {/* Step 1: Choose File or Paste Content */}
+      {step === 1 && (
+        <StepSourceInput
+          locale={locale}
+          sourceMode={sourceMode}
+          onSourceModeChange={(m) => {
+            setSourceMode(m);
+            const nextVer = sourceVersionRef.current + 1;
+            sourceVersionRef.current = nextVer;
+            setSourceVersion(nextVer);
+            lastParsedKeyRef.current = null;
+          }}
+          selectedFile={selectedFile}
+          onSelectFile={(f) => {
+            void handleSelectFile(f);
+          }}
+          rawText={rawText}
+          onRawTextChange={(txt) => {
+            setRawText(txt);
+            const nextVer = sourceVersionRef.current + 1;
+            sourceVersionRef.current = nextVer;
+            setSourceVersion(nextVer);
+            lastParsedKeyRef.current = null;
+          }}
+          isParsing={isParsing}
+          errorMessage={parseError}
+          headingRef={handleStepHeadingMount}
+          onContinue={async () => {
+            const data = await runServerParse(undefined, { resetMapping: true });
+            if (data) {
+              openStep2WithResult(data);
+            }
+          }}
+        />
+      )}
 
-          {step === 2 && (
-            <StepFormatConfig
-              locale={locale}
-              detectedFormat={detectedFormat}
-              formatOverride={formatOverride}
-              onFormatOverrideChange={(fmt) => {
-                setFormatOverride(fmt);
-                setColumnMapping(EMPTY_MAPPING);
-                lastParsedKeyRef.current = null;
-              }}
-              sheetNames={sheetNames}
-              selectedSheet={selectedSheet}
-              onSheetChange={async (sheet) => {
-                setSelectedSheet(sheet);
-                setHeaderRowCount(undefined);
-                setColumnMapping(EMPTY_MAPPING);
-                await runServerParse(
-                  { sheetName: sheet, headerRowCount: undefined },
-                  { force: true, resetMapping: true },
-                );
-              }}
-              hasHeaderRow={hasHeaderRow}
-              onHasHeaderRowChange={async (val) => {
-                setHasHeaderRow(val);
-                setHeaderRowCount(undefined);
-                setColumnMapping(EMPTY_MAPPING);
-                await runServerParse(
-                  { hasHeaderRow: val, headerRowCount: undefined },
-                  { force: true, resetMapping: true },
-                );
-              }}
-              headerRowCount={headerRowCount ?? 1}
-              onHeaderRowCountChange={async (rows) => {
-                setHeaderRowCount(rows);
-                setColumnMapping(EMPTY_MAPPING);
-                await runServerParse(
-                  { headerRowCount: rows },
-                  { force: true, resetMapping: true },
-                );
-              }}
-              detectedColumns={detectedColumns}
-              sampleRows={sampleRows}
-              columnMapping={columnMapping}
-              onColumnMappingChange={setColumnMapping}
-              termDelimiter={termDelimiter}
-              onTermDelimiterChange={setTermDelimiter}
-              cardDelimiter={cardDelimiter}
-              onCardDelimiterChange={setCardDelimiter}
-              csvDelimiter={csvDelimiter}
-              onCsvDelimiterChange={setCsvDelimiter}
-              pdfPageRange={pdfPageRange}
-              onPdfPageRangeChange={setPdfPageRange}
-              pdfTwoColumn={pdfTwoColumn}
-              onPdfTwoColumnChange={setPdfTwoColumn}
-              isScannedPdf={isScannedPdf}
-              pdfPageCount={pdfPageCount}
-              isParsing={isParsing}
-              headingRef={handleStepHeadingMount}
-              onBack={() => setStep(1)}
-              onNext={async () => {
-                const ok = await runServerParse();
-                if (ok) setStep(3);
-              }}
-            />
-          )}
-
-          {step === 3 && (
-            <StepAnswerRule
-              locale={locale}
-              activeFormat={formatOverride ?? detectedFormat}
-              answerRule={answerRule}
-              onAnswerRuleChange={setAnswerRule}
-              isParsing={isParsing}
-              headingRef={handleStepHeadingMount}
-              onBack={() => setStep(2)}
-              onNext={async () => {
-                const ok = await runServerParse({ answerRule });
-                if (ok) setStep(4);
-              }}
-            />
-          )}
-
-          {step === 4 && (
-            <div className="space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
+      {/* Step 2: Preview & Confirm (Target Set + Ready CTA + Collapsible Advanced Options + Inline Edit) */}
+      {step === 2 && (
+        <div className="space-y-4">
+          {/* Compact Top Readiness & Action Banner */}
+          <Card>
+            <CardContent className="space-y-3.5 p-4 sm:p-5">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 space-y-1.5">
                   <h2
                     ref={handleStepHeadingMount}
-                    data-import-step="4"
+                    data-import-step="2"
                     tabIndex={-1}
-                    className="rounded-sm text-lg font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="rounded-sm text-base font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:text-lg"
                   >
-                    {locale === "en"
-                      ? "Step 4: Parse & Preview Questions"
-                      : "Bước 4: Xem trước kết quả phân tích"}
+                    {locale === "en" ? "Preview & Confirm" : "Xem trước & Xác nhận nhập"}
                   </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {locale === "en"
-                      ? "Inspect stems, options, highlighted correct answers, and detection sources."
-                      : "Kiểm tra nội dung câu hỏi, đáp án đúng được đánh dấu và nguồn nhận diện."}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    <span className="inline-flex max-w-full items-center gap-1 font-medium text-foreground">
+                      <FileCheck2 className="size-3.5 shrink-0 text-primary" aria-hidden="true" />
+                      <span className="truncate">{parsedFileName}</span>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <Badge variant="secondary" className="max-w-full truncate text-[11px] font-normal">
+                      {getFormatLabel(activeFormat, locale)}
+                    </Badge>
+                    <span aria-hidden="true">·</span>
+                    <span className="truncate">
+                      {locale === "en" ? `Into: ${studySetTitle}` : `Vào: ${studySetTitle}`}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Top Primary Import CTA for instant 2-click happy path */}
+                <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                  <Button
+                    type="button"
+                    size="lg"
+                    variant={mode === "replace" ? "destructive" : "default"}
+                    className="min-h-[44px] w-full sm:w-auto"
+                    disabled={
+                      isParsing ||
+                      blockedByErrors ||
+                      readyToImportQuestions.length === 0
+                    }
+                    onClick={handleRequestImport}
+                  >
+                    <UploadCloud className="mr-2 size-4" aria-hidden="true" />
+                    {importButtonLabel}
+                  </Button>
                 </div>
               </div>
 
-              <VirtualizedPreviewList
+              {/* Scanned PDF Honest Alert */}
+              {isScannedPdf && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-lg border border-warning/50 bg-warning-subtle p-3 text-xs text-warning-subtle-foreground sm:text-sm"
+                >
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  <span className="min-w-0 break-words">
+                    {locale === "en"
+                      ? "This PDF appears to be scanned / image-only with no selectable text layer. StudyHub does not run AI OCR — please convert it to a text-layer PDF or Word (.docx) before importing."
+                      : "Tệp PDF này là bản quét (chỉ gồm hình ảnh), không có văn bản để trích xuất. StudyHub không sử dụng AI OCR — vui lòng chuyển sang tệp Word (.docx) hoặc PDF có văn bản rồi tải lại."}
+                  </span>
+                </div>
+              )}
+
+              {/* Ready vs Attention Banner */}
+              {!isScannedPdf && summary.errorCount === 0 && readyToImportQuestions.length > 0 && (
+                <div className="flex items-start gap-2 rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-xs text-success-subtle-foreground sm:text-sm">
+                  <CheckCircle2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    {locale === "en"
+                      ? `${readyToImportQuestions.length.toLocaleString()} question(s) detected cleanly with 0 errors. Tap any option below to adjust answers, or import right away.`
+                      : `Đã nhận diện ${readyToImportQuestions.length.toLocaleString()} câu hỏi hợp lệ, không có lỗi. Bạn có thể bấm trực tiếp vào đáp án bên dưới để chỉnh nhanh hoặc nhập ngay.`}
+                  </span>
+                </div>
+              )}
+
+              {!isScannedPdf && blockedByErrors && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive sm:text-sm"
+                >
+                  <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  <span className="min-w-0 break-words">
+                    {locale === "en"
+                      ? `${summary.errorCount.toLocaleString()} question(s) need attention. Click any option below to mark the correct answer, open "Advanced Options" to switch detection rules, or enable "Skip invalid rows".`
+                      : `Có ${summary.errorCount.toLocaleString()} câu cần kiểm tra. Bấm vào lựa chọn bên dưới để chọn đáp án đúng, mở "Tùy chọn nâng cao" để đổi quy tắc nhận diện hoặc bật "Bỏ qua câu còn lỗi".`}
+                  </span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Collapsible Native <details> Advanced Options (Format, Columns, Answer Rules, Duplicate Policy) */}
+          <details
+            open={advancedOpen}
+            onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+            className="group rounded-xl border border-border bg-card"
+          >
+            <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span className="inline-flex min-w-0 items-center gap-2">
+                <SlidersHorizontal
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="truncate">
+                  {locale === "en"
+                    ? "Advanced options (Format, Columns, Answer Rules & Save Mode)"
+                    : "Tùy chọn nâng cao (Định dạng, Cột, Quy tắc đáp án & Trùng lặp)"}
+                </span>
+              </span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden="true"
+              />
+            </summary>
+            <div className="space-y-6 border-t border-border p-4 sm:p-5">
+              <FormatConfigSection
                 locale={locale}
-                questions={questions}
-                summary={summary}
-                detectedChapters={detectedChapters}
-                allowInlineEdit={false}
-                onUpdateQuestion={handleUpdateQuestion}
-                onMoveMediaToQuestion={handleMoveMediaToQuestion}
+                detectedFormat={detectedFormat}
+                formatOverride={formatOverride}
+                onFormatOverrideChange={(fmt) => {
+                  setFormatOverride(fmt);
+                  setColumnMapping(EMPTY_MAPPING);
+                  lastParsedKeyRef.current = null;
+                  void runServerParse(
+                    { formatOverride: fmt },
+                    { force: true, resetMapping: true },
+                  );
+                }}
+                sheetNames={sheetNames}
+                selectedSheet={selectedSheet}
+                onSheetChange={async (sheet) => {
+                  setSelectedSheet(sheet);
+                  setHeaderRowCount(undefined);
+                  setColumnMapping(EMPTY_MAPPING);
+                  await runServerParse(
+                    { sheetName: sheet, headerRowCount: undefined },
+                    { force: true, resetMapping: true },
+                  );
+                }}
+                hasHeaderRow={hasHeaderRow}
+                onHasHeaderRowChange={async (val) => {
+                  setHasHeaderRow(val);
+                  setHeaderRowCount(undefined);
+                  setColumnMapping(EMPTY_MAPPING);
+                  await runServerParse(
+                    { hasHeaderRow: val, headerRowCount: undefined },
+                    { force: true, resetMapping: true },
+                  );
+                }}
+                headerRowCount={headerRowCount ?? 1}
+                onHeaderRowCountChange={async (rows) => {
+                  setHeaderRowCount(rows);
+                  setColumnMapping(EMPTY_MAPPING);
+                  await runServerParse(
+                    { headerRowCount: rows },
+                    { force: true, resetMapping: true },
+                  );
+                }}
+                detectedColumns={detectedColumns}
+                sampleRows={sampleRows}
+                columnMapping={columnMapping}
+                onColumnMappingChange={setColumnMapping}
+                termDelimiter={termDelimiter}
+                onTermDelimiterChange={setTermDelimiter}
+                cardDelimiter={cardDelimiter}
+                onCardDelimiterChange={setCardDelimiter}
+                csvDelimiter={csvDelimiter}
+                onCsvDelimiterChange={setCsvDelimiter}
+                pdfPageRange={pdfPageRange}
+                onPdfPageRangeChange={setPdfPageRange}
+                pdfTwoColumn={pdfTwoColumn}
+                onPdfTwoColumnChange={setPdfTwoColumn}
+                isScannedPdf={isScannedPdf}
+                pdfPageCount={pdfPageCount}
+                isParsing={isParsing}
+                onApplyReparse={() => {
+                  void runServerParse(undefined, { force: true });
+                }}
               />
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="min-h-[44px]"
-                  onClick={() => setStep(3)}
-                >
-                  <ArrowLeft className="mr-2 size-4" aria-hidden="true" />
-                  {locale === "en" ? "Adjust Answer Rules" : "Đổi quy tắc đáp án"}
-                </Button>
-                <Button
-                  type="button"
-                  className="min-h-[44px]"
-                  onClick={() => setStep(5)}
-                >
-                  {locale === "en"
-                    ? "Next: Fix Issues & Import Options"
-                    : "Tiếp: Chỉnh sửa & Tùy chọn nhập"}
-                  <ArrowRight className="ml-2 size-4" aria-hidden="true" />
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {step === 5 && (
-            <div className="space-y-5">
-              <div>
-                <h2
-                  ref={handleStepHeadingMount}
-                  data-import-step="5"
-                  tabIndex={-1}
-                  className="rounded-sm text-lg font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                >
-                  {locale === "en"
-                    ? "Step 5: Inline Validation, Editing & Options"
-                    : "Bước 5: Kiểm tra, chỉnh sửa trực tiếp & Tùy chọn"}
-                </h2>
-                <p className="text-sm text-muted-foreground">
-                  {locale === "en"
-                    ? "Click any option to toggle the correct answer or click Edit to fix prompts, options, and explanations inline."
-                    : "Bấm trực tiếp vào lựa chọn để đổi đáp án đúng hoặc bấm Sửa để chỉnh nội dung câu hỏi và giải thích."}
-                </p>
-              </div>
-
-              <VirtualizedPreviewList
-                locale={locale}
-                questions={questions}
-                summary={summary}
-                detectedChapters={detectedChapters}
-                allowInlineEdit={true}
-                onUpdateQuestion={handleUpdateQuestion}
-                onMoveMediaToQuestion={handleMoveMediaToQuestion}
-              />
-
-              <ImportOptionsPanel
-                locale={locale}
-                mode={mode}
-                onModeChange={setMode}
-                duplicatePolicy={duplicatePolicy}
-                onDuplicatePolicyChange={setDuplicatePolicy}
-                skipInvalidRows={skipInvalidRows}
-                onSkipInvalidRowsChange={setSkipInvalidRows}
-                defaultChapter={defaultChapter}
-                onDefaultChapterChange={setDefaultChapter}
-                defaultTagsText={defaultTagsText}
-                onDefaultTagsTextChange={setDefaultTagsText}
-                summary={summary}
-              />
-
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="min-h-[44px]"
-                  onClick={() => setStep(4)}
-                >
-                  <ArrowLeft className="mr-2 size-4" aria-hidden="true" />
-                  {locale === "en" ? "Back to Preview" : "Quay lại xem trước"}
-                </Button>
-                <Button
-                  type="button"
-                  className="min-h-[44px]"
-                  onClick={() => {
-                    flushBatchRevalidation();
-                    setCommitProgress({
-                      status: "idle",
-                      completedChunks: 0,
-                      totalChunks: 0,
-                      importedCount: 0,
-                      skippedCount: 0,
-                      replacedCount: 0,
-                      totalSetQuestions: 0,
-                      errorMessage: null,
-                    });
-                    setStep(6);
+              <div className="border-t border-border pt-5">
+                <AnswerRuleSection
+                  locale={locale}
+                  activeFormat={activeFormat}
+                  answerRule={answerRule}
+                  onAnswerRuleChange={(nextRule) => {
+                    setAnswerRule(nextRule);
+                    void runServerParse({ answerRule: nextRule }, { force: true });
                   }}
-                >
-                  {locale === "en" ? "Next: Confirm & Import" : "Tiếp: Xác nhận nhập"}
-                  <ArrowRight className="ml-2 size-4" aria-hidden="true" />
-                </Button>
+                  isParsing={isParsing}
+                />
+              </div>
+
+              <div className="border-t border-border pt-5">
+                <ImportOptionsPanel
+                  locale={locale}
+                  mode={mode}
+                  onModeChange={setMode}
+                  duplicatePolicy={duplicatePolicy}
+                  onDuplicatePolicyChange={setDuplicatePolicy}
+                  skipInvalidRows={skipInvalidRows}
+                  onSkipInvalidRowsChange={setSkipInvalidRows}
+                  defaultChapter={defaultChapter}
+                  onDefaultChapterChange={setDefaultChapter}
+                  defaultTagsText={defaultTagsText}
+                  onDefaultTagsTextChange={setDefaultTagsText}
+                  summary={summary}
+                  embedded={true}
+                />
               </div>
             </div>
-          )}
+          </details>
 
-          {step === 6 && (
-            <StepCommit
-              locale={locale}
-              studySetId={studySetId}
-              studySetTitle={studySetTitle}
-              existingQuestionCount={existingQuestionCount}
-              readyCount={readyToImportQuestions.length}
-              errorCount={summary.errorCount}
-              skipInvalidRows={skipInvalidRows}
-              mode={mode}
-              duplicatePolicy={duplicatePolicy}
-              progress={commitProgress}
-              headingRef={handleStepHeadingMount}
-              onBack={() => setStep(5)}
-              onStartCommit={handleStartCommit}
-            />
-          )}
-        </motion.div>
-      </AnimatePresence>
+          {/* Unified Virtualized Preview & Inline Editing (with DOCX multimedia reassignment) */}
+          <VirtualizedPreviewList
+            locale={locale}
+            questions={questions}
+            summary={summary}
+            detectedChapters={detectedChapters}
+            allowInlineEdit={true}
+            onUpdateQuestion={handleUpdateQuestion}
+            onMoveMediaToQuestion={handleMoveMediaToQuestion}
+          />
+
+          {/* Bottom Action Bar */}
+          <div className="flex flex-col-reverse gap-2.5 pt-1 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-[44px] w-full sm:w-auto"
+              disabled={isParsing}
+              onClick={() => setStep(1)}
+            >
+              <ArrowLeft className="mr-2 size-4" aria-hidden="true" />
+              {locale === "en" ? "Choose Another Source" : "Chọn tệp / nội dung khác"}
+            </Button>
+            <Button
+              type="button"
+              size="lg"
+              variant={mode === "replace" ? "destructive" : "default"}
+              className="min-h-[44px] w-full sm:w-auto"
+              disabled={
+                isParsing ||
+                blockedByErrors ||
+                readyToImportQuestions.length === 0
+              }
+              onClick={handleRequestImport}
+            >
+              <UploadCloud className="mr-2 size-4" aria-hidden="true" />
+              {importButtonLabel}
+            </Button>
+          </div>
+
+          <ReplaceConfirmDialog
+            open={confirmReplaceOpen}
+            onOpenChange={setConfirmReplaceOpen}
+            locale={locale}
+            studySetTitle={studySetTitle}
+            existingQuestionCount={existingQuestionCount}
+            readyCount={readyToImportQuestions.length}
+            onConfirm={() => {
+              void executeCommit();
+            }}
+          />
+        </div>
+      )}
+
+      {/* Step 3: Saving Progress & Completion */}
+      {step === 3 && (
+        <StepCommit
+          locale={locale}
+          studySetId={studySetId}
+          studySetTitle={studySetTitle}
+          progress={commitProgress}
+          headingRef={handleStepHeadingMount}
+          onBack={() => setStep(2)}
+          onRetryCommit={() => {
+            void executeCommit();
+          }}
+          onImportAnother={handleImportAnother}
+        />
+      )}
     </div>
   );
 }

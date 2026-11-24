@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   ArrowDown,
   ArrowRight,
@@ -130,7 +129,6 @@ interface LearnFeedbackState {
 export function LearnClient({ setId }: LearnClientProps) {
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
-  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
 
   const {
     data: bundle,
@@ -1452,15 +1450,10 @@ export function LearnClient({ setId }: LearnClientProps) {
             </CardContent>
           </Card>
         ) : currentCard && currentQuestion ? (
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={`${currentQuestion.id}-st${currentCard.stage}-${learnState?.totalAttempts ?? 0}`}
-              initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={prefersReducedMotion ? undefined : { opacity: 0, y: -8 }}
-              transition={{ duration: 0.14 }}
-            >
-              <Card>
+          <div
+            key={`${currentQuestion.id}-st${currentCard.stage}-${learnState?.totalAttempts ?? 0}`}
+          >
+            <Card>
                 <CardContent className="space-y-5 p-5 sm:p-6">
                   {/* Stage Badge & Question Context */}
                   <div className="flex items-center justify-between gap-2">
@@ -1733,12 +1726,16 @@ export function LearnClient({ setId }: LearnClientProps) {
                                 </div>
                               </div>
                               {isSafeDisplayImageUrl(opt.image_url) ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  src={opt.image_url}
-                                  alt={opt.image_alt ?? opt.content ?? opt.displayLabel}
-                                  className="max-h-40 rounded-md border border-border object-contain"
-                                />
+                                <div className="flex min-h-24 w-full items-center justify-center">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={opt.image_url}
+                                    alt={opt.image_alt ?? opt.content ?? opt.displayLabel}
+                                    loading="lazy"
+                                    decoding="async"
+                                    className="max-h-40 rounded-md border border-border object-contain"
+                                  />
+                                </div>
                               ) : null}
                             </button>
                           );
@@ -1988,11 +1985,13 @@ export function LearnClient({ setId }: LearnClientProps) {
                       {isSafeDisplayImageUrl(
                         currentQuestion.type_payload.image_url,
                       ) ? (
-                        <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-border">
+                        <div className="relative inline-flex min-h-48 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/20">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
                             src={currentQuestion.type_payload.image_url}
                             alt={lText(locale, "Hình ảnh điểm đánh dấu", "Hotspot image")}
+                            loading="lazy"
+                            decoding="async"
                             className="max-h-80 w-auto cursor-crosshair object-contain"
                             onClick={(e) => {
                               if (feedback) return;
@@ -2151,8 +2150,7 @@ export function LearnClient({ setId }: LearnClientProps) {
                   ) : null}
                 </CardContent>
               </Card>
-            </motion.div>
-          </AnimatePresence>
+          </div>
         ) : null}
       </div>
 

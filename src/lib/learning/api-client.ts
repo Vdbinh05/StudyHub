@@ -232,33 +232,67 @@ export async function fetchAccessibleFolders(): Promise<Folder[]> {
 /**
  * Fetch questions for a study set in safe `pageSize=100` chunks (<=400 options/call,
  * strictly immune to PostgREST's 1,000-row cap — fixes SH-005 & SH-025).
+ * Fetches page 1 first, then batches remaining pages in parallel (concurrency 4)
+ * once `meta.total` is known (`P1-3`).
  */
 export async function fetchStudySetQuestions(
   setId: string,
   maxQuestions: number = 10_000,
 ): Promise<Question[]> {
   const pageSize = 100;
-  const all: Question[] = [];
-  let page = 1;
-  const maxPages = Math.ceil(Math.max(1, maxQuestions) / pageSize) + 1;
+  const concurrency = 4;
+  const encodedSetId = encodeURIComponent(setId);
 
-  while (all.length < maxQuestions && page <= maxPages) {
+  const fetchPage = async (
+    page: number,
+  ): Promise<{ items: Question[]; total?: number }> => {
     const res = await requestJson<Question[] | { questions: Question[] }>(
-      `/api/sets/${encodeURIComponent(setId)}/questions?page=${page}&pageSize=${pageSize}`,
+      `/api/sets/${encodedSetId}/questions?page=${page}&pageSize=${pageSize}`,
     );
     const items = Array.isArray(res.data)
       ? res.data
       : res.data && "questions" in res.data
         ? res.data.questions
         : [];
-    all.push(...items);
-    const total = res.meta?.total;
-    if (
-      items.length < pageSize ||
-      (typeof total === "number" && all.length >= total)
-    ) {
-      break;
+    return {
+      items,
+      total: typeof res.meta?.total === "number" ? res.meta.total : undefined,
+    };
+  };
+
+  const first = await fetchPage(1);
+  const all: Question[] = [...first.items];
+  const targetCount =
+    typeof first.total === "number"
+      ? Math.min(first.total, maxQuestions)
+      : maxQuestions;
+
+  if (first.items.length < pageSize || all.length >= targetCount) {
+    return all.slice(0, maxQuestions);
+  }
+
+  if (typeof first.total === "number") {
+    const totalPages = Math.ceil(targetCount / pageSize);
+    for (let start = 2; start <= totalPages; start += concurrency) {
+      const batchPages: number[] = [];
+      for (let p = start; p < start + concurrency && p <= totalPages; p += 1) {
+        batchPages.push(p);
+      }
+      const results = await Promise.all(batchPages.map((p) => fetchPage(p)));
+      for (const r of results) {
+        all.push(...r.items);
+      }
     }
+    return all.slice(0, maxQuestions);
+  }
+
+  // Fallback when meta.total is omitted
+  let page = 2;
+  const maxPages = Math.ceil(Math.max(1, maxQuestions) / pageSize) + 1;
+  while (all.length < maxQuestions && page <= maxPages) {
+    const next = await fetchPage(page);
+    all.push(...next.items);
+    if (next.items.length < pageSize) break;
     page += 1;
   }
 
@@ -274,29 +308,60 @@ export async function fetchSetProgress(
   maxItems: number = 10_000,
 ): Promise<UserQuestionProgress[]> {
   const pageSize = 500;
-  const all: UserQuestionProgress[] = [];
-  let page = 1;
-  const maxPages = Math.ceil(maxItems / pageSize) + 1;
+  const concurrency = 4;
+  const encodedSetId = encodeURIComponent(studySetId);
 
-  while (all.length < maxItems && page <= maxPages) {
+  const fetchPage = async (
+    page: number,
+  ): Promise<{ items: UserQuestionProgress[]; total?: number }> => {
     const res = await requestJson<
       UserQuestionProgress[] | { progress: UserQuestionProgress[] }
     >(
-      `/api/progress?studySetId=${encodeURIComponent(studySetId)}&page=${page}&pageSize=${pageSize}`,
+      `/api/progress?studySetId=${encodedSetId}&page=${page}&pageSize=${pageSize}`,
     );
     const items = Array.isArray(res.data)
       ? res.data
       : res.data && "progress" in res.data
         ? res.data.progress
         : [];
-    all.push(...items);
-    const total = res.meta?.total;
-    if (
-      items.length < pageSize ||
-      (typeof total === "number" && all.length >= total)
-    ) {
-      break;
+    return {
+      items,
+      total: typeof res.meta?.total === "number" ? res.meta.total : undefined,
+    };
+  };
+
+  const first = await fetchPage(1);
+  const all: UserQuestionProgress[] = [...first.items];
+  const targetCount =
+    typeof first.total === "number"
+      ? Math.min(first.total, maxItems)
+      : maxItems;
+
+  if (first.items.length < pageSize || all.length >= targetCount) {
+    return all.slice(0, maxItems);
+  }
+
+  if (typeof first.total === "number") {
+    const totalPages = Math.ceil(targetCount / pageSize);
+    for (let start = 2; start <= totalPages; start += concurrency) {
+      const batchPages: number[] = [];
+      for (let p = start; p < start + concurrency && p <= totalPages; p += 1) {
+        batchPages.push(p);
+      }
+      const results = await Promise.all(batchPages.map((p) => fetchPage(p)));
+      for (const r of results) {
+        all.push(...r.items);
+      }
     }
+    return all.slice(0, maxItems);
+  }
+
+  let page = 2;
+  const maxPages = Math.ceil(maxItems / pageSize) + 1;
+  while (all.length < maxItems && page <= maxPages) {
+    const next = await fetchPage(page);
+    all.push(...next.items);
+    if (next.items.length < pageSize) break;
     page += 1;
   }
 

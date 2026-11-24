@@ -20,7 +20,6 @@ import {
   Search,
   SlidersHorizontal,
   X,
-  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -83,7 +82,7 @@ import {
   getPolicyLabel,
 } from "./ExamPresetsSection";
 
-const QUESTION_COUNT_PRESETS = [10, 20, 30, 50, 100, 150, 200, 250, 300, 500] as const;
+const QUESTION_COUNT_PRESETS = [20, 50, 100, 250] as const;
 const DURATION_PRESETS = [15, 30, 45, 60, 90, 120, 180] as const;
 const COVERAGE_BATCH_PRESETS = [50, 100, 120, 200, 250] as const;
 
@@ -273,9 +272,6 @@ export function CustomExamBuilderClient({
 
   // Launch states
   const [isLaunching, setIsLaunching] = React.useState(false);
-  const [quickLaunchingKey, setQuickLaunchingKey] = React.useState<string | null>(
-    null,
-  );
   const [loadedPresetId, setLoadedPresetId] = React.useState<string | null>(
     urlPresetId,
   );
@@ -307,6 +303,10 @@ export function CustomExamBuilderClient({
   const allSets = React.useMemo(
     () => (setsQuery.data ?? []).filter((s) => !s.is_archived),
     [setsQuery.data],
+  );
+  const totalLibraryQuestions = React.useMemo(
+    () => allSets.reduce((sum, s) => sum + (s.question_count ?? 0), 0),
+    [allSets],
   );
   const allFolders = React.useMemo(
     () => foldersQuery.data ?? [],
@@ -792,91 +792,6 @@ export function CustomExamBuilderClient({
         localAllocation.valid &&
         (!needsRedistributionConfirm || redistributionConfirmed));
 
-  // Quick Test 1-click launch
-  const handleQuickTest = async (
-    key: string,
-    targetCount: number | "all",
-    minutes: number | null,
-    policy: SelectionPolicy = "random",
-  ) => {
-    const setsToUse =
-      effectiveSelectedSetIds.length > 0
-        ? effectiveSelectedSetIds
-        : allSets.filter((s) => s.question_count > 0).map((s) => s.id);
-
-    if (setsToUse.length === 0) {
-      toast.error(
-        lText(
-          locale,
-          "Bạn chưa có học phần nào có câu hỏi để thi nhanh.",
-          "You have no study sets with questions yet.",
-        ),
-      );
-      return;
-    }
-
-    const sources: ExamSourceInput[] = setsToUse.map((id) => ({
-      source_type: "study_set",
-      id,
-    }));
-
-    setQuickLaunchingKey(key);
-    try {
-      const eligible = await fetchExamEligiblePool({
-        study_set_ids: setsToUse,
-        selection_policy: policy,
-      });
-
-      if (eligible.total_eligible === 0) {
-        toast.error(
-          lText(
-            locale,
-            "Không có câu hỏi phù hợp trong phạm vi đã chọn.",
-            "No eligible questions found in the selected scope.",
-          ),
-        );
-        setQuickLaunchingKey(null);
-        return;
-      }
-
-      const finalCount =
-        targetCount === "all"
-          ? Math.min(1000, eligible.total_eligible)
-          : Math.min(targetCount, eligible.total_eligible);
-
-      const created = await createExamAttempt({
-        sources,
-        title:
-          targetCount === "all"
-            ? lText(locale, `Thi nhanh tất cả (${finalCount} câu)`, `Quick Test All (${finalCount}Q)`)
-            : lText(locale, `Thi nhanh ${finalCount} câu`, `Quick Test ${finalCount}Q`),
-        question_count: finalCount,
-        allocation_strategy:
-          setsToUse.length > 1 ? "proportional" : "global_random",
-        selection_policy: policy,
-        duration_limit_seconds: minutes ? minutes * 60 : null,
-        pass_threshold: 70,
-        shuffle_questions: preferences.default_shuffle_questions,
-        shuffle_options: preferences.default_shuffle_options,
-        show_subject_names: true,
-        show_chapter_names: true,
-        allow_navigation: true,
-        allow_mark_for_review: true,
-        auto_submit_on_expire: true,
-        show_review_after_submit: true,
-      });
-
-      router.push(`/exams/${created.attempt.id}`);
-    } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? err.message
-          : lText(locale, "Không thể tạo đề thi nhanh.", "Could not launch quick exam."),
-      );
-      setQuickLaunchingKey(null);
-    }
-  };
-
   // Start Custom Exam OR Start Full Coverage Cycle
   const handleLaunch = async () => {
     if (!hasAnySource) {
@@ -1225,161 +1140,80 @@ export function CustomExamBuilderClient({
       )}
     >
       {/* Page Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 space-y-1">
           {embedded ? (
             <h2 className="text-xl font-bold tracking-tight text-foreground sm:text-2xl">
-              {lText(locale, "Trình tạo đề thi thử tùy chỉnh", "Universal Custom Exam Builder")}
+              {lText(locale, "Tạo đề thi thử", "Custom Exam Builder")}
             </h2>
           ) : (
             <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              {lText(locale, "Trình tạo đề thi thử tùy chỉnh", "Universal Custom Exam Builder")}
+              {lText(locale, "Tạo đề thi thử", "Custom Exam Builder")}
             </h1>
           )}
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             {lText(
               locale,
-              "Kết hợp nhiều môn học và thư mục, tùy chỉnh số câu, chiến lược phân bổ, chính sách chọn câu hoặc phủ 100% ngân hàng.",
-              "Combine multiple subjects & folders with exact allocation strategies, selection policies, presets, and Full Coverage cycles.",
+              "Chọn học phần, nhập số câu và bắt đầu thi thử ngay. Mọi tùy chọn chuyên sâu nằm gọn trong Cài đặt nâng cao.",
+              "Pick study sets, choose question count, and start right away. All advanced controls live inside Advanced Settings.",
             )}
           </p>
         </div>
 
-        <Button variant="outline" size="sm" className="min-h-10 self-start" asChild>
-          <Link href="/exams">
+        <Button
+          variant="outline"
+          size="sm"
+          className="min-h-10 shrink-0"
+          asChild
+        >
+          <Link href="/exams" prefetch={false}>
             <Layers className="size-4" aria-hidden="true" />
             {lText(locale, "Trung tâm Đề thi", "Exam Hub")}
           </Link>
         </Button>
       </div>
 
-      {/* Single-Row Scrollable Sub-Navigation Tabs (per modern-web-guidance tabs guide) */}
+      {/* Zero-Clipping Responsive Sub-Navigation Tabs (fits cleanly on 360px/390px!) */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="overflow-x-auto pb-1">
-          <TabsList className="inline-flex w-max flex-nowrap">
-            <TabsTrigger value="builder" className="shrink-0">
-              <SlidersHorizontal className="size-4" aria-hidden="true" />
-              {lText(locale, "Tạo đề tùy chỉnh", "Custom Builder")}
-            </TabsTrigger>
-            <TabsTrigger value="presets" className="shrink-0">
-              <Bookmark className="size-4" aria-hidden="true" />
-              {lText(locale, "Mẫu đề đã lưu", "Saved Presets")}
-            </TabsTrigger>
-            <TabsTrigger value="coverage" className="shrink-0">
-              <Layers className="size-4" aria-hidden="true" />
-              {lText(locale, "Phủ hết ngân hàng", "Full Coverage")}
-            </TabsTrigger>
-          </TabsList>
-        </div>
+        <TabsList className="grid h-auto w-full grid-cols-3 gap-1 p-1 sm:inline-flex sm:w-auto">
+          <TabsTrigger
+            value="builder"
+            className="min-h-10 gap-1.5 whitespace-normal px-2 py-1.5 text-center text-xs leading-tight sm:whitespace-nowrap sm:px-3 sm:text-sm"
+          >
+            <SlidersHorizontal className="hidden size-4 shrink-0 sm:inline-block" aria-hidden="true" />
+            {lText(locale, "Tạo đề tùy chỉnh", "Custom Builder")}
+          </TabsTrigger>
+          <TabsTrigger
+            value="presets"
+            className="min-h-10 gap-1.5 whitespace-normal px-2 py-1.5 text-center text-xs leading-tight sm:whitespace-nowrap sm:px-3 sm:text-sm"
+          >
+            <Bookmark className="hidden size-4 shrink-0 sm:inline-block" aria-hidden="true" />
+            {lText(locale, "Mẫu đề đã lưu", "Saved Presets")}
+          </TabsTrigger>
+          <TabsTrigger
+            value="coverage"
+            className="min-h-10 gap-1.5 whitespace-normal px-2 py-1.5 text-center text-xs leading-tight sm:whitespace-nowrap sm:px-3 sm:text-sm"
+          >
+            <Layers className="hidden size-4 shrink-0 sm:inline-block" aria-hidden="true" />
+            {lText(locale, "Phủ hết ngân hàng", "Full Coverage")}
+          </TabsTrigger>
+        </TabsList>
 
-        {/* TAB 1: CUSTOM BUILDER */}
+        {/* TAB 1: 3-STEP CUSTOM BUILDER */}
         <TabsContent value="builder" className="mt-5">
-          {/* Block 0: Quick Test Fast-Path Strip */}
-          <Card className="mb-6">
-            <CardContent className="space-y-3 py-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Zap className="size-4 text-primary" aria-hidden="true" />
-                  <h2 className="text-sm font-semibold">
-                    {lText(locale, "Thi nhanh 1 chạm (Quick Test)", "Quick Test Fast-Path")}
-                  </h2>
-                </div>
-                <span className="text-xs text-muted-foreground">
-                  {effectiveSelectedSetIds.length > 0
-                    ? lText(
-                        locale,
-                        `Phạm vi: ${effectiveSelectedSetIds.length} học phần đang chọn`,
-                        `Scope: ${effectiveSelectedSetIds.length} selected sets`,
-                      )
-                    : lText(
-                        locale,
-                        `Phạm vi: Toàn bộ ${allSets.length} học phần của bạn`,
-                        `Scope: All ${allSets.length} accessible sets`,
-                      )}
-                </span>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    {
-                      key: "q20",
-                      label: lText(locale, "Nhanh 20 câu · 15p", "Quick 20Q · 15m"),
-                      count: 20 as const,
-                      mins: 15,
-                      policy: "random" as SelectionPolicy,
-                    },
-                    {
-                      key: "q50",
-                      label: lText(locale, "Chuẩn 50 câu · 45p", "Standard 50Q · 45m"),
-                      count: 50 as const,
-                      mins: 45,
-                      policy: "random" as SelectionPolicy,
-                    },
-                    {
-                      key: "q100",
-                      label: lText(locale, "Thi thử 100 câu · 90p", "Mock 100Q · 90m"),
-                      count: 100 as const,
-                      mins: 90,
-                      policy: "unseen_first" as SelectionPolicy,
-                    },
-                    {
-                      key: "q250",
-                      label: lText(locale, "Tổng ôn 250 câu · 180p", "Full 250Q · 180m"),
-                      count: 250 as const,
-                      mins: 180,
-                      policy: "unseen_first" as SelectionPolicy,
-                    },
-                    {
-                      key: "qall",
-                      label: lText(locale, "Tất cả câu · Không giờ", "All Q · Untimed"),
-                      count: "all" as const,
-                      mins: null,
-                      policy: "random" as SelectionPolicy,
-                    },
-                  ] as const
-                ).map((preset) => (
-                  <Button
-                    key={preset.key}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="min-h-10 tabular-nums"
-                    disabled={quickLaunchingKey !== null || allSets.length === 0}
-                    onClick={() =>
-                      void handleQuickTest(
-                        preset.key,
-                        preset.count,
-                        preset.mins,
-                        preset.policy,
-                      )
-                    }
-                  >
-                    {quickLaunchingKey === preset.key ? (
-                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Play className="size-3.5 text-primary" aria-hidden="true" />
-                    )}
-                    {preset.label}
-                  </Button>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-
           {/* Main 2-Column Builder Workspace */}
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
-            {/* LEFT COLUMN: Progressive 3-Block Config */}
-            <div className="space-y-6">
-              {/* BLOCK 1: Multi-Subject & Folder Picker + Fine Filters */}
+            {/* LEFT COLUMN: Clean 2-Card Core Flow + Collapsible Advanced Settings */}
+            <div className="space-y-5">
+              {/* STEP 1: Pick Study Sets & Folders */}
               <Card>
                 <CardHeader className="pb-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <CardTitle className="text-base">
                       {lText(
                         locale,
-                        "1. Chọn môn học & thư mục (Khử trùng lặp tự động)",
-                        "1. Select Study Sets & Folders (Auto-Deduplicated)",
+                        "Bước 1 · Chọn học phần",
+                        "Step 1 · Select Study Sets",
                       )}
                     </CardTitle>
                     <div className="flex items-center gap-1.5">
@@ -1387,7 +1221,7 @@ export function CustomExamBuilderClient({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="h-8 text-xs"
+                        className="min-h-9 text-xs"
                         onClick={handleSelectAllSets}
                       >
                         {lText(locale, "Chọn tất cả", "Select all")}
@@ -1396,7 +1230,7 @@ export function CustomExamBuilderClient({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="h-8 text-xs"
+                        className="min-h-9 text-xs"
                         disabled={!hasAnySource}
                         onClick={handleClearSources}
                       >
@@ -1634,179 +1468,21 @@ export function CustomExamBuilderClient({
                       ) : null}
                     </div>
                   ) : null}
-
-                  {/* Collapsible Fine Filters (<details> per modern-web-guidance content-first-noise-reduction) */}
-                  <details className="rounded-lg border border-border bg-secondary/20 px-4 py-3">
-                    <summary className="flex cursor-pointer items-center justify-between text-sm font-medium select-none">
-                      <span>
-                        {lText(
-                          locale,
-                          "Bộ lọc nâng cao (Chương, Thẻ, Loại câu, Độ khó)",
-                          "Fine Filters (Chapters, Tags, Question Types, Difficulty)",
-                        )}
-                      </span>
-                      {activeFineFilterCount > 0 ? (
-                        <Badge variant="default" className="tabular-nums">
-                          {activeFineFilterCount}
-                        </Badge>
-                      ) : null}
-                    </summary>
-
-                    <div className="mt-4 space-y-4 border-t border-border pt-4">
-                      {/* Question Types */}
-                      <div className="space-y-2">
-                        <Label className="text-xs">
-                          {lText(locale, "Loại câu hỏi", "Question Types")}
-                        </Label>
-                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                          {ALL_EXAM_TYPES.map((qt) => {
-                            const checked = selectedQuestionTypes.includes(qt);
-                            const label = lText(
-                              locale,
-                              EXAM_TYPE_LABELS[qt].vi,
-                              EXAM_TYPE_LABELS[qt].en,
-                            );
-                            return (
-                              <label
-                                key={qt}
-                                className="flex cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-xs"
-                              >
-                                <Checkbox
-                                  checked={checked}
-                                  onCheckedChange={() =>
-                                    setSelectedQuestionTypes((prev) =>
-                                      prev.includes(qt)
-                                        ? prev.filter((x) => x !== qt)
-                                        : [...prev, qt],
-                                    )
-                                  }
-                                />
-                                <span>{label}</span>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Difficulties */}
-                      <div className="space-y-2">
-                        <Label className="text-xs">
-                          {lText(locale, "Độ khó", "Difficulty")}
-                        </Label>
-                        <div className="flex flex-wrap gap-2">
-                          {ALL_DIFFICULTIES.map((diff) => {
-                            const active = selectedDifficulties.includes(diff);
-                            const label =
-                              diff === "easy"
-                                ? lText(locale, "Dễ", "Easy")
-                                : diff === "medium"
-                                  ? lText(locale, "Trung bình", "Medium")
-                                  : lText(locale, "Khó", "Hard");
-                            return (
-                              <Button
-                                key={diff}
-                                type="button"
-                                size="sm"
-                                variant={active ? "default" : "outline"}
-                                className="min-h-9"
-                                aria-pressed={active}
-                                onClick={() =>
-                                  setSelectedDifficulties((prev) =>
-                                    prev.includes(diff)
-                                      ? prev.filter((x) => x !== diff)
-                                      : [...prev, diff],
-                                  )
-                                }
-                              >
-                                {label}
-                              </Button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Chapters */}
-                      {availableChapters.length > 0 ? (
-                        <div className="space-y-2">
-                          <Label className="text-xs">
-                            {lText(locale, "Chương / Chủ đề", "Chapters / Topics")}
-                          </Label>
-                          <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto">
-                            {availableChapters.map((ch) => {
-                              const active = selectedChapters.includes(ch.chapter);
-                              return (
-                                <Button
-                                  key={`${ch.study_set_id}-${ch.chapter}`}
-                                  type="button"
-                                  size="sm"
-                                  variant={active ? "secondary" : "outline"}
-                                  className="h-8 text-xs tabular-nums"
-                                  aria-pressed={active}
-                                  onClick={() =>
-                                    setSelectedChapters((prev) =>
-                                      prev.includes(ch.chapter)
-                                        ? prev.filter((x) => x !== ch.chapter)
-                                        : [...prev, ch.chapter],
-                                    )
-                                  }
-                                >
-                                  {ch.chapter} ({ch.count})
-                                </Button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {/* Tags */}
-                      {availableTags.length > 0 ? (
-                        <div className="space-y-2">
-                          <Label className="text-xs">
-                            {lText(locale, "Thẻ (Tags)", "Tags")}
-                          </Label>
-                          <div className="flex flex-wrap gap-1.5">
-                            {availableTags.map((tag) => {
-                              const active = selectedTagIds.includes(tag.id);
-                              return (
-                                <Button
-                                  key={tag.id}
-                                  type="button"
-                                  size="sm"
-                                  variant={active ? "secondary" : "outline"}
-                                  className="h-8 text-xs tabular-nums"
-                                  aria-pressed={active}
-                                  onClick={() =>
-                                    setSelectedTagIds((prev) =>
-                                      prev.includes(tag.id)
-                                        ? prev.filter((x) => x !== tag.id)
-                                        : [...prev, tag.id],
-                                    )
-                                  }
-                                >
-                                  #{tag.name} ({tag.count})
-                                </Button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  </details>
                 </CardContent>
               </Card>
 
-              {/* BLOCK 2: Question Count, Full Coverage Mode, Allocation Strategy (A–E) & Selection Policy (1–8) */}
+              {/* STEP 2: Question Count, Full Coverage Toggle & Contextual Multi-Subject Allocation */}
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base">
                     {lText(
                       locale,
-                      "2. Số câu hỏi, Chiến lược phân bổ & Chính sách chọn câu",
-                      "2. Question Count, Allocation Strategy & Selection Policy",
+                      "Bước 2 · Chọn số câu hỏi",
+                      "Step 2 · Choose Question Count",
                     )}
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-6">
+                <CardContent className="space-y-5">
                   {/* Full Coverage Mode Switch */}
                   <div className="flex flex-col gap-3 rounded-lg border border-primary/30 bg-accent/30 p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-0.5">
@@ -2008,27 +1684,19 @@ export function CustomExamBuilderClient({
                     </div>
                   )}
 
-                  {/* Allocation Strategy A–E (especially powerful for 2+ subjects) */}
-                  <div className="space-y-3 border-t border-border pt-5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="flex items-center gap-1.5 text-sm font-semibold">
-                        <Scale className="size-4 text-primary" aria-hidden="true" />
-                        {lText(
-                          locale,
-                          "Chiến lược phân bổ câu hỏi theo môn (A–E)",
-                          "Multi-Subject Allocation Strategy (A–E)",
-                        )}
-                      </Label>
-                      {effectiveSubjects.length <= 1 ? (
-                        <span className="text-xs text-muted-foreground">
+                  {/* Allocation Strategy A–E (contextually revealed when 2+ subjects selected) */}
+                  {effectiveSubjects.length >= 2 ? (
+                    <div className="space-y-3 border-t border-border pt-5">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="flex items-center gap-1.5 text-sm font-semibold">
+                          <Scale className="size-4 text-primary" aria-hidden="true" />
                           {lText(
                             locale,
-                            "Chọn từ 2 môn trở lên để tùy chỉnh phân bổ",
-                            "Select 2+ subjects to customize split",
+                            "Chiến lược phân bổ câu hỏi theo môn (A–E)",
+                            "Multi-Subject Allocation Strategy (A–E)",
                           )}
-                        </span>
-                      ) : null}
-                    </div>
+                        </Label>
+                      </div>
 
                     <div
                       role="radiogroup"
@@ -2272,6 +1940,195 @@ export function CustomExamBuilderClient({
                       </div>
                     ) : null}
                   </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+
+              {/* ADVANCED SETTINGS (Progressive disclosure via native <details>, closed by default — UX31-02) */}
+              <details className="group rounded-xl border border-border bg-card shadow-2xs">
+                <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3.5 text-sm font-semibold select-none [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-2">
+                    <SlidersHorizontal
+                      className="size-4 text-primary"
+                      aria-hidden="true"
+                    />
+                    {lText(locale, "Cài đặt nâng cao", "Advanced Settings")}
+                  </span>
+                  <span className="flex items-center gap-2 text-xs font-normal text-muted-foreground">
+                    <span className="hidden tabular-nums sm:inline">
+                      {parsedDurationMinutes
+                        ? `${parsedDurationMinutes}${lText(locale, "p", "m")}`
+                        : lText(locale, "Không giờ", "Untimed")}{" "}
+                      · {getPolicyLabel(locale, selectionPolicy)}
+                    </span>
+                    {activeFineFilterCount > 0 ? (
+                      <Badge variant="secondary" className="tabular-nums">
+                        +{activeFineFilterCount}
+                      </Badge>
+                    ) : null}
+                    <ChevronDown
+                      className="size-4 shrink-0 transition-transform group-open:rotate-180"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </summary>
+
+                <div className="space-y-6 border-t border-border p-4 sm:p-5">
+                  {/* Fine Filters (Question Types, Difficulties, Chapters, Tags) */}
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm font-semibold">
+                        {lText(
+                          locale,
+                          "Bộ lọc câu hỏi (Loại câu, Độ khó, Chương, Thẻ)",
+                          "Question Filters (Types, Difficulty, Chapters, Tags)",
+                        )}
+                      </Label>
+                      {activeFineFilterCount > 0 ? (
+                        <Badge variant="default" className="tabular-nums">
+                          {activeFineFilterCount}
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    {/* Question Types */}
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">
+                        {lText(locale, "Loại câu hỏi", "Question Types")}
+                      </Label>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {ALL_EXAM_TYPES.map((qt) => {
+                          const checked = selectedQuestionTypes.includes(qt);
+                          const label = lText(
+                            locale,
+                            EXAM_TYPE_LABELS[qt].vi,
+                            EXAM_TYPE_LABELS[qt].en,
+                          );
+                          return (
+                            <label
+                              key={qt}
+                              className="flex min-h-10 cursor-pointer items-center gap-2 rounded-md border border-border bg-secondary/20 px-2.5 py-2 text-xs"
+                            >
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={() =>
+                                  setSelectedQuestionTypes((prev) =>
+                                    prev.includes(qt)
+                                      ? prev.filter((x) => x !== qt)
+                                      : [...prev, qt],
+                                  )
+                                }
+                              />
+                              <span>{label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Difficulties */}
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">
+                        {lText(locale, "Độ khó", "Difficulty")}
+                      </Label>
+                      <div className="flex flex-wrap gap-2">
+                        {ALL_DIFFICULTIES.map((diff) => {
+                          const active = selectedDifficulties.includes(diff);
+                          const label =
+                            diff === "easy"
+                              ? lText(locale, "Dễ", "Easy")
+                              : diff === "medium"
+                                ? lText(locale, "Trung bình", "Medium")
+                                : lText(locale, "Khó", "Hard");
+                          return (
+                            <Button
+                              key={diff}
+                              type="button"
+                              size="sm"
+                              variant={active ? "default" : "outline"}
+                              className="min-h-10"
+                              aria-pressed={active}
+                              onClick={() =>
+                                setSelectedDifficulties((prev) =>
+                                  prev.includes(diff)
+                                    ? prev.filter((x) => x !== diff)
+                                    : [...prev, diff],
+                                )
+                              }
+                            >
+                              {label}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Chapters */}
+                    {availableChapters.length > 0 ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">
+                          {lText(locale, "Chương / Chủ đề", "Chapters / Topics")}
+                        </Label>
+                        <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto">
+                          {availableChapters.map((ch) => {
+                            const active = selectedChapters.includes(ch.chapter);
+                            return (
+                              <Button
+                                key={`${ch.study_set_id}-${ch.chapter}`}
+                                type="button"
+                                size="sm"
+                                variant={active ? "secondary" : "outline"}
+                                className="min-h-9 text-xs tabular-nums"
+                                aria-pressed={active}
+                                onClick={() =>
+                                  setSelectedChapters((prev) =>
+                                    prev.includes(ch.chapter)
+                                      ? prev.filter((x) => x !== ch.chapter)
+                                      : [...prev, ch.chapter],
+                                  )
+                                }
+                              >
+                                {ch.chapter} ({ch.count})
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Tags */}
+                    {availableTags.length > 0 ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">
+                          {lText(locale, "Thẻ (Tags)", "Tags")}
+                        </Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {availableTags.map((tag) => {
+                            const active = selectedTagIds.includes(tag.id);
+                            return (
+                              <Button
+                                key={tag.id}
+                                type="button"
+                                size="sm"
+                                variant={active ? "secondary" : "outline"}
+                                className="min-h-9 text-xs tabular-nums"
+                                aria-pressed={active}
+                                onClick={() =>
+                                  setSelectedTagIds((prev) =>
+                                    prev.includes(tag.id)
+                                      ? prev.filter((x) => x !== tag.id)
+                                      : [...prev, tag.id],
+                                  )
+                                }
+                              >
+                                #{tag.name} ({tag.count})
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
 
                   {/* All 8 Selection Policies (hidden only when Full Coverage takes ownership of queue) */}
                   {!fullCoverageMode ? (
@@ -2279,8 +2136,8 @@ export function CustomExamBuilderClient({
                       <Label className="text-sm font-semibold">
                         {lText(
                           locale,
-                          "Chính sách chọn câu hỏi (8 chế độ xác định)",
-                          "Question Selection Policy (8 Deterministic Modes)",
+                          "Chính sách chọn câu hỏi",
+                          "Question Selection Policy",
                         )}
                       </Label>
                       <div
@@ -2332,21 +2189,16 @@ export function CustomExamBuilderClient({
                       </div>
                     </div>
                   ) : null}
-                </CardContent>
-              </Card>
 
-              {/* BLOCK 3: Time Limit & Exam Room Behavior */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-base">
-                    {lText(
-                      locale,
-                      "3. Thời gian & Thiết lập phòng thi",
-                      "3. Time Limit & Exam Room Behavior",
-                    )}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-5">
+                  {/* Time Limit & Exam Room Behavior */}
+                  <div className="space-y-5 border-t border-border pt-5">
+                    <p className="text-sm font-semibold">
+                      {lText(
+                        locale,
+                        "Thời gian & Thiết lập phòng thi",
+                        "Time Limit & Exam Room Behavior",
+                      )}
+                    </p>
                   {/* Exam Title */}
                   {!fullCoverageMode ? (
                     <div className="space-y-1.5">
@@ -2535,17 +2387,22 @@ export function CustomExamBuilderClient({
                       </div>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
+                  </div>
+                </div>
+              </details>
             </div>
 
-            {/* RIGHT COLUMN: Sticky Live Blueprint & Server-Validated Preview */}
+            {/* STEP 3 (RIGHT COLUMN): Sticky Live Blueprint & Launch CTA */}
             <aside className="space-y-4 lg:sticky lg:top-20">
               <Card>
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-base">
-                      {lText(locale, "Bản xem trước đề thi", "Live Exam Blueprint")}
+                      {lText(
+                        locale,
+                        "Bước 3 · Bắt đầu thi thử",
+                        "Step 3 · Review & Start",
+                      )}
                     </CardTitle>
                     {eligibleQuery.isFetching || previewQuery.isFetching ? (
                       <Loader2
@@ -2556,20 +2413,52 @@ export function CustomExamBuilderClient({
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {/* Pool KPI */}
+                  {/* Pool KPI (honest when no set selected yet — fixes UX31-02) */}
                   <div className="rounded-lg border border-border bg-secondary/30 p-3.5 space-y-1">
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>{lText(locale, "Ngân hàng khả dụng", "Eligible Pool")}</span>
-                      <span className="tabular-nums">
-                        {effectiveSubjects.length} {lText(locale, "môn", "subjects")}
-                      </span>
-                    </div>
-                    <p className="text-2xl font-bold text-foreground tabular-nums">
-                      {totalEligible}{" "}
-                      <span className="text-xs font-normal text-muted-foreground">
-                        {lText(locale, "câu duy nhất", "unique questions")}
-                      </span>
-                    </p>
+                    {hasAnySource ? (
+                      <>
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span>
+                            {lText(locale, "Ngân hàng khả dụng", "Eligible Pool")}
+                          </span>
+                          <span className="tabular-nums">
+                            {effectiveSubjects.length}{" "}
+                            {lText(locale, "môn", "subjects")}
+                          </span>
+                        </div>
+                        <p className="text-2xl font-bold text-foreground tabular-nums">
+                          {totalEligible}{" "}
+                          <span className="text-xs font-normal text-muted-foreground">
+                            {lText(locale, "câu duy nhất", "unique questions")}
+                          </span>
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span>
+                            {lText(
+                              locale,
+                              "Chọn học phần ở Bước 1",
+                              "Select study sets in Step 1",
+                            )}
+                          </span>
+                          <span className="tabular-nums">
+                            {allSets.length} {lText(locale, "môn", "sets")}
+                          </span>
+                        </div>
+                        <p className="text-lg font-bold text-foreground tabular-nums">
+                          {totalLibraryQuestions}{" "}
+                          <span className="text-xs font-normal text-muted-foreground">
+                            {lText(
+                              locale,
+                              "câu trong thư viện của bạn",
+                              "questions in your library",
+                            )}
+                          </span>
+                        </p>
+                      </>
+                    )}
                   </div>
 
                   {/* Pacing & Policy summary */}
@@ -2824,30 +2713,54 @@ export function CustomExamBuilderClient({
           )}
         >
           <div className="mx-auto flex max-w-2xl items-center justify-between gap-3">
-            <div className="min-w-0 text-xs tabular-nums">
-              <p className="truncate font-semibold text-foreground">
-                {effectiveExamSize} {lText(locale, "câu", "Q")} ·{" "}
-                {parsedDurationMinutes
-                  ? `${parsedDurationMinutes}${lText(locale, "p", "m")}`
-                  : lText(locale, "Không giờ", "Untimed")}
-              </p>
-              <p className="truncate text-muted-foreground">
-                {lText(locale, "Khả dụng", "Pool")}: {totalEligible}
-              </p>
-            </div>
-            <Button
-              type="button"
-              className="min-h-11 shrink-0 px-5"
-              disabled={!canLaunch}
-              onClick={() => void handleLaunch()}
-            >
-              {isLaunching ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Play className="size-4" aria-hidden="true" />
-              )}
-              {lText(locale, "Bắt đầu thi", "Start Exam")}
-            </Button>
+            {!hasAnySource && allSets.length > 0 ? (
+              <>
+                <div className="min-w-0 text-xs tabular-nums">
+                  <p className="truncate font-semibold text-foreground">
+                    {lText(locale, "Chưa chọn học phần", "No study set selected")}
+                  </p>
+                  <p className="truncate text-muted-foreground">
+                    {allSets.length} {lText(locale, "học phần", "sets")} ·{" "}
+                    {totalLibraryQuestions} {lText(locale, "câu", "Q")}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="min-h-11 shrink-0 px-4"
+                  onClick={handleSelectAllSets}
+                >
+                  {lText(locale, "Chọn tất cả", "Select all")}
+                </Button>
+              </>
+            ) : (
+              <>
+                <div className="min-w-0 text-xs tabular-nums">
+                  <p className="truncate font-semibold text-foreground">
+                    {effectiveExamSize} {lText(locale, "câu", "Q")} ·{" "}
+                    {parsedDurationMinutes
+                      ? `${parsedDurationMinutes}${lText(locale, "p", "m")}`
+                      : lText(locale, "Không giờ", "Untimed")}
+                  </p>
+                  <p className="truncate text-muted-foreground">
+                    {lText(locale, "Khả dụng", "Pool")}: {totalEligible}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  className="min-h-11 shrink-0 px-5"
+                  disabled={!canLaunch}
+                  onClick={() => void handleLaunch()}
+                >
+                  {isLaunching ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Play className="size-4" aria-hidden="true" />
+                  )}
+                  {lText(locale, "Bắt đầu thi", "Start Exam")}
+                </Button>
+              </>
+            )}
           </div>
         </div>
       ) : null}

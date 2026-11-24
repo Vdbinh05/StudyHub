@@ -38,14 +38,37 @@ export function useStudySetBundle(
     queryKey: ["study-set-bundle", setId, maxQuestions],
     enabled: Boolean(setId) && enabled,
     queryFn: async () => {
+      // Seed studySet from React Query cache (`["study-set", setId]`) when recently fetched on `/sets/[id]` (`P1-3`)
+      const cachedSetState = queryClient.getQueryState<unknown>([
+        "study-set",
+        setId,
+      ]);
+      const cachedRaw = cachedSetState?.data;
+      const isFreshCached =
+        Boolean(cachedSetState?.dataUpdatedAt) &&
+        Date.now() - (cachedSetState?.dataUpdatedAt ?? 0) < 60_000;
+      const cachedStudySet: StudySet | null =
+        isFreshCached &&
+        cachedRaw &&
+        typeof cachedRaw === "object" &&
+        "id" in cachedRaw &&
+        "title" in cachedRaw
+          ? (cachedRaw as StudySet)
+          : null;
+
       const [studySet, questions, progressList, starredList] = await Promise.all([
-        fetchStudySet(setId),
+        cachedStudySet ? Promise.resolve(cachedStudySet) : fetchStudySet(setId),
         fetchStudySetQuestions(setId, maxQuestions),
         fetchSetProgress(setId, maxQuestions).catch(
           () => [] as UserQuestionProgress[],
         ),
         fetchStarredQuestions(setId).catch(() => []),
       ]);
+
+      // Populate `["study-set", setId]` cache for sibling views
+      if (!cachedStudySet && studySet) {
+        queryClient.setQueryData(["study-set", setId], studySet);
+      }
 
       const progressMap = new Map<string, UserQuestionProgress>();
       for (const p of progressList) {

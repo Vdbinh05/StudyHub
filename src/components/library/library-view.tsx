@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -33,9 +34,6 @@ import {
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
-import { PageHeader } from "@/components/layout/page-header";
-import { FadeIn } from "@/components/motion";
-import { ShareDialog } from "@/components/social/share-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -85,6 +83,11 @@ import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { Folder, StudySet, StudySetType } from "@/types/domain";
 import { FolderDialog, getFolderDotClass } from "./folder-dialog";
+
+const ShareDialog = dynamic(
+  () => import("@/components/social/share-dialog").then((m) => m.ShareDialog),
+  { ssr: false },
+);
 
 type SortOption = "updated_desc" | "created_desc" | "title_asc" | "last_studied_desc";
 const PAGE_SIZE = 48;
@@ -358,49 +361,62 @@ function LibraryViewInner() {
     }
   };
 
+  const pageTitle =
+    urlAction === "import"
+      ? vi
+        ? "Chọn học phần để nhập từ file"
+        : "Choose Set to Import Into"
+      : urlAction === "test"
+        ? vi
+          ? "Chọn học phần thi thử"
+          : "Choose Set for Mock Exam"
+        : typeFilter === "multiple_choice"
+          ? vi
+            ? "Ngân hàng câu hỏi"
+            : "Question Bank"
+          : typeFilter === "flashcards"
+            ? "Flashcards"
+            : t("library.title");
+
   return (
-    <FadeIn aboveFold className="space-y-6">
-      <PageHeader
-        title={
-          urlAction === "import"
-            ? vi
-              ? "Chọn học phần để nhập từ file"
-              : "Choose Set to Import Into"
-            : urlAction === "test"
-              ? vi
-                ? "Chọn học phần thi thử"
-                : "Choose Set for Mock Exam"
-              : typeFilter === "multiple_choice"
-                ? vi
-                  ? "Ngân hàng câu hỏi"
-                  : "Question Bank"
-                : typeFilter === "flashcards"
-                  ? "Flashcards"
-                  : t("library.title")
-        }
-        description={t("library.subtitle")}
-        actions={
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setEditingFolder(null);
-                setFolderDialogOpen(true);
-              }}
-            >
-              <FolderPlus className="size-4" aria-hidden="true" />
-              <span>{t("library.newFolder")}</span>
-            </Button>
-            <Button asChild size="sm">
-              <Link href="/sets/new">
-                <Plus className="size-4" aria-hidden="true" />
-                <span>{t("library.newSet")}</span>
-              </Link>
-            </Button>
-          </>
-        }
-      />
+    <div className="space-y-5">
+      {/* Full-width mobile-safe header (prevents UX31-06 title crushing at 360px/390px) */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <h1 className="text-foreground text-xl font-bold tracking-tight sm:text-2xl">
+            {pageTitle}
+          </h1>
+          <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed">
+            {t("library.subtitle")}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button asChild size="sm">
+            <Link href="/sets/new" prefetch={false}>
+              <Plus className="size-4" aria-hidden="true" />
+              <span>{t("library.newSet")}</span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/import" prefetch={false}>
+              <Upload className="size-4" aria-hidden="true" />
+              <span>{t("library.importSet")}</span>
+            </Link>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setEditingFolder(null);
+              setFolderDialogOpen(true);
+            }}
+          >
+            <FolderPlus className="size-4" aria-hidden="true" />
+            <span>{t("library.newFolder")}</span>
+          </Button>
+        </div>
+      </div>
 
       {/* Contextual guidance when navigating from ?action=import or ?action=test */}
       {(urlAction === "import" || urlAction === "test") && (
@@ -414,7 +430,7 @@ function LibraryViewInner() {
             <span>
               {urlAction === "import"
                 ? vi
-                  ? "Chọn một học phần bên dưới để nhập câu hỏi từ Word/Excel/CSV/TXT, hoặc mở trang nhập nhanh."
+                  ? "Chọn một học phần bên dưới để nhập câu hỏi từ Word/PDF/Excel/CSV/TXT, hoặc mở trang nhập nhanh."
                   : "Pick a study set below to bulk import questions, or open the quick import hub."
                 : vi
                   ? "Chọn một học phần bên dưới hoặc tạo đề thi tổng hợp nhiều môn ngay."
@@ -422,7 +438,7 @@ function LibraryViewInner() {
             </span>
           </div>
           <Button size="sm" variant="outline" asChild>
-            <Link href={urlAction === "import" ? "/import" : "/exams/new"}>
+            <Link href={urlAction === "import" ? "/import" : "/exams/new"} prefetch={false}>
               {urlAction === "import"
                 ? vi
                   ? "Mở trang nhập nhanh"
@@ -434,8 +450,8 @@ function LibraryViewInner() {
       )}
 
       {/* Search & Filter Controls — single canonical search bar on /library */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <search className="relative flex-1 sm:max-w-sm">
+      <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+        <search className="relative w-full lg:max-w-sm">
           <Search
             className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
             aria-hidden="true"
@@ -462,7 +478,7 @@ function LibraryViewInner() {
               router.replace(`/library${params.toString() ? `?${params}` : ""}`);
             }}
           >
-            <SelectTrigger className="w-40" aria-label={t("common.filter")}>
+            <SelectTrigger className="min-w-36 flex-1 sm:w-40 sm:flex-none" aria-label={t("common.filter")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -480,7 +496,7 @@ function LibraryViewInner() {
               setPage(1);
             }}
           >
-            <SelectTrigger className="w-44" aria-label={t("common.sort")}>
+            <SelectTrigger className="min-w-40 flex-1 sm:w-44 sm:flex-none" aria-label={t("common.sort")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -536,6 +552,7 @@ function LibraryViewInner() {
             </h2>
             <Link
               href="/folders"
+              prefetch={false}
               className="text-primary text-xs font-medium hover:underline"
             >
               {vi ? "Quản lý thư mục" : "Manage folders"}
@@ -549,6 +566,7 @@ function LibraryViewInner() {
               >
                 <Link
                   href={`/folders/${folder.id}`}
+                  prefetch={false}
                   className="flex min-w-0 flex-1 items-center gap-3"
                 >
                   <span
@@ -584,7 +602,7 @@ function LibraryViewInner() {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem asChild>
-                      <Link href={`/exams/new?folderId=${folder.id}`}>
+                      <Link href={`/exams/new?folderId=${folder.id}`} prefetch={false}>
                         <FileCheck2 className="size-4" aria-hidden="true" />
                         <span>{vi ? "Thi thử thư mục" : "Exam this folder"}</span>
                       </Link>
@@ -617,14 +635,13 @@ function LibraryViewInner() {
       <section aria-labelledby="sets-heading" className="space-y-3">
         <div className="flex items-center justify-between gap-2">
           <h2 id="sets-heading" className="text-foreground text-sm font-semibold">
-            {t("library.mySets")} ({favoritesOnly ? sets.length : totalSets})
+            {t("library.mySets")}
+            {configured && !setsQuery.isLoading && !setsQuery.error && (
+              <span className="text-muted-foreground ml-1.5 font-mono text-xs font-normal tabular-nums">
+                ({favoritesOnly ? sets.length : totalSets})
+              </span>
+            )}
           </h2>
-          <Button asChild size="sm" variant="outline">
-            <Link href="/exams/new">
-              <FileCheck2 className="size-4" aria-hidden="true" />
-              <span>{t("library.customExamCta")}</span>
-            </Link>
-          </Button>
         </div>
 
         {!configured ? (
@@ -674,7 +691,7 @@ function LibraryViewInner() {
                 </Button>
               ) : (
                 <Button asChild>
-                  <Link href="/sets/new">
+                  <Link href="/sets/new" prefetch={false}>
                     <Plus className="size-4" aria-hidden="true" />
                     <span>{t("library.newSet")}</span>
                   </Link>
@@ -684,7 +701,7 @@ function LibraryViewInner() {
             secondaryAction={
               !favoritesOnly ? (
                 <Button variant="outline" asChild>
-                  <Link href="/import">
+                  <Link href="/import" prefetch={false}>
                     <Upload className="size-4" aria-hidden="true" />
                     <span>{t("library.importSet")}</span>
                   </Link>
@@ -695,7 +712,7 @@ function LibraryViewInner() {
         ) : (
           <>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {sets.map((set) => {
+              {sets.map((set, idx) => {
                 const isFav = Boolean(set.is_favorite);
                 const primaryHref =
                   urlAction === "import"
@@ -705,7 +722,13 @@ function LibraryViewInner() {
                       : `/sets/${set.id}`;
 
                 return (
-                  <Card key={set.id} className="justify-between gap-3 py-4">
+                  <Card
+                    key={set.id}
+                    className={cn(
+                      "justify-between gap-3 py-4",
+                      idx >= 3 && "cv-auto",
+                    )}
+                  >
                     <CardHeader className="gap-2 px-4">
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-1.5">
@@ -753,19 +776,19 @@ function LibraryViewInner() {
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-52">
                               <DropdownMenuItem asChild>
-                                <Link href={`/exams/new?setId=${set.id}`}>
+                                <Link href={`/exams/new?setId=${set.id}`} prefetch={false}>
                                   <FileCheck2 className="size-4" aria-hidden="true" />
                                   <span>{t("library.customExamCta")}</span>
                                 </Link>
                               </DropdownMenuItem>
                               <DropdownMenuItem asChild>
-                                <Link href={`/sets/${set.id}/edit`}>
+                                <Link href={`/sets/${set.id}/edit`} prefetch={false}>
                                   <Edit3 className="size-4" aria-hidden="true" />
                                   <span>{t("common.edit")}</span>
                                 </Link>
                               </DropdownMenuItem>
                               <DropdownMenuItem asChild>
-                                <Link href={`/sets/${set.id}/import`}>
+                                <Link href={`/sets/${set.id}/import`} prefetch={false}>
                                   <Upload className="size-4" aria-hidden="true" />
                                   <span>{t("library.importSet")}</span>
                                 </Link>
@@ -844,6 +867,7 @@ function LibraryViewInner() {
                       <CardTitle className="text-base">
                         <Link
                           href={primaryHref}
+                          prefetch={false}
                           className="hover:text-primary line-clamp-2 transition-colors"
                         >
                           {set.title}
@@ -869,14 +893,14 @@ function LibraryViewInner() {
                     <CardFooter className="gap-2 border-t px-4 pt-3">
                       {urlAction === "import" ? (
                         <Button size="sm" asChild className="w-full">
-                          <Link href={`/sets/${set.id}/import`}>
+                          <Link href={`/sets/${set.id}/import`} prefetch={false}>
                             <Upload className="size-3.5" aria-hidden="true" />
                             <span>{t("library.importSet")}</span>
                           </Link>
                         </Button>
                       ) : urlAction === "test" ? (
                         <Button size="sm" asChild className="w-full">
-                          <Link href={`/exams/new?setId=${set.id}`}>
+                          <Link href={`/exams/new?setId=${set.id}`} prefetch={false}>
                             <FileCheck2 className="size-3.5" aria-hidden="true" />
                             <span>{t("exam.startExam")}</span>
                           </Link>
@@ -884,7 +908,7 @@ function LibraryViewInner() {
                       ) : (
                         <>
                           <Button size="sm" variant="default" asChild className="flex-1">
-                            <Link href={`/sets/${set.id}`}>
+                            <Link href={`/sets/${set.id}`} prefetch={false}>
                               <Play className="size-3.5" aria-hidden="true" />
                               <span>{vi ? "Mở học phần" : "Open"}</span>
                             </Link>
@@ -892,6 +916,7 @@ function LibraryViewInner() {
                           <Button size="sm" variant="outline" asChild>
                             <Link
                               href={`/sets/${set.id}/${set.set_type === "flashcards" ? "flashcards" : "practice"}`}
+                              prefetch={false}
                               aria-label={`${t("study.startStudy")} ${set.title}`}
                             >
                               <Layers className="size-3.5" aria-hidden="true" />
@@ -1045,7 +1070,7 @@ function LibraryViewInner() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </FadeIn>
+    </div>
   );
 }
 

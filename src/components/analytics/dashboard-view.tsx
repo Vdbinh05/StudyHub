@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,11 +8,12 @@ import {
   AlertCircle,
   ArrowRight,
   BookOpen,
-  BookOpenCheck,
   CheckCircle2,
+  ChevronDown,
   Clock,
   FileCheck2,
   Flame,
+  FolderOpen,
   Layers,
   Play,
   Plus,
@@ -33,7 +33,6 @@ import {
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { ResumeSessionBanner } from "@/components/learning/ResumeSessionBanner";
-import { FadeIn } from "@/components/motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -55,16 +54,9 @@ import type {
 } from "@/types/domain";
 import {
   normalizeActivityPoints,
+  type DailyActivityPoint,
   type DashboardSummary,
 } from "./analytics-types";
-
-const ActivityChart = dynamic(
-  () => import("./activity-charts").then((m) => m.ActivityChart),
-  {
-    ssr: false,
-    loading: () => <Skeleton className="h-[220px] w-full rounded-lg" />,
-  },
-);
 
 function parseDashboardResponse(raw: unknown): DashboardSummary {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -94,9 +86,12 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
     ? ((obj.active_checkpoints ?? obj.activeCheckpoints) as LearningSessionCheckpoint[])
     : [];
 
-  const continueSet =
-    ((obj.continueSet ?? obj.continue_set ?? continueList[0] ?? recentSets[0]) ??
-      null) as StudySet | null;
+  const candidateContinue =
+    ((obj.continueSet ?? obj.continue_set ?? continueList[0] ?? null) as StudySet | null);
+  const studiedContinueSet =
+    candidateContinue && candidateContinue.last_studied_at
+      ? candidateContinue
+      : recentSets.find((set) => Boolean(set.last_studied_at)) ?? null;
 
   return {
     displayName:
@@ -127,7 +122,7 @@ function parseDashboardResponse(raw: unknown): DashboardSummary {
     dailyGoal: Number(kpi.dailyGoal ?? kpi.daily_goal ?? 20) || 20,
     todayAnswered:
       Number(kpi.todayAnswered ?? kpi.today_answers ?? kpi.today_answered ?? 0) || 0,
-    continueSet,
+    continueSet: studiedContinueSet,
     recentSets,
     recentExams,
     recentSessions,
@@ -147,21 +142,21 @@ function getCheckpointModeLabel(mode: V3StudyMode, vi: boolean): string {
     case "flashcards":
       return "Flashcards";
     case "learn":
-      return vi ? "Học sâu (Learn)" : "Adaptive Learn";
+      return vi ? "Học thích ứng" : "Adaptive Learn";
     case "practice":
       return vi ? "Luyện trắc nghiệm" : "Practice";
     case "write":
-      return vi ? "Gõ đáp án (Write)" : "Write";
+      return vi ? "Gõ đáp án" : "Write";
     case "spell":
-      return vi ? "Nghe & Gõ (Spell)" : "Spell";
+      return vi ? "Nghe & Gõ" : "Spell";
     case "match":
-      return vi ? "Ghép thẻ (Match)" : "Match";
+      return vi ? "Ghép thẻ" : "Match";
     case "diagram":
       return vi ? "Sơ đồ tương tác" : "Diagram";
     case "custom_practice":
       return vi ? "Luyện tập tùy chọn" : "Custom Practice";
     case "review":
-      return vi ? "Ôn câu sai" : "Review Mistakes";
+      return vi ? "Ôn lỗi sai" : "Review Mistakes";
   }
 }
 
@@ -179,6 +174,72 @@ function resolveCheckpointHref(
     return `/sets/${checkpoint.study_set_id}/${checkpoint.mode}${qs}`;
   }
   return "/library";
+}
+
+function MiniActivityStrip({
+  data,
+  vi,
+}: {
+  data: DailyActivityPoint[];
+  vi: boolean;
+}) {
+  const recent = data.slice(-14);
+  const totalAnswered = recent.reduce((acc, pt) => acc + pt.answered, 0);
+  const maxAnswered = Math.max(1, ...recent.map((pt) => pt.answered));
+
+  if (recent.length === 0 || totalAnswered === 0) {
+    return (
+      <p className="text-muted-foreground py-3 text-xs">
+        {vi
+          ? "Chưa có hoạt động trong 14 ngày qua. Bắt đầu một phiên học để ghi nhận tiến độ."
+          : "No activity recorded in the last 14 days yet. Start a study session to track progress."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div
+        role="img"
+        aria-label={
+          vi
+            ? `Biểu đồ 14 ngày gần đây: tổng ${totalAnswered} câu đã trả lời`
+            : `Last 14 days activity chart: ${totalAnswered} total questions answered`
+        }
+        className="flex h-20 items-end gap-1.5 pt-2"
+      >
+        {recent.map((point) => {
+          const pct =
+            point.answered > 0
+              ? Math.max(12, Math.round((point.answered / maxAnswered) * 100))
+              : 4;
+          return (
+            <div
+              key={point.date || point.label}
+              title={`${point.label || point.date}: ${point.answered} ${vi ? "câu" : "items"}`}
+              className="flex h-full flex-1 flex-col items-center justify-end gap-1"
+            >
+              <div
+                className={
+                  point.answered > 0
+                    ? "bg-primary/85 hover:bg-primary w-full rounded-t-sm transition-colors"
+                    : "bg-secondary w-full rounded-t-sm"
+                }
+                style={{ height: `${pct}%` }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="text-muted-foreground flex items-center justify-between text-[11px] font-mono tabular-nums">
+        <span>{recent[0]?.label ?? ""}</span>
+        <span>
+          {totalAnswered.toLocaleString()} {vi ? "câu / 14 ngày" : "items / 14d"}
+        </span>
+        <span>{recent[recent.length - 1]?.label ?? ""}</span>
+      </div>
+    </div>
+  );
 }
 
 export function DashboardView() {
@@ -212,18 +273,17 @@ export function DashboardView() {
     },
   });
 
-  // Deduplicated calm state when backend isn't configured (AppShell already displays the single setup banner)
   if (!configured) {
     return (
-      <FadeIn aboveFold className="space-y-6">
+      <div className="space-y-6">
         <div className="space-y-1">
           <h1 className="text-foreground text-2xl font-bold tracking-tight sm:text-[1.75rem]">
-            {t("nav.dashboard")}
+            {vi ? "Trang chủ" : "Home"}
           </h1>
           <p className="text-muted-foreground text-sm">
             {vi
-              ? "Không gian tổng quan tiến độ học tập, bộ câu hỏi và thi thử của bạn."
-              : "Your overview for study sets, daily progress, and custom mock exams."}
+              ? "Không gian học tập, ôn thẻ ghi nhớ và thi thử cá nhân của bạn."
+              : "Your workspace for study sets, daily review, and mock exams."}
           </p>
         </div>
 
@@ -237,7 +297,7 @@ export function DashboardView() {
           }
           action={
             <Button asChild>
-              <Link href="/exams/new">
+              <Link href="/exams/new" prefetch={false}>
                 <FileCheck2 className="size-4" aria-hidden="true" />
                 <span>{t("exam.customBuilderTitle")}</span>
               </Link>
@@ -249,28 +309,29 @@ export function DashboardView() {
             </Button>
           }
         />
-      </FadeIn>
+      </div>
     );
   }
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <Skeleton className="h-9 w-64" />
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-56" />
+            <Skeleton className="h-4 w-44" />
+          </div>
           <div className="flex gap-2">
-            <Skeleton className="h-9 w-32" />
-            <Skeleton className="h-9 w-32" />
+            <Skeleton className="h-9 w-24" />
+            <Skeleton className="h-9 w-24" />
+            <Skeleton className="h-9 w-28" />
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-28 rounded-xl" />
+        <Skeleton className="h-28 w-full rounded-xl" />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
-        </div>
-        <div className="grid gap-6 lg:grid-cols-12">
-          <Skeleton className="h-80 rounded-xl lg:col-span-7" />
-          <Skeleton className="h-80 rounded-xl lg:col-span-5" />
         </div>
       </div>
     );
@@ -284,11 +345,11 @@ export function DashboardView() {
         title={
           isUnauth
             ? vi
-              ? "Vui lòng đăng nhập để xem tổng quan"
-              : "Sign in to view your dashboard"
+              ? "Vui lòng đăng nhập để xem trang chủ"
+              : "Sign in to view your workspace"
             : vi
-              ? "Không thể tải dữ liệu tổng quan"
-              : "Unable to load dashboard"
+              ? "Không thể tải dữ liệu trang chủ"
+              : "Unable to load workspace"
         }
         description={getFriendlyErrorMessage(error, locale)}
         action={
@@ -309,273 +370,118 @@ export function DashboardView() {
     summary.dailyGoal > 0
       ? Math.min(100, Math.round((summary.todayAnswered / summary.dailyGoal) * 100))
       : 0;
+  const masteredPct =
+    summary.totalQuestions > 0
+      ? Math.round((summary.masteredQuestions / summary.totalQuestions) * 100)
+      : 0;
+
+  const latestCheckpoint = summary.activeCheckpoints[0] ?? null;
+  const extraCheckpoints = summary.activeCheckpoints.slice(1, 4);
+
+  const renderCheckpointBanner = (cp: LearningSessionCheckpoint) => {
+    const matchedSet =
+      summary.recentSets.find((s) => s.id === cp.study_set_id) ??
+      (summary.continueSet?.id === cp.study_set_id ? summary.continueSet : null);
+    const modeTitle = getCheckpointModeLabel(cp.mode, vi);
+    const label = matchedSet ? `${matchedSet.title} · ${modeTitle}` : modeTitle;
+    return (
+      <ResumeSessionBanner
+        key={cp.id}
+        modeLabel={label}
+        currentIndex={cp.current_index}
+        totalItems={cp.total_items}
+        progressPercent={cp.progress_percent}
+        updatedAt={cp.updated_at}
+        source="remote"
+        isBusy={discardCheckpointMutation.isPending}
+        onContinue={() => router.push(resolveCheckpointHref(cp, false))}
+        onRestart={async () => {
+          await discardCheckpointMutation.mutateAsync(cp.id).catch(() => {});
+          router.push(resolveCheckpointHref(cp, true));
+        }}
+        onDiscard={() => discardCheckpointMutation.mutate(cp.id)}
+      />
+    );
+  };
 
   return (
-    <FadeIn aboveFold className="space-y-6">
-      {/* Compact Header & Quick Actions */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-foreground text-2xl font-bold tracking-tight sm:text-[1.75rem]">
-              {summary.displayName
-                ? vi
-                  ? `Xin chào, ${summary.displayName}`
-                  : `Welcome back, ${summary.displayName}`
-                : t("nav.dashboard")}
-            </h1>
-            {summary.streakDays > 0 && (
-              <Badge variant="warning" className="font-mono tabular-nums">
-                <Flame className="size-3.5" aria-hidden="true" />
-                <span>
-                  {summary.streakDays} {vi ? "ngày liên tiếp" : "day streak"}
-                </span>
-              </Badge>
-            )}
-          </div>
-          <p className="text-muted-foreground text-sm">
-            {vi
-              ? `Mục tiêu hôm nay: ${summary.todayAnswered}/${summary.dailyGoal} câu hỏi.`
-              : `Today's goal: ${summary.todayAnswered}/${summary.dailyGoal} questions answered.`}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button asChild size="sm">
-            <Link href="/exams/new">
-              <FileCheck2 className="size-4" aria-hidden="true" />
-              <span>{t("nav.customExam")}</span>
-            </Link>
-          </Button>
-          <Button asChild size="sm" variant="outline">
-            <Link href="/sets/new">
-              <Plus className="size-4" aria-hidden="true" />
-              <span>{t("library.newSet")}</span>
-            </Link>
-          </Button>
-          <Button asChild size="sm" variant="outline">
-            <Link href="/import">
-              <Upload className="size-4" aria-hidden="true" />
-              <span>{t("library.importSet")}</span>
-            </Link>
-          </Button>
-          {summary.dueForReview > 0 && (
-            <Button asChild size="sm" variant="secondary">
-              <Link href="/review">
-                <RotateCcw className="size-4" aria-hidden="true" />
-                <span>
-                  {vi
-                    ? `Ôn tập (${summary.dueForReview})`
-                    : `Review (${summary.dueForReview})`}
-                </span>
-              </Link>
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {/* Daily Goal Progress Bar */}
-      <div className="border-border bg-card flex flex-col gap-2 rounded-xl border px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2.5 text-sm">
-          <Target className="text-primary size-4 shrink-0" aria-hidden="true" />
-          <span className="font-medium">{t("stats.dailyGoal")}</span>
-          <span className="text-muted-foreground font-mono text-xs tabular-nums">
-            {summary.todayAnswered} / {summary.dailyGoal} ({dailyProgressPct}%)
-          </span>
-        </div>
-        <div className="w-full sm:w-64">
-          <Progress
-            value={dailyProgressPct}
-            aria-label={t("stats.dailyGoal")}
-          />
-        </div>
-      </div>
-
-      {/* V3.0 Continue Learning Active Session Checkpoints */}
-      {summary.activeCheckpoints.length > 0 && (
-        <section aria-labelledby="continue-checkpoints-heading" className="space-y-3">
-          <h2
-            id="continue-checkpoints-heading"
-            className="text-foreground text-sm font-semibold"
-          >
-            {t("resume.continueLearning")}
-          </h2>
-          <div className="space-y-2.5">
-            {summary.activeCheckpoints.slice(0, 2).map((cp) => {
-              const matchedSet =
-                summary.recentSets.find((s) => s.id === cp.study_set_id) ??
-                (summary.continueSet?.id === cp.study_set_id
-                  ? summary.continueSet
-                  : null);
-              const modeTitle = getCheckpointModeLabel(cp.mode, vi);
-              const label = matchedSet
-                ? `${matchedSet.title} · ${modeTitle}`
-                : modeTitle;
-              return (
-                <ResumeSessionBanner
-                  key={cp.id}
-                  modeLabel={label}
-                  currentIndex={cp.current_index}
-                  totalItems={cp.total_items}
-                  progressPercent={cp.progress_percent}
-                  updatedAt={cp.updated_at}
-                  source="remote"
-                  isBusy={discardCheckpointMutation.isPending}
-                  onContinue={() => router.push(resolveCheckpointHref(cp, false))}
-                  onRestart={async () => {
-                    await discardCheckpointMutation.mutateAsync(cp.id).catch(() => {});
-                    router.push(resolveCheckpointHref(cp, true));
-                  }}
-                  onDiscard={() => discardCheckpointMutation.mutate(cp.id)}
-                />
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {/* KPI Strip */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardContent className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-muted-foreground text-xs font-medium">
-                {vi ? "Tổng số câu hỏi" : "Total Questions"}
-              </p>
-              <p className="text-foreground mt-1 font-mono text-2xl font-bold tabular-nums">
-                {summary.totalQuestions.toLocaleString()}
-              </p>
-              <p className="text-muted-foreground mt-0.5 text-xs">
-                {vi ? `Trong ${summary.totalSets} học phần` : `Across ${summary.totalSets} sets`}
-              </p>
-            </div>
-            <div className="bg-secondary text-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
-              <BookOpen className="size-4" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-muted-foreground text-xs font-medium">
-                {t("stats.masteredQuestions")}
-              </p>
-              <p className="text-foreground mt-1 font-mono text-2xl font-bold tabular-nums">
-                {summary.masteredQuestions.toLocaleString()}
-              </p>
-              <p className="text-muted-foreground mt-0.5 text-xs tabular-nums">
-                {summary.totalQuestions > 0
-                  ? `${Math.round((summary.masteredQuestions / summary.totalQuestions) * 100)}% ${vi ? "tổng ngân hàng" : "of total bank"}`
+    <div className="space-y-5">
+      {/* BLOCK 1: Compact Greeting + 3 Quick Actions + Inline Daily Goal */}
+      <section className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-foreground text-xl font-bold tracking-tight sm:text-2xl">
+                {summary.displayName
+                  ? vi
+                    ? `Xin chào, ${summary.displayName}`
+                    : `Welcome back, ${summary.displayName}`
                   : vi
-                    ? "Bắt đầu ôn tập để tích lũy"
-                    : "Start studying to build mastery"}
-              </p>
+                    ? "Trang chủ"
+                    : "Home"}
+              </h1>
+              {summary.streakDays > 0 && (
+                <Badge variant="warning" className="font-mono tabular-nums">
+                  <Flame className="size-3.5" aria-hidden="true" />
+                  <span>
+                    {summary.streakDays} {vi ? "ngày" : "d"}
+                  </span>
+                </Badge>
+              )}
             </div>
-            <div className="bg-success-subtle text-success-subtle-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
-              <CheckCircle2 className="size-4" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-muted-foreground text-xs font-medium">
-                {t("stats.dueForReview")}
-              </p>
-              <p className="text-foreground mt-1 font-mono text-2xl font-bold tabular-nums">
-                {summary.dueForReview.toLocaleString()}
-              </p>
-              <Link
-                href="/review"
-                className="text-primary mt-0.5 inline-flex items-center gap-1 text-xs font-medium hover:underline"
-              >
-                <span>{vi ? "Mở hàng đợi ôn tập" : "Open review queue"}</span>
-                <ArrowRight className="size-3" aria-hidden="true" />
-              </Link>
-            </div>
-            <div className="bg-warning-subtle text-warning-subtle-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
-              <RotateCcw className="size-4" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-muted-foreground text-xs font-medium">
-                {t("stats.overallAccuracy")}
-              </p>
-              <p className="text-foreground mt-1 font-mono text-2xl font-bold tabular-nums">
-                {summary.studyAccuracy}%
-              </p>
-              <Link
-                href="/statistics"
-                className="text-primary mt-0.5 inline-flex items-center gap-1 text-xs font-medium hover:underline"
-              >
-                <span>{vi ? "Xem thống kê chi tiết" : "View full analytics"}</span>
-                <ArrowRight className="size-3" aria-hidden="true" />
-              </Link>
-            </div>
-            <div className="bg-accent text-accent-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
-              <Target className="size-4" aria-hidden="true" />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* V2.0 Custom Exam Builder & Full Coverage Quick Launch Card */}
-      <Card>
-        <CardContent className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="bg-primary/10 text-primary flex size-10 shrink-0 items-center justify-center rounded-lg">
-              <FileCheck2 className="size-5" aria-hidden="true" />
-            </div>
-            <div className="space-y-0.5">
-              <h2 className="text-foreground text-base font-semibold">
-                {t("exam.customBuilderTitle")}
-              </h2>
-              <p className="text-muted-foreground text-xs leading-relaxed sm:text-sm">
-                {t("exam.customBuilderSubtitle")}
-              </p>
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="text-muted-foreground">
+                {vi ? "Hôm nay:" : "Today:"}{" "}
+                <strong className="text-foreground font-mono tabular-nums">
+                  {summary.todayAnswered}/{summary.dailyGoal}
+                </strong>{" "}
+                {vi ? "câu" : "items"}
+              </span>
+              <div className="w-28 sm:w-36">
+                <Progress value={dailyProgressPct} aria-label={t("stats.dailyGoal")} />
+              </div>
+              <span className="text-muted-foreground font-mono tabular-nums">
+                {dailyProgressPct}%
+              </span>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
+
+          <div className="flex flex-wrap items-center gap-2">
             <Button asChild size="sm">
-              <Link href="/exams/new">
+              <Link href="/library" prefetch={false}>
+                <FolderOpen className="size-4" aria-hidden="true" />
+                <span>{vi ? "Thư viện" : "Library"}</span>
+              </Link>
+            </Button>
+            <Button asChild size="sm" variant="outline">
+              <Link href="/exams/new" prefetch={false}>
                 <FileCheck2 className="size-4" aria-hidden="true" />
-                <span>{vi ? "Tạo đề thi mới" : "Build exam"}</span>
+                <span>{vi ? "Thi thử" : "Mock Exam"}</span>
               </Link>
             </Button>
             <Button asChild size="sm" variant="outline">
-              <Link href="/exams">
-                <Layers className="size-4" aria-hidden="true" />
-                <span>{t("nav.examsHub")}</span>
-              </Link>
-            </Button>
-            <Button asChild size="sm" variant="outline">
-              <Link href="/practice">
-                <BookOpenCheck className="size-4" aria-hidden="true" />
-                <span>{t("nav.practice")}</span>
+              <Link href="/import" prefetch={false}>
+                <Upload className="size-4" aria-hidden="true" />
+                <span>{vi ? "Nhập tài liệu" : "Import"}</span>
               </Link>
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      {/* Empty State for Brand-New Users */}
+      {/* Brand-New Empty State OR Student Study Flow */}
       {summary.totalSets === 0 ? (
         <EmptyState
           icon={BookOpen}
           title={vi ? "Bắt đầu học phần đầu tiên của bạn" : "Create your first study set"}
           description={
             vi
-              ? "Tạo bộ câu hỏi trắc nghiệm hoặc flashcard mới, hoặc nhập nhanh từ file Word (.docx), Excel (.xlsx), CSV, TXT có sẵn."
-              : "Create a new multiple-choice or flashcard set, or bulk import an existing DOCX, XLSX, CSV, or TXT question bank."
+              ? "Tạo bộ câu hỏi hoặc flashcard mới, hoặc nhập nhanh từ file Word (.docx), PDF, Excel (.xlsx), CSV, TXT."
+              : "Create a new study set, or bulk import an existing DOCX, PDF, XLSX, CSV, or TXT bank."
           }
           action={
             <Button asChild>
-              <Link href="/sets/new">
+              <Link href="/sets/new" prefetch={false}>
                 <Plus className="size-4" aria-hidden="true" />
                 <span>{t("library.newSet")}</span>
               </Link>
@@ -583,7 +489,7 @@ export function DashboardView() {
           }
           secondaryAction={
             <Button variant="outline" asChild>
-              <Link href="/import">
+              <Link href="/import" prefetch={false}>
                 <Upload className="size-4" aria-hidden="true" />
                 <span>{t("library.importSet")}</span>
               </Link>
@@ -592,18 +498,47 @@ export function DashboardView() {
         />
       ) : (
         <>
-          {/* Continue Learning Card */}
-          {summary.continueSet && (
+          {/* BLOCK 2: Single Unified Continue Learning Card (only when a real checkpoint or studied set exists) */}
+          {latestCheckpoint ? (
+            <section aria-labelledby="continue-heading" className="space-y-2.5">
+              <h2
+                id="continue-heading"
+                className="text-foreground text-sm font-semibold"
+              >
+                {t("resume.continueLearning")}
+              </h2>
+              {renderCheckpointBanner(latestCheckpoint)}
+              {extraCheckpoints.length > 0 && (
+                <details className="group">
+                  <summary className="text-muted-foreground hover:text-foreground inline-flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium select-none">
+                    <ChevronDown
+                      className="size-3.5 transition-transform group-open:rotate-180"
+                      aria-hidden="true"
+                    />
+                    <span>
+                      {vi
+                        ? `Xem thêm ${extraCheckpoints.length} phiên học đang dở`
+                        : `Show ${extraCheckpoints.length} more active sessions`}
+                    </span>
+                  </summary>
+                  <div className="mt-2.5 space-y-2.5">
+                    {extraCheckpoints.map((cp) => renderCheckpointBanner(cp))}
+                  </div>
+                </details>
+              )}
+            </section>
+          ) : summary.continueSet ? (
             <Card>
               <CardHeader className="pb-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
+                  <div className="min-w-0">
                     <CardDescription>
                       {vi ? "Tiếp tục học" : "Continue learning"}
                     </CardDescription>
-                    <CardTitle className="mt-0.5 text-lg">
+                    <CardTitle className="mt-0.5 truncate text-base sm:text-lg">
                       <Link
                         href={`/sets/${summary.continueSet.id}`}
+                        prefetch={false}
                         className="hover:text-primary transition-colors"
                       >
                         {summary.continueSet.title}
@@ -611,8 +546,7 @@ export function DashboardView() {
                     </CardTitle>
                   </div>
                   <Badge variant="secondary" className="font-mono tabular-nums">
-                    {summary.continueSet.question_count}{" "}
-                    {vi ? "câu hỏi" : "questions"}
+                    {summary.continueSet.question_count} {vi ? "câu" : "items"}
                   </Badge>
                 </div>
               </CardHeader>
@@ -623,79 +557,208 @@ export function DashboardView() {
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button asChild size="sm">
-                    <Link href={`/sets/${summary.continueSet.id}/practice`}>
+                    <Link
+                      href={`/sets/${summary.continueSet.id}/practice`}
+                      prefetch={false}
+                    >
                       <Play className="size-3.5" aria-hidden="true" />
                       <span>{t("study.practice")}</span>
                     </Link>
                   </Button>
                   <Button asChild size="sm" variant="outline">
-                    <Link href={`/sets/${summary.continueSet.id}/flashcards`}>
+                    <Link
+                      href={`/sets/${summary.continueSet.id}/flashcards`}
+                      prefetch={false}
+                    >
                       <Layers className="size-3.5" aria-hidden="true" />
                       <span>{t("study.flashcards")}</span>
                     </Link>
                   </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <Link href={`/exams/new?setId=${summary.continueSet.id}`}>
-                      <FileCheck2 className="size-3.5" aria-hidden="true" />
-                      <span>{t("study.exam")}</span>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {/* BLOCK 3: Your Study Sets (Prominent near the top on mobile & desktop) */}
+          <section aria-labelledby="recent-sets-heading" className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2
+                id="recent-sets-heading"
+                className="text-foreground text-base font-semibold sm:text-lg"
+              >
+                {vi ? "Học phần của bạn" : "Your Study Sets"}
+              </h2>
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/sets/new" prefetch={false}>
+                    <Plus className="size-4" aria-hidden="true" />
+                    <span className="hidden sm:inline">{t("library.newSet")}</span>
+                  </Link>
+                </Button>
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/library" prefetch={false}>
+                    <span>{vi ? "Xem tất cả" : "View all"}</span>
+                    <ArrowRight className="size-4" aria-hidden="true" />
+                  </Link>
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {summary.recentSets.slice(0, 6).map((set) => {
+                const quickStudyHref =
+                  set.set_type === "flashcards"
+                    ? `/sets/${set.id}/flashcards`
+                    : `/sets/${set.id}/practice`;
+                return (
+                  <div
+                    key={set.id}
+                    className="border-border bg-card hover:border-primary/40 flex flex-col justify-between gap-3 rounded-xl border p-4 shadow-xs transition-colors"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <Badge variant="secondary">
+                          {set.set_type === "flashcards"
+                            ? t("library.typeFlashcards")
+                            : set.set_type === "mixed"
+                              ? t("library.typeMixed")
+                              : t("library.typeMultipleChoice")}
+                        </Badge>
+                        <span className="text-muted-foreground font-mono text-xs tabular-nums">
+                          {set.question_count} {vi ? "câu" : "items"}
+                        </span>
+                      </div>
+                      <h3 className="text-foreground line-clamp-2 text-sm font-semibold">
+                        <Link
+                          href={`/sets/${set.id}`}
+                          prefetch={false}
+                          className="hover:text-primary transition-colors"
+                        >
+                          {set.title}
+                        </Link>
+                      </h3>
+                      {set.subject && (
+                        <p className="text-muted-foreground truncate text-xs">
+                          {set.subject}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="border-border flex items-center justify-between gap-2 border-t pt-2.5">
+                      <span className="text-muted-foreground truncate text-xs">
+                        {set.last_studied_at
+                          ? formatRelativeTime(set.last_studied_at, locale)
+                          : vi
+                            ? "Sẵn sàng học"
+                            : "Ready to study"}
+                      </span>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <Button asChild size="sm" variant="secondary" className="h-8 px-2.5 text-xs">
+                          <Link href={quickStudyHref} prefetch={false}>
+                            <Play className="size-3" aria-hidden="true" />
+                            <span>{vi ? "Học" : "Study"}</span>
+                          </Link>
+                        </Button>
+                        <Button asChild size="sm" variant="ghost" className="h-8 px-2 text-xs">
+                          <Link href={`/sets/${set.id}`} prefetch={false}>
+                            {vi ? "Chi tiết" : "Open"}
+                          </Link>
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* BLOCK 4: Compact Review Queue + Recent Exams */}
+          <section className="cv-auto grid gap-4 lg:grid-cols-12">
+            <Card className="lg:col-span-5">
+              <CardContent className="flex h-full flex-col justify-between gap-3 py-1">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-muted-foreground text-xs font-medium">
+                      {vi ? "Cần ôn tập hôm nay" : "Needs Review"}
+                    </p>
+                    <p className="text-foreground font-mono text-2xl font-bold tabular-nums">
+                      {summary.dueForReview.toLocaleString()}{" "}
+                      <span className="text-muted-foreground font-sans text-xs font-normal">
+                        {vi ? "câu hỏi" : "questions"}
+                      </span>
+                    </p>
+                    <p className="text-muted-foreground text-xs leading-relaxed">
+                      {summary.dueForReview > 0
+                        ? vi
+                          ? "Ôn lại câu sai và thẻ đến hạn lặp lại để củng cố trí nhớ dài hạn."
+                          : "Review mistakes and due spaced-repetition cards to lock in memory."
+                        : vi
+                          ? "Tuyệt vời! Bạn đã hoàn thành hết câu đến hạn hôm nay."
+                          : "All caught up! No due review items remaining today."}
+                    </p>
+                  </div>
+                  <div className="bg-warning-subtle text-warning-subtle-foreground flex size-9 shrink-0 items-center justify-center rounded-lg">
+                    <RotateCcw className="size-4" aria-hidden="true" />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Button
+                    asChild
+                    size="sm"
+                    variant={summary.dueForReview > 0 ? "default" : "outline"}
+                  >
+                    <Link href="/review" prefetch={false}>
+                      <RotateCcw className="size-3.5" aria-hidden="true" />
+                      <span>
+                        {summary.dueForReview > 0
+                          ? vi
+                            ? `Ôn ngay (${summary.dueForReview})`
+                            : `Review now (${summary.dueForReview})`
+                          : vi
+                            ? "Mở kho lỗi sai"
+                            : "Open review queue"}
+                      </span>
+                    </Link>
+                  </Button>
+                  <Button asChild size="sm" variant="ghost">
+                    <Link href="/practice" prefetch={false}>
+                      <span>{vi ? "Luyện tập" : "Practice"}</span>
                     </Link>
                   </Button>
                 </div>
               </CardContent>
             </Card>
-          )}
 
-          {/* Activity Chart & Recent Exam Scores */}
-          <div className="grid gap-6 lg:grid-cols-12">
             <Card className="lg:col-span-7">
-              <CardHeader>
+              <CardHeader className="pb-2">
                 <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <CardTitle className="text-base">
-                      {vi ? "Hoạt động học tập gần đây" : "Recent Learning Activity"}
-                    </CardTitle>
-                    <CardDescription>
-                      {vi
-                        ? "Số câu hỏi bạn đã trả lời mỗi ngày."
-                        : "Questions answered per day."}
-                    </CardDescription>
-                  </div>
+                  <CardTitle className="text-sm font-semibold sm:text-base">
+                    {vi ? "Lượt thi thử gần đây" : "Recent Exam Attempts"}
+                  </CardTitle>
                   <Button variant="ghost" size="sm" asChild>
-                    <Link href="/statistics">{t("nav.stats")}</Link>
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <ActivityChart data={summary.activitySeries} variant="bar" height={220} />
-              </CardContent>
-            </Card>
-
-            <Card className="lg:col-span-5">
-              <CardHeader>
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <CardTitle className="text-base">
-                      {vi ? "Điểm thi thử gần đây" : "Recent Exam Scores"}
-                    </CardTitle>
-                    <CardDescription>
-                      {vi
-                        ? "Bấm vào lượt thi để tiếp tục hoặc xem kết quả."
-                        : "Open any attempt to resume or review results."}
-                    </CardDescription>
-                  </div>
-                  <Button variant="ghost" size="sm" asChild>
-                    <Link href="/history">{t("nav.history")}</Link>
+                    <Link href="/history" prefetch={false}>
+                      <span>{t("nav.history")}</span>
+                      <ArrowRight className="size-3.5" aria-hidden="true" />
+                    </Link>
                   </Button>
                 </div>
               </CardHeader>
               <CardContent>
                 {summary.recentExams.length === 0 ? (
-                  <p className="text-muted-foreground py-8 text-center text-sm">
-                    {t("exam.noAttempts")}
-                  </p>
+                  <div className="flex flex-col items-start justify-between gap-2 py-2 sm:flex-row sm:items-center">
+                    <p className="text-muted-foreground text-xs">
+                      {t("exam.noAttempts")}
+                    </p>
+                    <Button asChild size="sm" variant="outline">
+                      <Link href="/exams/new" prefetch={false}>
+                        <FileCheck2 className="size-3.5" aria-hidden="true" />
+                        <span>{vi ? "Làm đề đầu tiên" : "Take first exam"}</span>
+                      </Link>
+                    </Button>
+                  </div>
                 ) : (
                   <ul className="divide-border divide-y">
-                    {summary.recentExams.slice(0, 5).map((attempt) => {
+                    {summary.recentExams.slice(0, 3).map((attempt) => {
                       const isInProgress = attempt.status === "in_progress";
                       const targetHref = isInProgress
                         ? `/exams/${attempt.id}`
@@ -703,9 +766,10 @@ export function DashboardView() {
                           ? `/sets/${attempt.study_set_id}/results/${attempt.id}`
                           : `/exams/${attempt.id}/results`;
                       return (
-                        <li key={attempt.id} className="py-2.5 first:pt-0 last:pb-0">
+                        <li key={attempt.id} className="py-2 first:pt-0 last:pb-0">
                           <Link
                             href={targetHref}
+                            prefetch={false}
                             className="hover:bg-secondary/60 flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 transition-colors"
                           >
                             <div className="min-w-0">
@@ -724,15 +788,11 @@ export function DashboardView() {
                             </div>
                             <div className="flex shrink-0 items-center gap-2">
                               {isInProgress ? (
-                                <>
-                                  <span className="text-muted-foreground font-mono text-xs tabular-nums">
+                                <Badge variant="warning">
+                                  <span>
                                     {attempt.answered_count}/{attempt.total_questions}
                                   </span>
-                                  <Badge variant="warning">
-                                    <Clock className="size-3" aria-hidden="true" />
-                                    <span>{vi ? "Đang làm" : "In progress"}</span>
-                                  </Badge>
-                                </>
+                                </Badge>
                               ) : (
                                 <>
                                   <span className="font-mono text-sm font-semibold tabular-nums">
@@ -761,59 +821,68 @@ export function DashboardView() {
                 )}
               </CardContent>
             </Card>
-          </div>
-
-          {/* Recent Study Sets */}
-          <section aria-labelledby="recent-sets-heading" className="space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h2 id="recent-sets-heading" className="text-foreground text-lg font-semibold">
-                {vi ? "Học phần gần đây" : "Recent Study Sets"}
-              </h2>
-              <Button variant="ghost" size="sm" asChild>
-                <Link href="/library">
-                  <span>{vi ? "Xem tất cả" : "View all"}</span>
-                  <ArrowRight className="size-4" aria-hidden="true" />
-                </Link>
-              </Button>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {summary.recentSets.slice(0, 6).map((set) => (
-                <Link
-                  key={set.id}
-                  href={`/sets/${set.id}`}
-                  className="border-border bg-card hover:border-primary/40 flex flex-col justify-between gap-3 rounded-xl border p-4 shadow-xs transition-colors"
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Badge variant="secondary">
-                        {set.set_type === "flashcards"
-                          ? t("library.typeFlashcards")
-                          : set.set_type === "mixed"
-                            ? t("library.typeMixed")
-                            : t("library.typeMultipleChoice")}
-                      </Badge>
-                      <span className="text-muted-foreground font-mono text-xs tabular-nums">
-                        {set.question_count} {vi ? "câu" : "items"}
-                      </span>
-                    </div>
-                    <h3 className="text-foreground line-clamp-2 text-sm font-semibold">
-                      {set.title}
-                    </h3>
-                    {set.subject && (
-                      <p className="text-muted-foreground truncate text-xs">
-                        {set.subject}
-                      </p>
-                    )}
-                  </div>
-                  <p className="text-muted-foreground text-xs">
-                    {formatRelativeTime(set.last_studied_at ?? set.updated_at, locale)}
-                  </p>
-                </Link>
-              ))}
-            </div>
           </section>
+
+          {/* BLOCK 5: Compact 3-Stat Strip + Zero-Dependency 14-Day CSS Activity Bar */}
+          <Card className="cv-auto">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-sm font-semibold sm:text-base">
+                  {vi ? "Tổng quan tiến độ" : "Progress Snapshot"}
+                </CardTitle>
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/statistics" prefetch={false}>
+                    <span>{vi ? "Thống kê chi tiết" : "Full analytics"}</span>
+                    <ArrowRight className="size-3.5" aria-hidden="true" />
+                  </Link>
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-secondary/50 rounded-lg p-3">
+                  <p className="text-muted-foreground text-xs">
+                    {vi ? "Ngân hàng" : "Question bank"}
+                  </p>
+                  <p className="text-foreground mt-0.5 font-mono text-lg font-bold tabular-nums sm:text-xl">
+                    {summary.totalQuestions.toLocaleString()}
+                  </p>
+                  <p className="text-muted-foreground text-[11px]">
+                    {summary.totalSets} {vi ? "học phần" : "sets"}
+                  </p>
+                </div>
+
+                <div className="bg-secondary/50 rounded-lg p-3">
+                  <p className="text-muted-foreground text-xs">
+                    {vi ? "Thành thạo" : "Mastered"}
+                  </p>
+                  <p className="text-foreground mt-0.5 font-mono text-lg font-bold tabular-nums sm:text-xl">
+                    {summary.masteredQuestions.toLocaleString()}
+                  </p>
+                  <p className="text-muted-foreground font-mono text-[11px] tabular-nums">
+                    {masteredPct}% {vi ? "tổng câu" : "of total"}
+                  </p>
+                </div>
+
+                <div className="bg-secondary/50 rounded-lg p-3">
+                  <p className="text-muted-foreground text-xs">
+                    {vi ? "Độ chính xác" : "Accuracy"}
+                  </p>
+                  <p className="text-foreground mt-0.5 font-mono text-lg font-bold tabular-nums sm:text-xl">
+                    {summary.studyAccuracy}%
+                  </p>
+                  <p className="text-muted-foreground flex items-center gap-1 text-[11px]">
+                    <Target className="size-3" aria-hidden="true" />
+                    <span>{vi ? "Trung bình" : "Overall"}</span>
+                  </p>
+                </div>
+              </div>
+
+              <MiniActivityStrip data={summary.activitySeries} vi={vi} />
+            </CardContent>
+          </Card>
         </>
       )}
-    </FadeIn>
+    </div>
   );
 }

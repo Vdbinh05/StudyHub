@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -198,10 +197,30 @@ function resolveInitialPolicy(modeParam: string | null): SelectionPolicy {
   }
 }
 
+function subscribeCustomPracticeDesktopLg(callback: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia("(min-width: 1024px)");
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getCustomPracticeDesktopLgSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(min-width: 1024px)").matches;
+}
+
+function getCustomPracticeDesktopLgServerSnapshot(): boolean {
+  return false;
+}
+
 export function CustomPracticeClient() {
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
-  const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
+  const isDesktopLg = React.useSyncExternalStore(
+    subscribeCustomPracticeDesktopLg,
+    getCustomPracticeDesktopLgSnapshot,
+    getCustomPracticeDesktopLgServerSnapshot,
+  );
   const searchParams = useSearchParams();
 
   // Read URL deep-link params (?setId=, ?setIds=, ?folderId=, ?mode=, ?chapter=)
@@ -1999,12 +2018,14 @@ export function CustomPracticeClient() {
                 </SheetTitle>
               </SheetHeader>
               <div className="mt-4">
-                <ExamNavigatorGrid
-                  items={navigatorItems}
-                  currentIndex={currentIndex}
-                  onSelectIndex={handleSelectNavIndex}
-                  mode="practice"
-                />
+                {navSheetOpen ? (
+                  <ExamNavigatorGrid
+                    items={navigatorItems}
+                    currentIndex={currentIndex}
+                    onSelectIndex={handleSelectNavIndex}
+                    mode="practice"
+                  />
+                ) : null}
               </div>
             </SheetContent>
           </Sheet>
@@ -2025,15 +2046,8 @@ export function CustomPracticeClient() {
       {/* Main Content + Desktop Virtualized Navigator */}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="space-y-4">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={q.id}
-              initial={prefersReducedMotion ? false : { opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={prefersReducedMotion ? undefined : { opacity: 0, y: -6 }}
-              transition={{ duration: 0.14 }}
-            >
-              <Card>
+          <div key={q.id}>
+            <Card>
                 <CardContent className="space-y-5 p-5 sm:p-6">
                   {/* Context metadata badges */}
                   <div className="flex flex-wrap items-center gap-2">
@@ -2409,8 +2423,7 @@ export function CustomPracticeClient() {
                   </div>
                 </CardContent>
               </Card>
-            </motion.div>
-          </AnimatePresence>
+          </div>
 
           {/* Navigation Action Bar */}
           <div className="flex items-center justify-between gap-3">
@@ -2455,24 +2468,26 @@ export function CustomPracticeClient() {
           </div>
         </div>
 
-        {/* Desktop Virtualized Question Navigator */}
-        <aside className="hidden lg:block">
-          <Card className="sticky top-20">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">
-                {lText(locale, "Điều hướng câu hỏi", "Question Navigator")}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-3 pt-0">
-              <ExamNavigatorGrid
-                items={navigatorItems}
-                currentIndex={currentIndex}
-                onSelectIndex={handleSelectNavIndex}
-                mode="practice"
-              />
-            </CardContent>
-          </Card>
-        </aside>
+        {/* Desktop Virtualized Question Navigator (Conditionally mounted ONLY on >=1024px — P1-4!) */}
+        {isDesktopLg ? (
+          <aside>
+            <Card className="sticky top-20">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">
+                  {lText(locale, "Điều hướng câu hỏi", "Question Navigator")}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-3 pt-0">
+                <ExamNavigatorGrid
+                  items={navigatorItems}
+                  currentIndex={currentIndex}
+                  onSelectIndex={handleSelectNavIndex}
+                  mode="practice"
+                />
+              </CardContent>
+            </Card>
+          </aside>
+        ) : null}
       </div>
 
       <ImageLightbox

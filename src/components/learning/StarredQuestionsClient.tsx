@@ -6,7 +6,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
+  Filter,
   Play,
   RefreshCw,
   Search,
@@ -167,7 +169,7 @@ export function StarredQuestionsClient() {
 
         {affectedSetIds.length > 0 && filtered.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
-            <Button asChild className="min-h-10">
+            <Button asChild className="min-h-11">
               <Link href={practiceStarredHref}>
                 <Play className="size-4" aria-hidden="true" />
                 {lText(
@@ -181,8 +183,8 @@ export function StarredQuestionsClient() {
                 )}
               </Link>
             </Button>
-            <Button variant="outline" asChild className="min-h-10">
-              <Link href={testStarredHref}>
+            <Button variant="outline" asChild className="min-h-11">
+              <Link href={testStarredHref} prefetch={false}>
                 <ClipboardList className="size-4" aria-hidden="true" />
                 {lText(locale, "Thi thử câu đánh dấu", "Test Starred")}
               </Link>
@@ -191,84 +193,99 @@ export function StarredQuestionsClient() {
         ) : null}
       </div>
 
-      {/* Filters */}
-      <Card>
-        <CardContent className="grid gap-3 py-4 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="starred-search" className="text-xs">
-              {t("common.search")}
-            </Label>
-            <div className="relative">
-              <Search
-                className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                id="starred-search"
-                className="h-9 pl-9"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder={lText(
-                  locale,
-                  "Tìm theo nội dung câu hỏi...",
-                  "Search question text...",
-                )}
-              />
+      {/* Compact Search + Collapsible Set/Chapter Filter (keeps starred cards visible on mobile Screen 1) */}
+      <div className="space-y-2">
+        <div className="relative">
+          <Search
+            className="pointer-events-none absolute top-3 left-3 size-4 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <Input
+            id="starred-search"
+            className="min-h-10 pl-9"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            aria-label={t("common.search")}
+            placeholder={lText(
+              locale,
+              "Tìm theo nội dung câu hỏi...",
+              "Search question text...",
+            )}
+          />
+        </div>
+
+        <details className="group rounded-xl border border-border bg-card">
+          <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-2 text-xs font-medium text-foreground select-none [&::-webkit-details-marker]:hidden">
+            <span className="flex items-center gap-1.5">
+              <Filter className="size-3.5 text-primary" aria-hidden="true" />
+              {lText(locale, "Lọc theo học phần & chương", "Filter by study set & chapter")}
+              {selectedSetId !== "all" || selectedChapter !== "all" ? (
+                <Badge variant="default" className="text-[10px] tabular-nums">
+                  {(selectedSetId !== "all" ? 1 : 0) +
+                    (selectedChapter !== "all" ? 1 : 0)}
+                </Badge>
+              ) : null}
+            </span>
+            <ChevronDown
+              className="size-4 text-muted-foreground transition-transform group-open:rotate-180"
+              aria-hidden="true"
+            />
+          </summary>
+
+          <div className="grid gap-3 border-t border-border p-3.5 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="starred-set" className="text-xs">
+                {lText(locale, "Học phần", "Study Set")}
+              </Label>
+              <Select
+                value={selectedSetId}
+                onValueChange={(val) => {
+                  setSelectedSetId(val);
+                  setSelectedChapter("all");
+                }}
+              >
+                <SelectTrigger id="starred-set" className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    {lText(locale, "Tất cả học phần", "All study sets")}
+                  </SelectItem>
+                  {(setsQuery.data ?? []).map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="starred-chapter" className="text-xs">
+                {lText(locale, "Chương", "Chapter")}
+              </Label>
+              <Select
+                value={selectedChapter}
+                onValueChange={setSelectedChapter}
+              >
+                <SelectTrigger id="starred-chapter" className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    {lText(locale, "Tất cả chương", "All chapters")}
+                  </SelectItem>
+                  {availableChapters.map((ch) => (
+                    <SelectItem key={ch} value={ch}>
+                      {ch}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="starred-set" className="text-xs">
-              {lText(locale, "Học phần", "Study Set")}
-            </Label>
-            <Select
-              value={selectedSetId}
-              onValueChange={(val) => {
-                setSelectedSetId(val);
-                setSelectedChapter("all");
-              }}
-            >
-              <SelectTrigger id="starred-set" className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  {lText(locale, "Tất cả học phần", "All study sets")}
-                </SelectItem>
-                {(setsQuery.data ?? []).map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="starred-chapter" className="text-xs">
-              {lText(locale, "Chương", "Chapter")}
-            </Label>
-            <Select
-              value={selectedChapter}
-              onValueChange={setSelectedChapter}
-            >
-              <SelectTrigger id="starred-chapter" className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  {lText(locale, "Tất cả chương", "All chapters")}
-                </SelectItem>
-                {availableChapters.map((ch) => (
-                  <SelectItem key={ch} value={ch}>
-                    {ch}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </CardContent>
-      </Card>
+        </details>
+      </div>
 
       {starredQuery.isLoading ? (
         <div className="space-y-3">
@@ -315,7 +332,7 @@ export function StarredQuestionsClient() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {filtered.map((item) => {
+          {filtered.map((item, idx) => {
             const q = item.question;
             const setTitle =
               item.study_set_title ??
@@ -332,12 +349,16 @@ export function StarredQuestionsClient() {
               : "";
 
             return (
-              <Card key={`${item.study_set_id}-${item.question_id}`}>
+              <Card
+                key={`${item.study_set_id}-${item.question_id}`}
+                className={idx >= 2 ? "cv-auto" : undefined}
+              >
                 <CardContent className="space-y-3 py-5">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
                         href={`/sets/${item.study_set_id}`}
+                        prefetch={false}
                         className="text-xs font-medium text-primary hover:underline"
                       >
                         {setTitle}
