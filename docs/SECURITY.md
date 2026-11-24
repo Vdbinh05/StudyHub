@@ -116,9 +116,9 @@ Sliding-window in-memory / Edge-safe rate limiter keyed by `user.id` (or hashed 
 
 ## 7. StudyHub V2.0–V3.0 Security Hardening Extensions (Live-Verified on PG 17.12)
 
-StudyHub V2.0/V2.1 (`0005`–`0012`) and V3.0 (`0013`–`0016`) extend the defense-in-depth baseline across **36 RLS-enabled tables** and **70 API Route Handlers**:
+StudyHub V2.0/V2.1 (`0005`–`0012`) and V3.0 (`0013`–`0017`) extend the defense-in-depth baseline across **37 RLS-enabled tables** and **71 API Route Handlers**:
 
-1. **Modern Key & Secret Isolation (`src/lib/supabase/env.ts`, `admin.ts`):** Supports modern `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (`sb_publishable_...`) and server-only `SUPABASE_SECRET_KEY` (`sb_secret_...`) with legacy fallback; `.next/static/` verified `exactRealSecretHits = 0` and `0 B` server parser/PDF libs leaked.
+1. **Modern Key & Secret Isolation (`src/lib/supabase/env.ts`, `admin.ts`):** Supports modern `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (`sb_publishable_...`) and server-only `SUPABASE_SECRET_KEY` (`sb_secret_...`) with legacy fallback; `.next/static/` and deployed CDN chunks verified `0` real secret leaks and `0 B` server parser/PDF libs leaked.
 2. **12-Type Pre-Submit Exam Anti-Leak & Column Revocation (`0013`, `0015`, `0016`):**
    - Direct `authenticated` PostgREST `SELECT` on `type_payload_snapshot`, `explanation_rich_snapshot`, `correct_option_ids`, `accepted_answers_snapshot`, and `explanation_snapshot` fails with PostgreSQL **`42501`**.
    - `sanitize_pre_submit_type_payload()` strips `fill_in_blank` accepted answers, `numerical` target/tolerance/unit keys, `ordering` `correct_position`, `matching` `pairs` (exposing unlinked `left_items` + `right_items`), `image_hotspot` `target_hotspots`/`geometry`, and `listening` `transcript` until `status IN ('submitted', 'expired')`.
@@ -130,7 +130,7 @@ StudyHub V2.0/V2.1 (`0005`–`0012`) and V3.0 (`0013`–`0016`) extend the defen
    - `study-media` stays strictly `public = false` (`10 MB` cap, 4 raster + 9 browser-compatible audio MIMEs, zero SVG/HTML). `POST /api/uploads/image` (`<= 5 MB`) and `POST /api/uploads/audio` (`<= 10 MB`) enforce magic-byte verification (`415` on spoofed SVG/HTML) and SHA-256 owner deduplication.
    - `content_media_relations` (`ON DELETE RESTRICT`) blocks deleting exam-referenced `media_assets` (`409` / `23503`); `DELETE /api/media/[id]` restricts deletion to uploader/set-owner and checks `.select("id").maybeSingle()` BEFORE `supabase.storage.remove()` (`V3-SEC-02`); `POST /api/media` verifies caller edit authorization on target `(entity_type, entity_id)` (`V3-SEC-03`).
    - `ALTER POLICY "study_media_select"` grants historical exam owners read access to snapshot-referenced media even after source study-set share revocation, while unrelated users remain denied (`403`/`404`).
-   - *(Operational note `V3-SEC-P3-01`: Next.js 16 default `10 MB` `proxyClientMaxBodySize` rejects `>10 MB` audio fail-closed as `400` with 0 bytes stored; `validateAudioUpload()` returns exact `413`.)*
+   - *(Operational note `V3-SEC-P3-01`: Next.js 16 default `10 MB` `proxyClientMaxBodySize` rejects direct multipart `>10 MB` fail-closed; client uploads `> 3.5 MB` use the signed `study-temp` direct-upload flow documented in §8 below, where `POST /api/storage/upload-url` returns exact `413` before bytes leave the browser.)*
 5. **PDF Parser Sandboxing (`src/lib/import/pdf-parser.ts`):** `pdfjs.getDocument(...)` enforces `isEvalSupported: false`, `disableAutoFetch: true`, `useSystemFonts: false`, and `disableFontFace: true` (`V3-SEC-05`); rejects non-PDF, corrupted, encrypted, and `>15 MB` payloads with zero JS execution.
 6. **Private Notes, Reports, Global Search & Offline Sync RLS (`0014`–`0016`):**
    - `user_question_notes`, `learning_session_checkpoints`, `learning_confidence_events`, and `learning_sync_events` enforce strict `user_id = (SELECT auth.uid())` isolation across PostgREST, REST APIs, and `global_library_search()` (`0` bidirectional note leakage).
@@ -142,4 +142,32 @@ StudyHub V2.0/V2.1 (`0005`–`0012`) and V3.0 (`0013`–`0016`) extend the defen
    - Production headers enforce `Content-Security-Policy` (`media-src 'self' blob: https://*.supabase.co`, `worker-src 'self' blob:`, `manifest-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`, no `'unsafe-eval'`), `Permissions-Policy: camera=(), microphone=(self), geolocation=()`, `Strict-Transport-Security`, `X-Frame-Options: DENY`, and `X-Content-Type-Options: nosniff`.
    - Global Search Hard Exam Guard suppresses `Ctrl+K`/`Cmd+K` during active exams.
 
-See [`docs/audit/v3/SECURITY_AUDIT.md`](audit/v3/SECURITY_AUDIT.md) for the full 3-account live Wave 5B security audit (`22/22` live + `39/39` unit PASS, `0` open P0/P1/P2).
+---
+
+## 8. Production Vercel Hobby Security Hardening (`0017` — Live-Verified on `https://studyhub-three-mauve.vercel.app`)
+
+1. **`study-temp` Private Direct-Upload Isolation & Guaranteed Cleanup (`0017`, `src/lib/supabase/temp-storage.ts`, `POST /api/storage/upload-url`):**
+   - Files `> 3.5 MB` (imports up to 15 MB, backups up to 12 MB, audio up to 10 MB, raster images up to 5 MB) upload via one-time signed URLs directly from the browser into the private `study-temp` bucket under `{userId}/{purpose}/{uuid}.{ext}` (never bypassing server validation).
+   - **Pre-Sign Validation (`POST /api/storage/upload-url`):** Enforces authentication (`401`), distributed rate limit (`RATE_LIMITS.STORAGE_SIGN`: `40 / 15m`), purpose-specific size ceilings (`413`), SVG/HTML/`FORBIDDEN_EXTENSIONS` rejection (`415`), and upfront `requireStudySetAccess(..., "edit")` (`403`/`404`).
+   - **Cross-Account Defense-in-Depth:** Both Storage RLS (`study_temp_{select,insert,delete}_own` matching `(storage.foldername(name))[1] = (SELECT auth.uid())::text`) AND server-side `isOwnedTempStoragePath()` block cross-account reads, downloads, signed URLs, deletes, and finalize attempts (`403`, verified live between User A and User B).
+   - **Guaranteed `finally` Cleanup:** `consumeTempUploadBytes()` and `cleanupTempObjects()` wrap finalize routes (`POST /api/uploads/image`, `POST /api/uploads/audio`, `POST /api/account/restore`, `POST /api/import/parse`, `POST /api/import/commit`) in `try { ... } finally { await cleanup(); }` — verified live to remove temp blobs both on success (`201`/`200`) and on post-upload magic-byte rejection (`415`).
+2. **Distributed PostgreSQL Rate Limiter Across Serverless Isolates (`0017`, `src/lib/security/rate-limit.ts`):**
+   - Replaces per-isolate memory-only counters with atomic PostgreSQL enforcement via `enforceDistributedRateLimit()` -> `service_role`-only RPC `public.check_and_increment_rate_limit()` across all rate-limited API and auth routes (zero synchronous `enforceRateLimit(` calls remain under `src/app/`).
+   - `public.api_rate_limits` has `ENABLE ROW LEVEL SECURITY` + zero client policies + `REVOKE ALL FROM PUBLIC, anon, authenticated`; both table and RPC return PostgreSQL `42501` to `anon` and `authenticated` clients.
+   - `getClientIdentifier()` prioritizes Vercel's trusted edge header `x-vercel-forwarded-for` before `x-real-ip` and `x-forwarded-for` (hashed via SHA-256) to resist spoofed IP bypasses.
+   - Lazy-loads `@/lib/supabase/admin` only when server credentials are present, preserving `import "server-only"` isolation and falling back cleanly to the deterministic in-memory limiter in local/unit-test environments without secrets.
+   - Live burst-verified on Vercel (`POST /api/account/restore` `5 / 15m` -> `[201, 201, 201, 201, 201, 429]` with `Retry-After` & `X-RateLimit-*` headers and persisted PG `hit_count`).
+3. **Auth Route Cache Isolation & Open-Redirect Hardening (`src/app/auth/*`, `src/components/auth/login-form.tsx`):**
+   - `/auth/callback`, `/auth/confirm`, and `/auth/signout` set `Cache-Control: no-store` on every redirect, JSON, and `429` response (preventing CDN/proxy caching of auth transitions), enforce distributed `RATE_LIMITS.AUTH_ACTION` on `callback`/`confirm`, and reject non-POST `GET /auth/signout` (`405`).
+   - Both server `isSafeRelativeRedirect()` and client `sanitizeNextPath()` reject `//evil.com`, `https://evil.com`, `/\evil.com`, `://`, and ASCII control characters (`[\x00-\x1F\x7F]`), redirecting strictly to relative same-origin paths.
+4. **Service Worker Redirect & Private-Response Cache Guards (`public/sw.js`):**
+   - `isCacheableStaticResponse()` explicitly rejects `response.redirected` responses and any response carrying `Cache-Control: private` (in addition to `no-store` / non-`200` / non-static paths), ensuring auth redirects or user-scoped data can never poison the static shell cache.
+5. **Secrets Hygiene, Deployment Isolation & Production CSP/HSTS (`.gitignore`, `next.config.ts`, Vercel Hobby):**
+   - `.gitignore` strictly excludes `.env*` (except `.env.example`) and `.vercel`; `SUPABASE_SECRET_KEY` is stored as a Vercel `--sensitive` encrypted env var (`gitForkProtection: true` blocks untrusted external fork PRs from accessing Preview secrets).
+   - `next.config.ts` emits production-only `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`, strips `localhost` / `127.0.0.1` from production `Content-Security-Policy`, keeps `X-Powered-By` disabled (`poweredByHeader: false`), and sets `X-Content-Type-Options: nosniff` on all streamed `ReadableStream` exports (`stream-response.ts`).
+   - Live production scan (`https://studyhub-three-mauve.vercel.app`) verified `0` secret/parser leaks across `28` deployed `/_next/static/chunks/*.js` files and `0` leaked secrets / `0` unhandled `5xx` across `106` runtime `vercel logs` lines.
+6. **Honest Accounting of Inherited Advisories & Free-Tier Operational Limits:**
+   - **Dependency Audit (`npm audit --omit=dev`):** **`0` critical, `0` high** vulnerabilities. Two inherited **moderate** advisories remain strictly inside `exceljs`'s transitive dependency chain (`uuid <11.1.1`, affecting only unused `v3`/`v5`/`v6` buffer-offset paths not invoked by StudyHub's deterministic spreadsheet parser/exporter). We intentionally avoid `npm audit fix --force` (which would downgrade/break `exceljs`), and mitigate spreadsheet attack surfaces via strict 15 MB caps, `PK\x03\x04` magic bytes, macro rejection (`.xlsm`), and ZIP/OOXML bomb guards.
+   - **Supabase Free-Tier Auth Email Rate Limits:** Supabase's built-in Free-Tier SMTP enforces strict hourly transactional email caps (signup confirmation / password reset). For reliable production email delivery above personal/small-group volume, configure a free custom SMTP provider in the Supabase Dashboard (see `docs/FREE_TIER_LIMITATIONS.md`).
+
+See [`docs/audit/v3/SECURITY_AUDIT.md`](audit/v3/SECURITY_AUDIT.md) (Wave 5B) and [`docs/audit/v3-production/SECURITY_AUDIT.md`](audit/v3-production/SECURITY_AUDIT.md) (live HTTPS Vercel production audit — `22/22` live security tests PASS, `0` open P0/P1/P2).

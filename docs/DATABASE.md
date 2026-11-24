@@ -529,15 +529,15 @@ Executes inside a single PostgreSQL transaction via `public.submit_exam_attempt(
 
 ---
 
-## 8. StudyHub V2.0–V3.0 Additive Schema Extensions (Migrations `0005`–`0016` — 36 RLS Tables Live on PG 17.12)
+## 8. StudyHub V2.0–V3.0 Additive Schema Extensions (Migrations `0005`–`0017` — 37 RLS Tables Live on PG 17.12)
 
-Migrations `0001`–`0004` (20 V1.0 tables) and `0005`–`0012` (V2.0/V2.1) remain strictly frozen and immutable (`git diff v2.1-verified -- 0001..0012` empty). StudyHub V3.0 adds **10 new RLS-enabled tables** in `0013`–`0014`, upgraded 12-type/search/reset/sync RPCs in `0015`, and PG 17.12 live fixes in `0016` — totaling **36 public tables (36/36 RLS enabled, `0` Security Advisor errors, `0` `unindexed_foreign_keys`)**:
+Migrations `0001`–`0004` (20 V1.0 tables) and `0005`–`0012` (V2.0/V2.1) remain strictly frozen and immutable (`git diff v2.1-verified -- 0001..0012` empty). StudyHub V3.0 adds **10 new RLS-enabled tables** in `0013`–`0014`, upgraded 12-type/search/reset/sync RPCs in `0015`, PG 17.12 live fixes in `0016`, and **1 production Vercel hardening table + private temporary staging bucket** in `0017` — totaling **37 public tables (37/37 RLS enabled, `0` Security Advisor errors, `0` `unindexed_foreign_keys`)**:
 
 ### 8.1 V2.0–V2.1 Extensions (`0005`–`0012`, +6 Tables = 26)
 - **Tables:** `exam_presets`, `exam_preset_sources`, `exam_attempt_sources`, `coverage_cycles`, `coverage_cycle_questions`, `coverage_cycle_attempts`.
 - **Hardening (`0006`–`0012`):** Moved `pg_trgm` to `extensions`; revoked default Supabase Cloud `anon` EXECUTE on 27 `SECURITY DEFINER` functions; fixed PG 17.12 RLS recursion (`0007` `is_folder_owner()`, `0009` `can_read_tag()`), MVCC `INSERT ... RETURNING *` (`0008`), window-in-aggregate in `clone_study_set()` (`0010`), FK `ON DELETE SET NULL` in `prevent_exam_snapshot_update()` (`0011`), and cascading account delete in `release_coverage_cycle_on_attempt_delete()` (`0012`).
 
-### 8.2 V3.0 Complete Learning Tables (`0013`–`0014`, +10 Tables = 36)
+### 8.2 V3.0 Complete Learning & Production Hardening Tables (`0013`–`0014`, `0017`, +11 Tables = 37)
 
 | # | Table | Migration | Purpose & Key Constraints | RLS Policy Summary (`(SELECT auth.uid())`) |
 | --- | --- | --- | --- | --- |
@@ -551,6 +551,7 @@ Migrations `0001`–`0004` (20 V1.0 tables) and `0005`–`0012` (V2.0/V2.1) rema
 | 34 | `learning_session_checkpoints` | `0014` | Resumable mid-session checkpoints keyed by `(user_id, session_key)` | Strict `user_id = (SELECT auth.uid())` |
 | 35 | `learning_confidence_events` | `0014` | Metacognitive calibration telemetry (`certain`/`unsure`/`guessing`) | Strict `user_id = (SELECT auth.uid())` |
 | 36 | `learning_sync_events` | `0014` | Idempotent offline sync audit log keyed by `(user_id, event_id)` | `SELECT` self-only; `INSERT` strictly via `SECURITY DEFINER` `sync_offline_learning_events()` (direct client insert denied `42501`) |
+| 37 | `api_rate_limits` | `0017` | Distributed serverless rate-limit counter (`bucket_key PK`, `hit_count`, `window_start`, `expires_at`, indexed on `expires_at`) | **Strict deny-all RLS** (`ENABLE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC, anon, authenticated`; zero client policies — `42501` via PostgREST) |
 
 ### 8.3 V3.0 Upgraded Constraints, Storage & RPCs (`0013`, `0015`, `0016`)
 - **`study-media` Bucket (`0013`):** Upgraded to `file_size_limit = 10485760` (`10 MB`), `public = false`, 4 raster + 9 audio MIMEs (zero SVG/HTML). `ALTER POLICY "study_media_select"` preserves read access to historical exam snapshot media even after source study-set share revocation.
@@ -561,4 +562,17 @@ Migrations `0001`–`0004` (20 V1.0 tables) and `0005`–`0012` (V2.0/V2.1) rema
   - Upgraded `create_exam_attempt_v2()`, `save_exam_attempt_answers()`, `get_exam_attempt_detail()`, `submit_exam_attempt()` (12-type scoring, confidence-neutral exam scores, `-0.54`/`-0.59` SM-2 ease & `guessing`/`unsure`/`hint_used` mastery caps), and `clone_study_set()` (clones passages, diagrams, hotspots, JSONB IDs & option media relations)
   - New `reset_learning_progress()` (6 scopes, bumps `progress_generation`, preserves `exam_attempts`), `global_library_search()` (8 entity types, `pg_trgm`, LIKE escaping, private-note isolation), and `sync_offline_learning_events()` (PgBouncer-safe zero-temp-table CTEs).
 
-See [`docs/audit/v3/DB_BACKEND_AUDIT.md`](audit/v3/DB_BACKEND_AUDIT.md) for live PG 17.12 verification (`16/16` live RPC tests PASS).
+### 8.4 Production Vercel Hardening Extension (`0017_v3_production_vercel_hardening.sql`)
+100% additive, PG 17.12 & Supabase-MCP-safe (zero `DROP POLICY`, zero `DROP TRIGGER`, zero `DROP TABLE`, zero `CREATE TEMP TABLE`, zero new `anon`/`authenticated` `SECURITY DEFINER` grants):
+
+- **Private `study-temp` Storage Bucket (`public = false`, `file_size_limit = 20971520` / 20 MB):**
+  - Supports direct browser `PUT` uploads (`> 3.5 MB` bypass of Vercel Hobby's 4.5 MB serverless body limit) for 15 MB imports (`.docx`/`.xlsx`/`.pdf`/`.csv`/`.tsv`/`.txt`/`.json`), 12 MB account JSON backups, 10 MB audio, 5 MB raster images, and staged DOCX `import-media`.
+  - Explicit MIME allow-list strictly excludes `image/svg+xml` and `text/html`.
+  - Three idempotent `storage.objects` RLS policies (`study_temp_select_own`, `study_temp_insert_own`, `study_temp_delete_own`) enforce `bucket_id = 'study-temp' AND (storage.foldername(name))[1] = (SELECT auth.uid())::text` — every authenticated user can only access their own `{userId}/...` prefix.
+  - All temporary staging blobs are deleted immediately inside `finally` blocks once parsed/finalized (`consumeTempUploadBytes()` / `cleanupTempObjects()`), and purged on full account deletion (`DELETE /api/account/data`).
+- **Distributed Serverless Rate-Limit Table & Atomic RPC (`public.api_rate_limits` + `public.check_and_increment_rate_limit`):**
+  - `public.api_rate_limits (bucket_key text PRIMARY KEY, hit_count integer, window_start timestamptz, expires_at timestamptz)` with index `idx_api_rate_limits_expires_at (expires_at)`, `ENABLE ROW LEVEL SECURITY`, and `REVOKE ALL ON public.api_rate_limits FROM PUBLIC, anon, authenticated`.
+  - `public.check_and_increment_rate_limit(p_bucket_key text, p_limit integer, p_window_seconds integer) RETURNS jsonb`: `SECURITY DEFINER`, `SET search_path = ''`, `REVOKE ALL ... FROM PUBLIC, anon, authenticated; GRANT EXECUTE ... TO service_role;`.
+  - Performs an atomic `INSERT ... ON CONFLICT (bucket_key) DO UPDATE` window reset/increment returning `{ allowed, limit, remaining, reset_at_ms, retry_after_seconds }`, plus overflow-safe bitwise opportunistic pruning (`(hashtext(v_key || v_now::text) & 31) = 0`, ~3.1% of calls) deleting rows expired more than 5 minutes ago so Supabase Free-Tier DB usage stays negligible.
+
+See [`docs/audit/v3/DB_BACKEND_AUDIT.md`](audit/v3/DB_BACKEND_AUDIT.md) and [`docs/audit/v3-production/SECURITY_AUDIT.md`](audit/v3-production/SECURITY_AUDIT.md) for live PG 17.12 verification (`37/37` RLS tables, `16/16` live RPC tests & `22/22` live security tests PASS).

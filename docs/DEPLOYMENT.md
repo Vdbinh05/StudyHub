@@ -1,145 +1,154 @@
-# StudyHub V1.0 — Local Development, Deployment & Backup/Restore Guide
+# StudyHub V3.0 (Complete Learning Edition) — Deployment Guide
 
-> **Target Platform:** Vercel (Next.js 16 App Router + `src/proxy.ts` session refresh) + Supabase (PostgreSQL 15+ with strict RLS on all 20 tables, Supabase Auth, and `study-media` Storage bucket).
+> **Production Stack (100% Free-Tier, Zero AI, Zero Payments):**
+> - **Hosting:** Vercel Hobby — Project `studyhub` (`prj_ddcCZOt10qpV0RbMGltVLyNN29fN`, Team `binhs-projects-438b34e8`, Region `iad1`)
+> - **Canonical Production HTTPS URL:** `https://studyhub-three-mauve.vercel.app`
+> - **Repository:** `https://github.com/Vdbinh05/StudyHub` (Production branch: `main`, Git Fork Protection enabled)
+> - **Framework & Runtime:** Next.js `16.4.6` (App Router + Turbopack + `src/proxy.ts`) on **Node.js `24.x`**
+> - **Database, Auth & Storage:** Supabase Cloud Free (PostgreSQL `17.12`, **37/37** public tables with strict RLS across Migrations `0001`–`0017`, private `study-media` and `study-temp` Storage buckets)
 
 ---
 
 ## 1. Prerequisites
 
-- **Node.js:** `v20.11+` (verified on `v24.15.0`) and **npm** `10+` (`11.12.1`)
+- **Node.js:** `24.x` (`package.json` pins `"engines": { "node": "24.x" }`) and **npm** `10+`
 - **Git:** `2.40+`
-- **Database & Auth Backend (choose one):**
-  - **Hosted Supabase Cloud** project at [supabase.com](https://supabase.com) (recommended when Docker is unavailable), OR
-  - **Local Supabase CLI** (`npx supabase start`) with **Docker Desktop** running.
+- **Vercel CLI** (`vercel`) authenticated against team `binhs-projects-438b34e8`
+- **Supabase Project** (Hosted Supabase Cloud Free tier, or local Supabase CLI with Docker for offline development)
 
 ---
 
-## 2. Environment Variables (`.env.local`)
+## 2. Environment Variables (Names Only — Never Commit Secrets)
 
-Copy `.env.example` to `.env.local` and populate your Supabase project values (never commit `.env.local` to Git):
+Copy [`.env.example`](../.env.example) to `.env.local` for local development. In Vercel Project Settings (`studyhub`), configure the following variables — **never** commit `.env*` files to Git (protected by `.gitignore`) and **never** pass secret values on shell command lines (use stdin piping or the encrypted Vercel Dashboard):
 
-| Variable | Visibility | Required | Purpose |
-| --- | --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Client & Server | Yes | Supabase API URL (`https://<ref>.supabase.co` or `http://127.0.0.1:54321`) |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Client & Server | Yes | Public `anon` key protected by strict PostgreSQL RLS across all 20 tables |
-| `NEXT_PUBLIC_APP_URL` | Client & Server | Yes | Canonical app URL (`http://localhost:3000` locally; `https://<domain>` in production) for OAuth callbacks & share links |
-| `SUPABASE_SERVICE_ROLE_KEY` | **Server-Only** | Optional (admin/server RPC ops) | **NEVER** prefix with `NEXT_PUBLIC_`. Imported exclusively inside `src/lib/supabase/admin.ts` (`import 'server-only'`) |
-| `NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH` | Client & Server | Optional (`false` by default) | Set to `true` after enabling Google OAuth in Supabase Dashboard |
+| Variable Name | Type | Vercel Target(s) | Required | Purpose |
+| --- | --- | --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Config (Public) | `Production`, `Preview` | Yes | Supabase project API URL (`https://<project-ref>.supabase.co`) |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Config (Public) | `Production`, `Preview` | Yes | Modern Supabase publishable client key protected by strict PostgreSQL RLS (`NEXT_PUBLIC_SUPABASE_ANON_KEY` also supported as legacy fallback) |
+| `SUPABASE_SECRET_KEY` | **Secret (`--sensitive`, Server-Only)** | `Production`, `Preview` | Yes | Server-only key imported exclusively in `src/lib/supabase/admin.ts` (`import "server-only"`) for permanent account deletion, Storage purge, and distributed PG rate limiting (`SUPABASE_SERVICE_ROLE_KEY` also supported as legacy fallback). **NEVER prefix with `NEXT_PUBLIC_`.** |
+| `NEXT_PUBLIC_APP_URL` | Config (Public) | **`Production` ONLY** | Yes | Set to `https://studyhub-three-mauve.vercel.app` in Production. Leave **unset on Preview** so `getAppUrl()` in `src/lib/supabase/env.ts` resolves dynamically from `VERCEL_PROJECT_PRODUCTION_URL` / `VERCEL_URL`. |
+| `NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH` | Config (Public) | Optional (`false` default) | No | Enable Google OAuth button after configuring Google provider in Supabase Auth |
 
-> **Graceful Unconfigured Guard:** If `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` is omitted, StudyHub builds cleanly, renders public pages, displays an honest setup banner on auth pages, and returns `503 SUPABASE_NOT_CONFIGURED` on database API routes — never fake auth or mock data.
-> **Zero AI / Zero Payments:** No OpenAI, Gemini, Anthropic, or Stripe keys exist or are required.
+> **Security Notes:**
+> - **Git Fork Protection (`gitForkProtection: true`):** Untrusted external Pull Requests on the public repository never receive Preview environment variables.
+> - **Zero AI / Zero Billing Keys:** StudyHub uses 100% deterministic logic; no OpenAI, Gemini, Anthropic, Stripe, or Redis environment variables exist.
+> - **Graceful Unconfigured Mode:** Without Supabase env vars, public routes render cleanly and database API routes return `503 SUPABASE_NOT_CONFIGURED` rather than mock data.
 
----
+### Uploading Secrets Safely via CLI (Stdin Piping)
 
-## 3. Supabase Database Migrations (`0001`–`0004`)
+When updating sensitive variables via CLI, pipe values from stdin (never `--value <secret>` in shell history):
 
-Apply the 4 canonical SQL migration files in exact numeric order:
-
-1. `supabase/migrations/0001_initial_schema.sql` — All 20 UUID tables, foreign keys, cascades, unique/check constraints, and composite/partial indexes.
-2. `supabase/migrations/0002_rls_policies.sql` — `ENABLE ROW LEVEL SECURITY` on all 20 tables, `(SELECT auth.uid())` policies, column-level `REVOKE` on pre-submit exam answer fields, and authorization helper functions.
-3. `supabase/migrations/0003_functions_and_triggers.sql` — `handle_new_user()` (creates `profiles` + `user_preferences`), `set_updated_at()` triggers, `question_count` sync trigger, immutable `exam_attempt_questions` trigger, atomic & idempotent `submit_exam_attempt()` RPC, and share-link/user lookup RPCs.
-4. `supabase/migrations/0004_storage_and_buckets.sql` — Private `study-media` bucket (5 MB cap, raster images only — no SVG) with `storage.objects` RLS policies.
-
-### Option A: Hosted Supabase Project
 ```bash
-npm install
+# Example: update a secret from a local file or in-memory script without echoing to stdout/argv
+vercel env add SUPABASE_SECRET_KEY production,preview --sensitive --force --yes --scope binhs-projects-438b34e8
+vercel env ls --scope binhs-projects-438b34e8
+```
+
+---
+
+## 3. Supabase Database Migrations (`0001`–`0017`)
+
+All 17 SQL migrations in `supabase/migrations/` are strictly additive and immutable once applied to production (**never** rewrite `0001`–`0017` or run `db reset` against live Supabase Cloud):
+
+| Range | Migration Files | Scope |
+| --- | --- | --- |
+| **V1.0 Core** | `0001_initial_schema.sql` – `0004_storage_and_buckets.sql` | Core 20 tables, strict RLS (`(SELECT auth.uid())`), exam immutability & scoring RPCs, private `study-media` bucket |
+| **V2.0–V2.1 Exams & Cloud Hardening** | `0005_v2_custom_exams_and_coverage.sql` – `0012_v2_1_fix_coverage_delete_cascade.sql` | 6 V2 tables (multi-subject exams, presets, full coverage cycles), anon RPC lockdown, RLS recursion & clone fixes |
+| **V3.0 Complete Learning Edition** | `0013_v3_media_richtext_questions_schema.sql` – `0016_v3_live_fixes.sql` | 10 V3 tables (`media_assets`, `content_media_relations` with `ON DELETE RESTRICT`, `shared_passages`, `diagram_sets`, `diagram_hotspots`, `user_question_notes`, `question_reports`, `learning_session_checkpoints`, `learning_confidence_events`, `learning_sync_events`), 12-type grading, global search, scoped reset, offline sync RPCs |
+| **V3.0 Production Vercel Hardening** | `0017_v3_production_vercel_hardening.sql` | Private `study-temp` bucket (`20 MB` cap, 3 `{auth.uid()}` RLS policies for direct > 3.5 MB uploads), `public.api_rate_limits` (RLS deny-all) + `service_role`-only atomic `check_and_increment_rate_limit()` RPC with opportunistic pruning |
+
+Total live schema state: **37/37** public tables with `ENABLE ROW LEVEL SECURITY` and **2** private Storage buckets (`study-media`, `study-temp`).
+
+### Applying Additive Migrations to Hosted Supabase
+
+```bash
 npx supabase login
 npx supabase link --project-ref <your-project-ref>
 npx supabase db push
 ```
-*(Alternatively, paste `0001_initial_schema.sql` through `0004_storage_and_buckets.sql` sequentially into the Supabase Dashboard **SQL Editor**.)*
-
-### Option B: Local Supabase CLI (Docker Desktop Running)
-```bash
-npm install
-npx supabase start
-npx supabase db reset
-```
-Copy the printed `API URL`, `anon key`, and `service_role key` into `.env.local`.
-
-### Auth Redirect Configuration
-In Supabase Dashboard -> **Authentication -> URL Configuration**:
-- **Site URL:** `http://localhost:3000` (local) or `https://<your-domain>` (production)
-- **Redirect URLs:**
-  - `${NEXT_PUBLIC_APP_URL}/auth/callback`
-  - `${NEXT_PUBLIC_APP_URL}/auth/confirm`
-  - `${NEXT_PUBLIC_APP_URL}/reset-password`
 
 ---
 
-## 4. Next.js 16 Session Proxy (`src/proxy.ts`) & Security Headers
+## 4. Supabase Auth URL Configuration (Required for Production HTTPS)
 
-- Auth session refresh and protected route guards run in **`src/proxy.ts`** (Next.js 16 convention, zero middleware deprecation warnings).
-- Security headers configured in `next.config.ts`:
-  - `Content-Security-Policy` (strict production directives; `'unsafe-eval'` restricted to non-production dev HMR only)
-  - `X-Frame-Options: DENY`
-  - `X-Content-Type-Options: nosniff`
-  - `Referrer-Policy: strict-origin-when-cross-origin`
-  - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+In **Supabase Dashboard -> Authentication -> URL Configuration**, configure:
 
----
+- **Site URL:**
+  ```text
+  https://studyhub-three-mauve.vercel.app
+  ```
+- **Redirect URLs (exact allowlist):**
+  ```text
+  https://studyhub-three-mauve.vercel.app/auth/callback
+  https://studyhub-three-mauve.vercel.app/auth/confirm
+  http://localhost:3000/auth/callback
+  http://localhost:3000/auth/confirm
+  ```
 
-## 5. Verification Commands
-
-```bash
-npm run typecheck   # tsc --noEmit (0 errors)
-npm run lint        # eslint . (0 errors, 0 warnings)
-npm run test        # Vitest unit, security, migration & integration suite (82 tests)
-npm run build       # Next.js 16 production build (69 App Router routes + Proxy)
-npm run test:e2e    # Playwright E2E, responsive (6 viewports) & security header tests
-```
-
-To execute the full live 2-account Supabase E2E journey (`tests/e2e/authenticated-journey.spec.ts`) against a running Supabase instance:
-```bash
-# PowerShell
-$env:E2E_SUPABASE_READY="1"; npm run test:e2e
-
-# Bash
-E2E_SUPABASE_READY=1 npm run test:e2e
-```
+All auth callback routes (`src/app/auth/callback/route.ts`, `src/app/auth/confirm/route.ts`, `src/app/auth/signout/route.ts`) enforce `Cache-Control: no-store`, strict `isSafeRelativeRedirect()` open-redirect validation, and distributed rate limiting.
 
 ---
 
-## 6. Production Deployment (Vercel + Supabase)
+## 5. Vercel Hobby Production Architecture
 
-1. Push the repository to GitHub/GitLab/Bitbucket.
-2. Import into **Vercel** (Framework: `Next.js`, Node.js `20.x` or `22.x`).
-3. Configure Vercel **Environment Variables**:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `NEXT_PUBLIC_APP_URL` (`https://<your-production-domain>`)
-   - `SUPABASE_SERVICE_ROLE_KEY` (encrypted, Server-only)
-4. Push all 4 SQL migrations to production Supabase (`npx supabase db push`).
-5. Update Supabase Auth **Site URL** & **Redirect URLs** for your production domain.
-6. Smoke-check `GET /api/health` (`200 OK`), verify response CSP/security headers, and run sign-up, import, and mock exam end-to-end.
+StudyHub V3.0 is specifically engineered to stay cleanly within Vercel Hobby limits without paid add-ons:
+
+### 5.1 Direct-to-Storage Upload Architecture (`study-temp` Bypass for Vercel's 4.5 MB Inbound Cap)
+Vercel Hobby enforces a hard **4.5 MB** inbound request body cap at the Edge. StudyHub transparently handles files up to **15 MB** (DOCX/XLSX/PDF imports), **12 MB** (JSON account backups), **10 MB** (audio), and **5 MB** (raster images):
+- **Client transport (`src/lib/media/direct-upload.ts`, zero `@supabase/supabase-js` import):**
+  - Files **`<= 3.5 MB`** (`VERCEL_SAFE_DIRECT_PAYLOAD_BYTES = 3_500_000`): sent single-hop to existing API routes (`/api/uploads/image`, `/api/uploads/audio`, `/api/import/parse`, `/api/account/restore`).
+  - Files **`> 3.5 MB`**: call `POST /api/storage/upload-url` to authorize access, validate extension/size, and mint a one-time signed upload URL under `study-temp/{userId}/{purpose}/{uuid}.{ext}` -> browser executes direct `PUT` to Supabase Storage -> finalize endpoint consumes bytes via `consumeTempUploadBytes()`, validates magic bytes / ZIP-bomb guards, saves to `study-media` or Postgres, and **deletes the `study-temp` object in `finally`** on both success and failure.
+- **DOCX Multimedia & Chunked Commits:**
+  - `POST /api/import/parse` automatically offloads extracted DOCX raster media exceeding `1.5 MB` into `study-temp/{userId}/import-media/{sha256}.{ext}` so neither parse responses nor commit chunks exceed 4.5 MB.
+  - `src/lib/import/commit-chunker.ts` (`buildVercelSafeCommitChunks()`) caps every `POST /api/import/commit` chunk to **`<= 2.5 MB`** and **`<= 500` questions** across all formats.
+
+### 5.2 Chunked `ReadableStream` Streaming Exports (Bypassing Vercel's 4.5 MB Buffered Response Cap)
+`src/lib/security/stream-response.ts` (`streamBinaryResponse`, `streamJsonResponse`) streams downloads in 64 KB chunks without `Content-Length`, exempting them from Vercel's 4.5 MB buffered response ceiling (supporting up to 20 MB streamed responses):
+- `POST /api/export/pdf` (Vietnamese NotoSans PDF exam papers & answer keys; embedded image budget capped at `14 MB`)
+- `GET /api/sets/[id]/export` (JSON, CSV, TXT, XLSX exports up to 10,000+ questions)
+- `GET /api/account/data` (Full personal JSON data export)
+- `POST /api/import/parse` (Streams JSON automatically when preview payload exceeds `2 MB`)
+
+### 5.3 Linux Serverless Tracing, Runtime & Cold-Start Hygiene (`next.config.ts`)
+- **`outputFileTracingIncludes`** explicitly pins runtime filesystem assets for Vercel Linux (`/var/task`):
+  - `"/api/export/pdf"`: `["./src/assets/fonts/NotoSans-*.ttf"]` (~1.66 MB)
+  - `"/api/import/parse"`: `["./node_modules/pdfjs-dist/legacy/build/*.mjs", "./node_modules/pdfjs-dist/standard_fonts/**/*", "./node_modules/pdfjs-dist/cmaps/**/*"]` (excludes ~8.5 MB of `.mjs.map` sourcemaps)
+- **`serverExternalPackages: ["pdfjs-dist"]`** paired with leaf imports (`@/lib/import/text-utils`, `@/lib/import/zip-guard`, `@/lib/import/validator`, `@/lib/import/templates`) keeps `/api/export/pdf` and non-parse routes completely free of `pdfjs-dist` bloat.
+- **`runtime = "nodejs"` and `maxDuration = 60`** exported on all heavy import, export, media upload, exam, coverage, duplicate, restore, and sync routes.
+- **`images: { unoptimized: true }`** guarantees zero Vercel Hobby Image Optimization quota usage (images serve via authenticated 302 signed URLs direct from Supabase Storage).
+- **Security Headers & PWA:** Production HSTS (`max-age=63072000; includeSubDomains`), strict CSP (zero `'unsafe-eval'` or `localhost`), `X-Frame-Options: DENY`, `Permissions-Policy: camera=(), microphone=(self), geolocation=()`, and `/sw.js` served with `Cache-Control: no-cache, no-store, must-revalidate` and `Service-Worker-Allowed: /`.
 
 ---
 
-## 7. Backup & Restore Runbook
+## 6. GitHub -> Vercel Continuous Deployment Flow
 
-### 7.1 Full PostgreSQL Backup & Restore (`pg_dump` / `pg_restore`)
-Retrieve your direct database connection string (`DATABASE_URL`, port `5432`) from Supabase Dashboard -> **Project Settings -> Database**:
+The Vercel project `studyhub` is linked directly to `https://github.com/Vdbinh05/StudyHub`:
 
-```bash
-# Create compressed custom-format backup of the public schema & data
-pg_dump "$DATABASE_URL" \
-  --format=custom \
-  --schema=public \
-  --no-owner \
-  --no-privileges \
-  --file="studyhub_backup_$(date +%Y%m%d_%H%M%S).dump"
+1. **Push to `main`:** Automatically triggers a **Production** build on Vercel (`iad1`, Node `24.x`) and aliases `https://studyhub-three-mauve.vercel.app` upon `READY`.
+2. **Pull Requests / Feature Branches:** Automatically build isolated **Preview** deployments guarded by Vercel Deployment Protection (`vercel_authentication`) and `gitForkProtection: true`.
+3. **Manual Verification Before Pushing to `main`:**
+   ```bash
+   npm run typecheck   # tsc --noEmit (0 errors)
+   npm run lint        # eslint . (0 errors, 0 warnings)
+   npm run test        # Vitest unit, security, migration & integration suite
+   npm run build       # Next.js 16.4.6 production build
+   ```
+4. **Post-Deploy Smoke Check:**
+   - `GET https://studyhub-three-mauve.vercel.app/api/health` -> `200 OK` (`{"data":{"status":"ok","supabaseConfigured":true}}`)
+   - `GET https://studyhub-three-mauve.vercel.app/sw.js` -> `200 OK` (`Cache-Control: no-cache, no-store, must-revalidate`)
+   - `GET https://studyhub-three-mauve.vercel.app/manifest.webmanifest` -> `200 OK`
+   - `GET https://studyhub-three-mauve.vercel.app/offline` -> `200 OK`
 
-# Restore into a freshly migrated target database
-pg_restore \
-  --dbname="$TARGET_DATABASE_URL" \
-  --clean \
-  --if-exists \
-  --no-owner \
-  --no-privileges \
-  studyhub_backup_YYYYMMDD_HHMMSS.dump
-```
-*(In production Supabase Pro, also enable Point-in-Time Recovery (PITR) and automated daily backups.)*
+---
 
-### 7.2 User-Level Lossless Study Set Backup (StudyHub JSON Export)
-- Any user can export individual study sets via **`GET /api/sets/[id]/export?format=json`** (or CSV / XLSX) directly from `/sets/[id]`, or export their full account data snapshot via `/settings` (`GET /api/account/data`).
-- Re-importing a StudyHub JSON export via `/sets/[id]/import` performs a 100% lossless round-trip of prompts, options, `is_correct` flags, accepted answers, chapters, explanations, hints, difficulty, and tags.
+## 7. Backup & Restore
+
+- **User-Level Personal Backup:** Export full personal JSON data anytime from `/settings` (`GET /api/account/data`) and restore safely via `/settings` (`POST /api/account/restore` — automatically routes backups `> 3.5 MB` through `study-temp`).
+- **Study Set Export/Import:** Export individual study sets via `GET /api/sets/[id]/export?format=json|csv|txt|xlsx` or printable Vietnamese A4 PDF via `POST /api/export/pdf`.
+- **PostgreSQL Full Backup (`pg_dump` / `pg_restore`):**
+  ```bash
+  pg_dump "$DATABASE_URL" --format=custom --schema=public --no-owner --no-privileges \
+    --file="studyhub_backup_$(date +%Y%m%d_%H%M%S).dump"
+  ```
+  See [`docs/PRODUCTION_RUNBOOK.md`](./PRODUCTION_RUNBOOK.md) for rollback and recovery procedures and [`docs/FREE_TIER_LIMITATIONS.md`](./FREE_TIER_LIMITATIONS.md) for Hobby/Free operating limits.
