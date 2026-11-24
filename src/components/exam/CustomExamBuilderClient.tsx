@@ -1136,7 +1136,7 @@ export function CustomExamBuilderClient({
     <div
       className={cn(
         "mx-auto w-full max-w-6xl space-y-6 lg:pb-8",
-        embedded ? "pb-24" : "pb-36",
+        embedded ? "pb-24" : "pb-40",
       )}
     >
       {/* Page Header */}
@@ -1276,15 +1276,20 @@ export function CustomExamBuilderClient({
                     </div>
                   ) : null}
 
-                  {/* Scrollable Folders + Study Sets List */}
+                  {/* Scrollable Folders + Study Sets List (fixed height across loading/empty/loaded -> 0px CLS!) */}
                   {setsQuery.isLoading || foldersQuery.isLoading ? (
-                    <div className="space-y-2">
-                      <Skeleton className="h-10 w-full" />
-                      <Skeleton className="h-10 w-full" />
-                      <Skeleton className="h-10 w-full" />
+                    <div
+                      aria-busy="true"
+                      className="h-[240px] space-y-2.5 overflow-hidden rounded-lg border border-border p-3 sm:h-[280px]"
+                    >
+                      <Skeleton className="h-4 w-24" />
+                      <Skeleton className="h-10 w-full rounded-md" />
+                      <Skeleton className="h-10 w-full rounded-md" />
+                      <Skeleton className="h-10 w-full rounded-md" />
+                      <Skeleton className="h-10 w-full rounded-md" />
                     </div>
                   ) : allSets.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                    <div className="flex h-[240px] flex-col items-center justify-center rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground sm:h-[280px]">
                       <p>
                         {lText(
                           locale,
@@ -1299,7 +1304,7 @@ export function CustomExamBuilderClient({
                       </Button>
                     </div>
                   ) : (
-                    <div className="max-h-[320px] space-y-4 overflow-y-auto rounded-lg border border-border p-3">
+                    <div className="h-[240px] space-y-4 overflow-y-auto overscroll-contain rounded-lg border border-border p-3 sm:h-[280px]">
                       {/* Folders Section */}
                       {visibleFolders.length > 0 ? (
                         <div className="space-y-1.5">
@@ -1482,7 +1487,7 @@ export function CustomExamBuilderClient({
                     )}
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-5">
+                <CardContent className="min-h-[260px] space-y-5">
                   {/* Full Coverage Mode Switch */}
                   <div className="flex flex-col gap-3 rounded-lg border border-primary/30 bg-accent/30 p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-0.5">
@@ -2412,10 +2417,15 @@ export function CustomExamBuilderClient({
                     ) : null}
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* Pool KPI (honest when no set selected yet — fixes UX31-02) */}
-                  <div className="rounded-lg border border-border bg-secondary/30 p-3.5 space-y-1">
-                    {hasAnySource ? (
+                <CardContent className="min-h-[280px] space-y-4">
+                  {/* Pool KPI (stable height across loading/unselected/selected -> zero CLS!) */}
+                  <div className="flex min-h-[76px] flex-col justify-center space-y-1 rounded-lg border border-border bg-secondary/30 p-3.5">
+                    {setsQuery.isLoading ? (
+                      <>
+                        <Skeleton className="h-3.5 w-36" />
+                        <Skeleton className="h-6 w-28" />
+                      </>
+                    ) : hasAnySource ? (
                       <>
                         <div className="flex items-center justify-between text-xs text-muted-foreground">
                           <span>
@@ -2426,7 +2436,7 @@ export function CustomExamBuilderClient({
                             {lText(locale, "môn", "subjects")}
                           </span>
                         </div>
-                        <p className="text-2xl font-bold text-foreground tabular-nums">
+                        <p className="text-xl font-bold leading-tight text-foreground tabular-nums">
                           {totalEligible}{" "}
                           <span className="text-xs font-normal text-muted-foreground">
                             {lText(locale, "câu duy nhất", "unique questions")}
@@ -2447,7 +2457,7 @@ export function CustomExamBuilderClient({
                             {allSets.length} {lText(locale, "môn", "sets")}
                           </span>
                         </div>
-                        <p className="text-lg font-bold text-foreground tabular-nums">
+                        <p className="text-xl font-bold leading-tight text-foreground tabular-nums">
                           {totalLibraryQuestions}{" "}
                           <span className="text-xs font-normal text-muted-foreground">
                             {lText(
@@ -2702,18 +2712,26 @@ export function CustomExamBuilderClient({
         </TabsContent>
       </Tabs>
 
-      {/* Mobile Sticky Bottom Bar (<lg, compact <12% viewport height; sits cleanly above AppShell bottom nav when not embedded) */}
+      {/* Mobile Sticky Bottom Bar (<lg, compact <12% viewport height, stable min-h-[64px] -> zero CLS!) */}
       {activeTab === "builder" ? (
         <div
           className={cn(
-            "fixed inset-x-0 z-30 border-t border-border bg-card/95 px-4 py-2.5 backdrop-blur-xs lg:hidden",
+            "fixed inset-x-0 z-30 min-h-[64px] border-t border-border bg-card/95 px-4 py-2.5 backdrop-blur-xs lg:hidden",
             embedded
               ? "bottom-0 pb-[max(0.625rem,env(safe-area-inset-bottom))]"
               : "bottom-[calc(4rem+max(0.25rem,env(safe-area-inset-bottom,0px)))]",
           )}
         >
-          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3">
-            {!hasAnySource && allSets.length > 0 ? (
+          <div className="mx-auto flex min-h-11 max-w-2xl items-center justify-between gap-3">
+            {setsQuery.isLoading ? (
+              <>
+                <div className="min-w-0 space-y-1.5">
+                  <Skeleton className="h-3.5 w-32" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+                <Skeleton className="h-11 w-28 shrink-0 rounded-md" />
+              </>
+            ) : !hasAnySource && allSets.length > 0 ? (
               <>
                 <div className="min-w-0 text-xs tabular-nums">
                   <p className="truncate font-semibold text-foreground">

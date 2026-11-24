@@ -1858,23 +1858,14 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                 )}
               </div>
 
-              {/* Optional Image Upload via POST /api/uploads/image */}
-              <div className="space-y-1.5">
-                <Label htmlFor="q-image-url">
-                  {vi
-                    ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)"
-                    : "Optional image (PNG/JPG/WebP ≤ 5MB)"}
-                </Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="q-image-url"
-                    type="url"
-                    placeholder="https://... hoặc /api/uploads/signed-url?path=..."
-                    value={draft.prompt_image_url}
-                    onChange={(e) =>
-                      setDraft((prev) => ({ ...prev, prompt_image_url: e.target.value }))
-                    }
-                  />
+              {/* Optional Image Upload via POST /api/uploads/image (type="text" + inputMode="url" so relative /api/uploads/signed-url passes HTML5 form submit) */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label htmlFor="q-image-url">
+                    {vi
+                      ? "Ảnh minh họa (tùy chọn, PNG/JPG/WebP ≤ 5MB)"
+                      : "Illustration image (optional, PNG/JPG/WebP ≤ 5MB)"}
+                  </Label>
                   <Button
                     type="button"
                     variant="outline"
@@ -1882,13 +1873,21 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                     asChild
                     disabled={uploadingImage}
                   >
-                    <label className="cursor-pointer">
+                    <label className="cursor-pointer gap-1.5">
                       {uploadingImage ? (
                         <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                       ) : (
                         <ImagePlus className="size-4" aria-hidden="true" />
                       )}
-                      <span>{vi ? "Tải ảnh" : "Upload"}</span>
+                      <span>
+                        {draft.prompt_image_url
+                          ? vi
+                            ? "Đổi ảnh"
+                            : "Change image"
+                          : vi
+                            ? "Thêm ảnh minh họa"
+                            : "Add image"}
+                      </span>
                       <input
                         type="file"
                         accept="image/png,image/jpeg,image/webp,image/gif"
@@ -1898,6 +1897,60 @@ export function QuestionEditorView({ setId }: { setId: string }) {
                     </label>
                   </Button>
                 </div>
+
+                {draft.prompt_image_url && (
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted/20 p-2.5">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={draft.prompt_image_url}
+                      alt={vi ? "Ảnh minh họa câu hỏi" : "Question illustration preview"}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-20 max-w-[180px] rounded-md border border-border bg-background object-contain"
+                    />
+                    <div className="flex flex-col items-start gap-1">
+                      <span className="text-xs font-medium text-foreground">
+                        {vi ? "Đã đính kèm ảnh minh họa" : "Image attached"}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                        onClick={() =>
+                          setDraft((prev) => ({ ...prev, prompt_image_url: "" }))
+                        }
+                      >
+                        <Trash2 className="mr-1 size-3.5" aria-hidden="true" />
+                        {vi ? "Gỡ ảnh" : "Remove image"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                <details className="rounded-md border border-border/70 bg-muted/15 px-3 py-1.5">
+                  <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                    {draft.prompt_image_url
+                      ? vi
+                        ? "Xem / chỉnh sửa liên kết ảnh (URL)"
+                        : "View / edit image URL"
+                      : vi
+                        ? "Hoặc dán liên kết ảnh trực tiếp (URL)"
+                        : "Or paste an image URL directly"}
+                  </summary>
+                  <div className="pt-2 pb-1">
+                    <Input
+                      id="q-image-url"
+                      type="text"
+                      inputMode="url"
+                      placeholder="https://..."
+                      value={draft.prompt_image_url}
+                      onChange={(e) =>
+                        setDraft((prev) => ({ ...prev, prompt_image_url: e.target.value }))
+                      }
+                    />
+                  </div>
+                </details>
               </div>
 
               {/* Structured V3 Type-Specific Fields (All 13 Types) */}

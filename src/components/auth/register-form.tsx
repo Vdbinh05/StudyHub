@@ -7,8 +7,10 @@ import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   getFriendlyErrorMessage,
+  isServiceUnavailableError,
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
+import type { Locale } from "@/types/domain";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -27,6 +29,147 @@ const GOOGLE_OAUTH_ENABLED =
 
 // Aligned strictly with `profiles` DB CHECK constraint and `usernameSchema`
 const USERNAME_PATTERN = /^[a-z0-9_]{3,30}$/i;
+
+type RegisterErrorState =
+  | { kind: "service_unavailable" }
+  | { kind: "auth_error"; error: unknown };
+
+function extractAuthErrorDetails(err: unknown): {
+  code: string;
+  message: string;
+  status: number | null;
+} {
+  if (typeof err === "object" && err !== null) {
+    const record = err as Record<string, unknown>;
+    const code = typeof record.code === "string" ? record.code.toLowerCase() : "";
+    const message =
+      typeof record.message === "string"
+        ? record.message
+        : err instanceof Error
+          ? err.message
+          : "";
+    const status = typeof record.status === "number" ? record.status : null;
+    return { code, message, status };
+  }
+  if (typeof err === "string") {
+    return { code: "", message: err, status: null };
+  }
+  return { code: "", message: "", status: null };
+}
+
+/**
+ * Translates raw English Supabase Auth / GoTrue sign-up errors into calm,
+ * student-friendly Vietnamese or English messages.
+ */
+function mapRegisterAuthError(
+  err: unknown,
+  locale: Locale,
+  fallback: string,
+): string {
+  if (isServiceUnavailableError(err)) {
+    return getFriendlyErrorMessage(err, locale, fallback);
+  }
+
+  const vi = locale === "vi";
+  const { code, message, status } = extractAuthErrorDetails(err);
+  const msg = message.toLowerCase();
+
+  if (
+    code === "email_address_invalid" ||
+    (code === "validation_failed" && msg.includes("email")) ||
+    (msg.includes("email") &&
+      (msg.includes("invalid") ||
+        msg.includes("validate") ||
+        msg.includes("format") ||
+        msg.includes("not allowed")))
+  ) {
+    return vi
+      ? "Địa chỉ email không hợp lệ hoặc không được chấp nhận. Vui lòng kiểm tra lại."
+      : "This email address is invalid or not accepted. Please check and try another.";
+  }
+
+  if (
+    code === "user_already_exists" ||
+    code === "email_exists" ||
+    msg.includes("already registered") ||
+    msg.includes("already been registered") ||
+    msg.includes("already exists")
+  ) {
+    return vi
+      ? "Email này đã được đăng ký. Vui lòng đăng nhập hoặc dùng email khác."
+      : "This email is already registered. Please sign in or use a different email.";
+  }
+
+  if (
+    code === "weak_password" ||
+    msg.includes("password should be") ||
+    msg.includes("weak password") ||
+    msg.includes("password is too short")
+  ) {
+    return vi
+      ? "Mật khẩu chưa đáp ứng yêu cầu bảo mật. Vui lòng dùng ít nhất 8 ký tự."
+      : "Password does not meet security requirements. Please use at least 8 characters.";
+  }
+
+  if (
+    status === 429 ||
+    code === "over_email_send_rate_limit" ||
+    code === "over_request_rate_limit" ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests") ||
+    msg.includes("only request this after")
+  ) {
+    return vi
+      ? "Bạn thao tác quá nhanh. Vui lòng đợi một lát rồi thử lại."
+      : "Too many attempts. Please wait a moment and try again.";
+  }
+
+  if (
+    code === "signup_disabled" ||
+    code === "email_provider_disabled" ||
+    msg.includes("signups not allowed") ||
+    msg.includes("signup is disabled")
+  ) {
+    return vi
+      ? "Tính năng đăng ký hiện đang tạm khóa. Vui lòng thử lại sau."
+      : "New registrations are currently unavailable. Please try again later.";
+  }
+
+  if (
+    code === "provider_disabled" ||
+    msg.includes("provider is not enabled") ||
+    msg.includes("unsupported provider")
+  ) {
+    return vi
+      ? "Phương thức đăng nhập này hiện chưa được kích hoạt. Vui lòng dùng email và mật khẩu."
+      : "This sign-in method is not enabled yet. Please continue with email and password.";
+  }
+
+  if (
+    msg.includes("database error saving new user") ||
+    msg.includes("duplicate key") ||
+    msg.includes("profiles_username")
+  ) {
+    return vi
+      ? "Không thể hoàn tất đăng ký — tên người dùng có thể đã tồn tại. Vui lòng thử tên người dùng khác."
+      : "Could not finish creating your account — that username may already be taken. Please try another username.";
+  }
+
+  if (
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("load failed") ||
+    msg.includes("network request failed")
+  ) {
+    return vi
+      ? "Không thể kết nối đến máy chủ. Vui lòng kiểm tra mạng và thử lại."
+      : "Unable to reach the server. Please check your connection and try again.";
+  }
+
+  return vi
+    ? "Không thể tạo tài khoản. Vui lòng kiểm tra lại thông tin và thử lại."
+    : fallback || "Could not create your account. Please check your details and try again.";
+}
 
 export function RegisterForm() {
   const { locale, t } = useI18n();
@@ -48,8 +191,21 @@ export function RegisterForm() {
   const [submitted, setSubmitted] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [oauthLoading, setOauthLoading] = React.useState(false);
-  const [formError, setFormError] = React.useState<string | null>(null);
+  const [formErrorState, setFormErrorState] =
+    React.useState<RegisterErrorState | null>(null);
   const [verificationSent, setVerificationSent] = React.useState(false);
+
+  const formError = React.useMemo(() => {
+    if (!formErrorState) return null;
+    if (formErrorState.kind === "service_unavailable") {
+      return t("common.serviceUnavailableDesc");
+    }
+    return mapRegisterAuthError(
+      formErrorState.error,
+      locale,
+      t("common.errorGeneric"),
+    );
+  }, [formErrorState, locale, t]);
 
   const displayNameRef = React.useRef<HTMLInputElement>(null);
   const usernameRef = React.useRef<HTMLInputElement>(null);
@@ -73,7 +229,7 @@ export function RegisterForm() {
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitted(true);
-    setFormError(null);
+    setFormErrorState(null);
 
     if (displayName.trim().length < 2) {
       displayNameRef.current?.focus();
@@ -97,7 +253,7 @@ export function RegisterForm() {
       const { tryCreateClient } = await import("@/lib/supabase/client");
       const supabase = tryCreateClient();
       if (!supabase) {
-        setFormError(t("common.serviceUnavailableDesc"));
+        setFormErrorState({ kind: "service_unavailable" });
         return;
       }
 
@@ -115,7 +271,7 @@ export function RegisterForm() {
       });
 
       if (error) {
-        setFormError(getFriendlyErrorMessage(error, locale));
+        setFormErrorState({ kind: "auth_error", error });
         return;
       }
 
@@ -129,20 +285,20 @@ export function RegisterForm() {
         setVerificationSent(true);
       }
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
+      setFormErrorState({ kind: "auth_error", error: err });
     } finally {
       setLoading(false);
     }
   };
 
   const handleGoogleSignUp = async () => {
-    setFormError(null);
+    setFormErrorState(null);
     setOauthLoading(true);
     try {
       const { tryCreateClient } = await import("@/lib/supabase/client");
       const supabase = tryCreateClient();
       if (!supabase) {
-        setFormError(t("common.serviceUnavailableDesc"));
+        setFormErrorState({ kind: "service_unavailable" });
         setOauthLoading(false);
         return;
       }
@@ -154,11 +310,11 @@ export function RegisterForm() {
         },
       });
       if (error) {
-        setFormError(getFriendlyErrorMessage(error, locale));
+        setFormErrorState({ kind: "auth_error", error });
         setOauthLoading(false);
       }
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
+      setFormErrorState({ kind: "auth_error", error: err });
       setOauthLoading(false);
     }
   };

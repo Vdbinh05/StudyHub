@@ -98,7 +98,9 @@ const OfflineDownloadButton = dynamic(
     ),
   {
     ssr: false,
-    loading: () => <Skeleton className="h-9 w-28 rounded-md" />,
+    loading: () => (
+      <Skeleton className="h-11 w-full rounded-md sm:h-9 sm:w-48" />
+    ),
   },
 );
 
@@ -435,18 +437,21 @@ export function StudySetHub({ setId }: { setId: string }) {
     Boolean(debouncedSearch) || chapterFilter !== "all" || starredOnly;
   const totalQuestionsMatched = questionsQuery.data?.total ?? 0;
 
+  const rawChapters = setQuery.data?.chapters;
   const chapters = React.useMemo(() => {
-    const fromSet = setQuery.data?.chapters ?? [];
     const discovered = new Set<string>();
-    for (const ch of fromSet) {
-      const name = typeof ch === "string" ? ch : ch.name;
-      if (name) discovered.add(name);
+    if (Array.isArray(rawChapters)) {
+      for (const ch of rawChapters) {
+        const name = typeof ch === "string" ? ch : ch.name;
+        if (name) discovered.add(name);
+      }
+      return Array.from(discovered);
     }
     for (const q of questions) {
       if (q.chapter) discovered.add(q.chapter);
     }
     return Array.from(discovered);
-  }, [setQuery.data?.chapters, questions]);
+  }, [rawChapters, questions]);
 
   // Deterministic full-bank mode compatibility from `question_type_counts` + loaded sample
   const compatibility = React.useMemo(() => {
@@ -581,18 +586,57 @@ export function StudySetHub({ setId }: { setId: string }) {
 
   if (setQuery.isLoading) {
     return (
-      <div className="space-y-5">
-        <div className="space-y-2">
-          <Skeleton className="h-4 w-36" />
-          <Skeleton className="h-8 w-80 max-w-full" />
-          <Skeleton className="h-4 w-56" />
-        </div>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
-          ))}
-        </div>
-        <Skeleton className="h-72 rounded-xl" />
+      <div className="space-y-5" aria-busy="true">
+        {/* Mirrors rendered Study-First hero header + mobile 2-row / desktop inline action bar */}
+        <header className="space-y-3">
+          <Skeleton className="h-4 w-40" />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 flex-1 space-y-2">
+              <Skeleton className="h-7 w-72 max-w-full sm:h-8" />
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <Skeleton className="h-5 w-20 rounded-md" />
+                <Skeleton className="h-5 w-16 rounded-md" />
+                <Skeleton className="h-4 w-28" />
+              </div>
+            </div>
+            <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:shrink-0 sm:items-center">
+              <Skeleton className="h-11 w-full rounded-md sm:h-9 sm:w-24" />
+              <Skeleton className="h-11 w-full rounded-md sm:h-9 sm:w-24" />
+              <Skeleton className="col-span-2 h-11 w-full rounded-md sm:col-span-1 sm:h-9 sm:w-48" />
+            </div>
+          </div>
+        </header>
+
+        {/* Mirrors 4 Core Modes section + secondary disclosure bar */}
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-11 w-24 rounded-md sm:h-9" />
+          </div>
+          <div className="grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-[6.75rem] rounded-xl" />
+            ))}
+          </div>
+          <Skeleton className="h-11 w-full rounded-xl" />
+        </section>
+
+        {/* Mirrors Question Bank heading, filter controls, and preview list */}
+        <section className="space-y-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Skeleton className="h-6 w-44" />
+            <div className="flex flex-wrap items-center gap-2">
+              <Skeleton className="h-11 w-full rounded-md sm:h-9 sm:w-56" />
+              <Skeleton className="h-11 w-28 rounded-md sm:h-9" />
+              <Skeleton className="h-11 w-28 rounded-md sm:h-9" />
+            </div>
+          </div>
+          <div className="min-h-[28rem] space-y-3">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-28 w-full rounded-xl" />
+            ))}
+          </div>
+        </section>
       </div>
     );
   }
@@ -827,10 +871,15 @@ export function StudySetHub({ setId }: { setId: string }) {
             </div>
           </div>
 
-          {/* 3 clean labeled secondary controls: Edit + Offline Download + Labeled Actions Menu */}
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* 3 clean labeled secondary controls: stable 2-row mobile grid / inline desktop (zero CLS on OfflineDownloadButton load) */}
+          <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:shrink-0 sm:flex-wrap sm:items-center">
             {canEdit && (
-              <Button size="sm" variant="outline" asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                asChild
+                className="min-h-11 w-full sm:min-h-9 sm:w-auto"
+              >
                 <Link href={`/sets/${setId}/edit`} prefetch={false}>
                   <Edit3 className="size-4" aria-hidden="true" />
                   <span>{t("common.edit")}</span>
@@ -838,22 +887,15 @@ export function StudySetHub({ setId }: { setId: string }) {
               </Button>
             )}
 
-            <OfflineDownloadButton
-              setId={setId}
-              setTitle={studySet.title}
-              chapters={chapters}
-              questionCount={studySet.question_count}
-              estimatedMediaCount={compatibility.estimatedMediaCount}
-              hasRequiredMedia={compatibility.hasRequiredMedia}
-              variant="outline"
-              size="sm"
-            />
-
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   size="sm"
                   variant="outline"
+                  className={cn(
+                    "min-h-11 w-full sm:order-3 sm:min-h-9 sm:w-auto",
+                    !canEdit && "col-span-2 sm:col-span-1",
+                  )}
                   aria-label={vi ? "Thao tác khác cho học phần" : "More study set actions"}
                 >
                   <MoreHorizontal className="size-4" aria-hidden="true" />
@@ -959,6 +1001,20 @@ export function StudySetHub({ setId }: { setId: string }) {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+
+            <div className="col-span-2 sm:order-2 sm:col-span-1">
+              <OfflineDownloadButton
+                setId={setId}
+                setTitle={studySet.title}
+                chapters={chapters}
+                questionCount={studySet.question_count}
+                estimatedMediaCount={compatibility.estimatedMediaCount}
+                hasRequiredMedia={compatibility.hasRequiredMedia}
+                variant="outline"
+                size="sm"
+                className="min-h-11 w-full sm:min-h-9 sm:w-auto"
+              />
+            </div>
           </div>
         </div>
       </header>
@@ -1002,7 +1058,7 @@ export function StudySetHub({ setId }: { setId: string }) {
           </h2>
 
           {primaryStudyHref && checkpoints.length === 0 && (
-            <Button size="sm" asChild>
+            <Button size="sm" asChild className="min-h-11 sm:min-h-9">
               <Link href={primaryStudyHref} prefetch={false}>
                 <Play className="size-3.5" aria-hidden="true" />
                 <span>{vi ? "Học ngay" : "Study now"}</span>
@@ -1048,7 +1104,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                       type="button"
                       disabled
                       title={mode.disabledReason}
-                      className="border-border bg-card flex min-h-22 flex-col justify-between gap-2 rounded-xl border p-3.5 text-left opacity-55 sm:p-4"
+                      className="border-border bg-card flex min-h-[6.75rem] flex-col justify-between gap-2 rounded-xl border p-3.5 text-left opacity-55 sm:p-4"
                     >
                       <div className="bg-muted text-muted-foreground flex size-8 items-center justify-center rounded-lg">
                         <Icon className="size-4" aria-hidden="true" />
@@ -1070,7 +1126,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                     key={mode.id}
                     href={mode.href}
                     prefetch={false}
-                    className="border-border bg-card hover:border-primary/50 hover:bg-accent/40 group flex min-h-22 flex-col justify-between gap-2 rounded-xl border p-3.5 transition-colors sm:p-4"
+                    className="border-border bg-card hover:border-primary/50 hover:bg-accent/40 group flex min-h-[6.75rem] flex-col justify-between gap-2 rounded-xl border p-3.5 transition-colors sm:p-4"
                   >
                     <div className="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-lg">
                       <Icon className="size-4" aria-hidden="true" />
@@ -1216,7 +1272,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder={vi ? "Tìm trong câu hỏi..." : "Search questions..."}
                 aria-label={vi ? "Tìm trong câu hỏi" : "Search questions"}
-                className="h-9 pl-9"
+                className="min-h-11 pl-9 sm:h-9 sm:min-h-9"
               />
             </search>
 
@@ -1229,7 +1285,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                 }}
               >
                 <SelectTrigger
-                  className="h-9 min-w-36 flex-1 sm:w-44 sm:flex-none"
+                  className="min-h-11 min-w-36 flex-1 sm:h-9 sm:min-h-9 sm:w-44 sm:flex-none"
                   aria-label={vi ? "Lọc theo chương" : "Filter chapter"}
                 >
                   <SelectValue />
@@ -1250,6 +1306,7 @@ export function StudySetHub({ setId }: { setId: string }) {
             <Button
               size="sm"
               variant={starredOnly ? "secondary" : "outline"}
+              className="min-h-11 sm:min-h-9"
               onClick={() => {
                 setStarredOnly((prev) => !prev);
                 setPage(1);
@@ -1269,6 +1326,7 @@ export function StudySetHub({ setId }: { setId: string }) {
             <Button
               size="sm"
               variant="outline"
+              className="min-h-11 sm:min-h-9"
               onClick={() => setShowAnswers((prev) => !prev)}
               aria-pressed={showAnswers}
             >
@@ -1290,13 +1348,14 @@ export function StudySetHub({ setId }: { setId: string }) {
           </div>
         </div>
 
-        {questionsQuery.isLoading ? (
-          <div className="space-y-3">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-28 w-full rounded-xl" />
-            ))}
-          </div>
-        ) : questionsQuery.error ? (
+        <div className={cn(hasQuestions && "min-h-[28rem]")}>
+          {questionsQuery.isLoading ? (
+            <div className="space-y-3" aria-busy="true">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-28 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : questionsQuery.error ? (
           <EmptyState
             icon={AlertCircle}
             title={vi ? "Không thể tải danh sách câu hỏi" : "Unable to load questions"}
@@ -1569,7 +1628,8 @@ export function StudySetHub({ setId }: { setId: string }) {
               )}
             </CardContent>
           </Card>
-        )}
+          )}
+        </div>
       </section>
 
       {/* Lazy-Loaded Modals — mounted strictly on demand */}

@@ -428,55 +428,112 @@ export function V3QuestionTypeFields({
 
       {/* Listening Section */}
       {draft.question_type === "listening" &&
-        draft.type_payload?.type === "listening" && (
+        draft.type_payload?.type === "listening" && (() => {
+          const activeAudioUrl = draft.audio_url || draft.type_payload.audio_url || "";
+          return (
           <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="min-w-[200px] flex-1 space-y-1.5">
-                <Label>
-                  {vi ? "Âm thanh (MP3/WAV/M4A/WebM/OGG ≤ 10MB)" : "Audio URL (≤ 10MB)"}
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label htmlFor="q-listening-audio-url">
+                  {vi ? "Âm thanh (MP3/WAV/M4A/WebM/OGG ≤ 10MB)" : "Audio (≤ 10MB)"}
                 </Label>
-                <Input
-                  value={draft.audio_url || draft.type_payload.audio_url || ""}
-                  placeholder="/api/uploads/signed-url?path=..."
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setDraft((prev) => ({
-                      ...prev,
-                      audio_url: val,
-                      type_payload:
-                        prev.type_payload?.type === "listening"
-                          ? { ...prev.type_payload, audio_url: val }
-                          : prev.type_payload,
-                    }));
-                  }}
-                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  asChild
+                  disabled={uploadingKey === "audio"}
+                >
+                  <label className="cursor-pointer gap-1.5">
+                    {uploadingKey === "audio" ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Volume2 className="size-4" aria-hidden="true" />
+                    )}
+                    <span>
+                      {activeAudioUrl
+                        ? vi
+                          ? "Đổi âm thanh"
+                          : "Change audio"
+                        : vi
+                          ? "Tải âm thanh"
+                          : "Upload Audio"}
+                    </span>
+                    <input
+                      type="file"
+                      accept="audio/mpeg,audio/mp3,audio/wav,audio/mp4,audio/x-m4a,audio/webm,audio/ogg"
+                      className="sr-only"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        void uploadAudioFile(f);
+                      }}
+                    />
+                  </label>
+                </Button>
               </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                asChild
-                disabled={uploadingKey === "audio"}
-              >
-                <label className="cursor-pointer gap-1.5">
-                  {uploadingKey === "audio" ? (
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Volume2 className="size-4" aria-hidden="true" />
-                  )}
-                  <span>{vi ? "Tải âm thanh" : "Upload Audio"}</span>
-                  <input
-                    type="file"
-                    accept="audio/mpeg,audio/mp3,audio/wav,audio/mp4,audio/x-m4a,audio/webm,audio/ogg"
-                    className="sr-only"
+
+              {activeAudioUrl && (
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-2">
+                  <audio
+                    controls
+                    preload="none"
+                    src={activeAudioUrl}
+                    className="h-9 max-w-full flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 px-2 text-xs text-destructive hover:text-destructive"
+                    onClick={() =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        audio_url: "",
+                        type_payload:
+                          prev.type_payload?.type === "listening"
+                            ? { ...prev.type_payload, audio_url: "" }
+                            : prev.type_payload,
+                      }))
+                    }
+                  >
+                    <Trash2 className="mr-1 size-3.5" aria-hidden="true" />
+                    {vi ? "Gỡ" : "Remove"}
+                  </Button>
+                </div>
+              )}
+
+              <details className="rounded-md border border-border/70 bg-background/60 px-3 py-1.5">
+                <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                  {activeAudioUrl
+                    ? vi
+                      ? "Xem / chỉnh sửa liên kết âm thanh (URL)"
+                      : "View / edit audio URL"
+                    : vi
+                      ? "Hoặc dán liên kết âm thanh trực tiếp (URL)"
+                      : "Or paste an audio URL directly"}
+                </summary>
+                <div className="pt-2 pb-1">
+                  <Input
+                    id="q-listening-audio-url"
+                    type="text"
+                    inputMode="url"
+                    value={activeAudioUrl}
+                    placeholder="https://..."
                     onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      e.target.value = "";
-                      void uploadAudioFile(f);
+                      const val = e.target.value;
+                      setDraft((prev) => ({
+                        ...prev,
+                        audio_url: val,
+                        type_payload:
+                          prev.type_payload?.type === "listening"
+                            ? { ...prev.type_payload, audio_url: val }
+                            : prev.type_payload,
+                      }));
                     }}
                   />
-                </label>
-              </Button>
+                </div>
+              </details>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -550,7 +607,8 @@ export function V3QuestionTypeFields({
               />
             </div>
           </div>
-        )}
+          );
+        })()}
 
       {/* Fill in the Blank Section */}
       {draft.question_type === "fill_in_blank" &&
@@ -1289,6 +1347,8 @@ export function V3QuestionTypeFields({
                       <img
                         src={opt.image_url}
                         alt={opt.image_alt || `Option ${letter}`}
+                        loading="lazy"
+                        decoding="async"
                         className="h-12 max-w-[120px] rounded border border-border object-contain bg-background"
                       />
                       <Button
