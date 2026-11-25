@@ -12,8 +12,9 @@
  *   and safe reference-counted deletion.
  */
 
+import { resolveSafeMediaUrl } from "@/lib/media/urls";
 import type { StudySet } from "@/types/domain";
-import type { DiagramSet, SharedPassage } from "@/types/v3";
+import type { DiagramSet, QuestionMediaAttachment, SharedPassage } from "@/types/v3";
 import {
   deleteDownloadedSetRecords,
   getDownloadedSet,
@@ -61,6 +62,45 @@ function isSafeDownloadableMediaUrl(url: string | null | undefined): url is stri
   }
 }
 
+function resolveAttachmentDownloadUrl(att: QuestionMediaAttachment): string | null {
+  const safe = resolveSafeMediaUrl({
+    url: att.url,
+    proxy_url: att.proxy_url ?? att.media?.proxy_url,
+    storage_path: att.storage_path ?? att.media?.storage_path,
+  });
+  return isSafeDownloadableMediaUrl(safe) ? safe : null;
+}
+
+function isAudioAttachment(att: QuestionMediaAttachment): boolean {
+  return (
+    att.role === "audio" ||
+    att.media?.kind === "audio" ||
+    Boolean(att.mime_type?.toLowerCase().startsWith("audio/")) ||
+    Boolean(att.media?.mime_type?.toLowerCase().startsWith("audio/"))
+  );
+}
+
+function attachmentReasonForQuestion(
+  att: QuestionMediaAttachment,
+  isAudio: boolean,
+): OfflineMediaRequirement["reason"] {
+  if (isAudio) return "listening_audio";
+  switch (att.role) {
+    case "back":
+      return "back_image";
+    case "explanation":
+      return "explanation_image";
+    case "hint":
+      return "hint_image";
+    case "option":
+      return "option_image";
+    case "diagram_base":
+      return "diagram_base";
+    default:
+      return "prompt_image";
+  }
+}
+
 function estimateUtf8Bytes(value: unknown): number {
   const json = JSON.stringify(value);
   if (typeof TextEncoder !== "undefined") {
@@ -88,10 +128,21 @@ export function analyzeSetMediaRequirements(
     mediaId?: string | null,
     knownBytes?: number | null,
   ): void => {
-    if (!isSafeDownloadableMediaUrl(url)) return;
-    if (mediaByUrl.has(url)) return;
-    mediaByUrl.set(url, {
-      url,
+    const resolved =
+      resolveSafeMediaUrl({ url }) ?? (typeof url === "string" ? url.trim() : null);
+    if (!isSafeDownloadableMediaUrl(resolved)) return;
+    const existing = mediaByUrl.get(resolved);
+    if (existing) {
+      if (!existing.media_id && mediaId) {
+        existing.media_id = mediaId;
+      }
+      if (typeof knownBytes === "number" && knownBytes > 0) {
+        existing.estimatedBytes = knownBytes;
+      }
+      return;
+    }
+    mediaByUrl.set(resolved, {
+      url: resolved,
       media_id: mediaId ?? null,
       kind,
       reason,
@@ -122,6 +173,22 @@ export function analyzeSetMediaRequirements(
       addMedia(q.audio_url, "audio", "listening_audio", q.audio_media_id);
     }
 
+    for (const att of q.media_attachments ?? []) {
+      const attUrl = resolveAttachmentDownloadUrl(att);
+      if (!attUrl) continue;
+      const isAudio = isAudioAttachment(att);
+      addMedia(
+        attUrl,
+        isAudio ? "audio" : "image",
+        attachmentReasonForQuestion(att, isAudio),
+        att.media_id || null,
+        att.media?.size_bytes,
+      );
+      if (!isAudio && att.role === "prompt" && promptEmpty) {
+        blockingReasonsSet.add("image_only_question");
+      }
+    }
+
     if (q.question_type === "image_choice") {
       blockingReasonsSet.add("image_choice");
     }
@@ -136,6 +203,21 @@ export function analyzeSetMediaRequirements(
       if (opt.image_url) {
         addMedia(opt.image_url, "image", "option_image", opt.media_id);
         if (opt.content.trim().length === 0) {
+          blockingReasonsSet.add("image_only_option");
+        }
+      }
+      for (const att of opt.media_attachments ?? []) {
+        const attUrl = resolveAttachmentDownloadUrl(att);
+        if (!attUrl) continue;
+        const isAudio = isAudioAttachment(att);
+        addMedia(
+          attUrl,
+          isAudio ? "audio" : "image",
+          isAudio ? "listening_audio" : "option_image",
+          att.media_id || opt.media_id || null,
+          att.media?.size_bytes,
+        );
+        if (!isAudio && opt.content.trim().length === 0) {
           blockingReasonsSet.add("image_only_option");
         }
       }

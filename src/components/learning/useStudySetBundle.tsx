@@ -10,16 +10,48 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
 import {
+  fetchAccessibleSets,
   fetchStudySet,
   fetchStudySetQuestionsPage,
   toggleStarQuestion,
   type HydratedStudyQuestion,
 } from "@/lib/learning/api-client";
-import type { Question, StudySet, UserQuestionProgress } from "@/types/domain";
+import type {
+  MemberRole,
+  Question,
+  StudySet,
+  UserQuestionProgress,
+} from "@/types/domain";
 import { lText } from "./learning-copy";
 
+export type StudySetWithAccess = StudySet & {
+  can_edit?: boolean;
+  role?: MemberRole | "public_viewer";
+  member_role?: MemberRole;
+  is_owner?: boolean;
+};
+
+/**
+ * Determine whether the current user is allowed to edit questions in a study set.
+ * Trusts explicit server-authoritative `can_edit` / `role` / `member_role` flags first,
+ * falling back to strict `owner_id === authenticatedUserId` match only when role metadata is absent.
+ * NEVER grants edit rights to read-only viewers or public shares.
+ */
+export function resolveCanEditStudySet(
+  studySet: StudySetWithAccess | null | undefined,
+  authenticatedUserId?: string | null,
+): boolean {
+  if (!studySet) return false;
+  if (typeof studySet.can_edit === "boolean") return studySet.can_edit;
+  if (typeof studySet.is_owner === "boolean" && studySet.is_owner) return true;
+  const role = studySet.role ?? studySet.member_role;
+  if (role === "owner" || role === "editor") return true;
+  if (role === "viewer" || role === "public_viewer") return false;
+  return Boolean(authenticatedUserId && studySet.owner_id === authenticatedUserId);
+}
+
 export interface StudySetBundle {
-  studySet: StudySet;
+  studySet: StudySetWithAccess;
   questions: Question[];
   progressMap: Map<string, UserQuestionProgress>;
   starredIds: Set<string>;
@@ -151,13 +183,28 @@ function mergeStreamedPageIntoBundle(
   };
 }
 
-function extractCachedStudySet(raw: unknown): StudySet | null {
+function extractCachedStudySet(raw: unknown): StudySetWithAccess | null {
   if (!raw || typeof raw !== "object") return null;
-  if ("set" in raw && raw.set && typeof raw.set === "object" && "id" in raw.set && "title" in raw.set) {
-    return raw.set as StudySet;
+  if (
+    "set" in raw &&
+    raw.set &&
+    typeof raw.set === "object" &&
+    "id" in raw.set &&
+    "title" in raw.set
+  ) {
+    const wrapped = raw as {
+      set: StudySetWithAccess;
+      role?: MemberRole | "public_viewer";
+      can_edit?: boolean;
+    };
+    return {
+      ...wrapped.set,
+      role: wrapped.role ?? wrapped.set.role,
+      can_edit: wrapped.can_edit ?? wrapped.set.can_edit,
+    };
   }
   if ("id" in raw && "title" in raw) {
-    return raw as StudySet;
+    return raw as StudySetWithAccess;
   }
   return null;
 }
@@ -388,10 +435,109 @@ export function useStudySetBundle(
     [maxQuestions, queryClient, setId],
   );
 
+  /**
+   * Update a single question in-place inside React Query cache after contextual editing
+   * (V32-053) without triggering a full refetch or resetting active study sessions.
+   */
+  const updateLocalQuestion = React.useCallback(
+    (updated: Question) => {
+      queryClient.setQueryData<StudySetBundle>(
+        ["study-set-bundle", setId, maxQuestions],
+        (prev) => {
+          if (!prev) return prev;
+          let replaced = false;
+          const nextQuestions = prev.questions.map((q) => {
+            if (q.id !== updated.id) return q;
+            replaced = true;
+            return {
+              ...q,
+              ...updated,
+              is_starred: updated.is_starred ?? q.is_starred,
+              progress: updated.progress ?? q.progress,
+            };
+          });
+          if (!replaced) return prev;
+          const nextChapters = new Set(prev.chapters);
+          if (updated.chapter && updated.chapter.trim()) {
+            nextChapters.add(updated.chapter.trim());
+          }
+          return {
+            ...prev,
+            questions: nextQuestions,
+            chapters: Array.from(nextChapters),
+          };
+        },
+      );
+    },
+    [maxQuestions, queryClient, setId],
+  );
+
+  const activeUserId = useAuthenticatedUserId();
+  const canEdit = React.useMemo(
+    () => resolveCanEditStudySet(query.data?.studySet, activeUserId),
+    [query.data?.studySet, activeUserId],
+  );
+
   return {
     ...query,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
+  };
+}
+
+/**
+ * Multi-set RBAC helper for cross-set views (`CustomPracticeClient`, `ReviewMistakesClient`,
+ * `StarredQuestionsClient`, `ExamResultsClient`).
+ * Computes the set of study_set IDs the authenticated user owns OR has `editor` role on.
+ */
+export function useEditableSetIds(enabled = true) {
+  const activeUserId = useAuthenticatedUserId();
+
+  const editableQuery = useQuery<Set<string>>({
+    queryKey: ["editable-study-set-ids", activeUserId ?? "anon"],
+    enabled: enabled && Boolean(activeUserId),
+    staleTime: 60_000,
+    queryFn: async () => {
+      const editable = new Set<string>();
+      const [allSets, sharedRes] = await Promise.all([
+        fetchAccessibleSets(10).catch(() => [] as StudySetWithAccess[]),
+        fetch("/api/sets?scope=shared&page=1&pageSize=100")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+      ]);
+
+      for (const s of allSets as StudySetWithAccess[]) {
+        if (resolveCanEditStudySet(s, activeUserId)) {
+          editable.add(s.id);
+        }
+      }
+
+      const sharedItems = Array.isArray(sharedRes?.data)
+        ? (sharedRes.data as StudySetWithAccess[])
+        : [];
+      for (const s of sharedItems) {
+        if (s.member_role === "editor" || s.member_role === "owner" || s.can_edit === true) {
+          editable.add(s.id);
+        }
+      }
+      return editable;
+    },
+  });
+
+  const canEditSet = React.useCallback(
+    (studySetId: string | null | undefined): boolean => {
+      if (!studySetId) return false;
+      return editableQuery.data?.has(studySetId) ?? false;
+    },
+    [editableQuery.data],
+  );
+
+  return {
+    editableSetIds: editableQuery.data,
+    canEditSet,
+    isLoading: editableQuery.isLoading,
   };
 }
 

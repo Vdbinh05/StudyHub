@@ -15,10 +15,9 @@ import {
   Settings2,
   Star,
   XCircle,
-  ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
-import { ImageLightbox } from "@/components/media/ImageLightbox";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +46,6 @@ import {
   createStudySession,
   deleteCheckpoint,
   isInteractiveControlTarget,
-  isSafeDisplayImageUrl,
   listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
@@ -55,6 +53,12 @@ import {
   upsertCheckpointKeepalive,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  getOptionDisplayItems,
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+  hasRenderableText,
+} from "@/lib/learning/media-helpers";
 import {
   formatCorrectAnswerDisplay,
   isMultiSelectChoiceQuestion,
@@ -90,11 +94,12 @@ import type {
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
 import { ResumeSessionBanner } from "./ResumeSessionBanner";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -173,8 +178,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     isError,
     error,
     refetch,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
   } = useStudySetBundle(setId);
 
   const initialFilterParam = searchParams.get("filter");
@@ -263,10 +270,9 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const [completedDurationSeconds, setCompletedDurationSeconds] =
     React.useState(1);
   const [navSheetOpen, setNavSheetOpen] = React.useState(false);
-  const [optionLightbox, setOptionLightbox] = React.useState<{
-    src: string;
-    alt: string;
-  } | null>(null);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
   const [resumedBanner, setResumedBanner] = React.useState<{
     currentIndex: number;
     totalItems: number;
@@ -1255,7 +1261,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
   // Keyboard shortcuts during active practice (guarded by shared modal/IME/shortcutsEnabled helper — V32-023)
   React.useEffect(() => {
-    if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
+    if (phase !== "active" || !currentItem || navSheetOpen || editingQuestionId) {
       return;
     }
 
@@ -1324,13 +1330,41 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     isCurrentMultiChoice,
     isCurrentStructuredV3,
     navSheetOpen,
-    optionLightbox,
+    editingQuestionId,
     phase,
     shortcutsEnabled,
     submitCurrentChoice,
     t,
     toggleStar,
   ]);
+
+  const handleContextualQuestionSaved = React.useCallback(
+    (savedQuestion: Question) => {
+      updateLocalQuestion(savedQuestion);
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.question.id !== savedQuestion.id) return item;
+          const updatedOpts = savedQuestion.options ?? [];
+          const existingOrder = new Map(
+            item.displayedOptions.map((o, idx) => [o.id, idx]),
+          );
+          const orderedOpts = [...updatedOpts].sort((a, b) => {
+            const ra = existingOrder.get(a.id);
+            const rb = existingOrder.get(b.id);
+            if (ra !== undefined && rb !== undefined) return ra - rb;
+            if (ra !== undefined) return -1;
+            if (rb !== undefined) return 1;
+            return a.position - b.position;
+          });
+          return {
+            question: savedQuestion,
+            displayedOptions: withOptionDisplayLabels(orderedOpts),
+          };
+        }),
+      );
+    },
+    [updateLocalQuestion],
+  );
 
   const practiceNavItems = React.useMemo<NavigatorQuestionItem[]>(() => {
     return items.map((item, idx) => {
@@ -1876,19 +1910,46 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                           </span>
                         </p>
                       </div>
-                      {item.question.explanation ||
-                      item.question.explanation_rich ? (
-                        <div className="rounded-md bg-secondary/60 p-2.5 text-xs text-muted-foreground">
-                          <strong className="text-foreground">
-                            {t("study.explanation")}:{" "}
-                          </strong>
-                          <SafeRichText
-                            rich={item.question.explanation_rich}
-                            fallbackText={item.question.explanation}
-                            inline
-                          />
-                        </div>
-                      ) : null}
+                      {(() => {
+                        const wrongExpMedia = getQuestionExplanationDisplayItems(
+                          item.question,
+                          lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                        );
+                        if (
+                          !item.question.explanation &&
+                          !item.question.explanation_rich &&
+                          wrongExpMedia.length === 0
+                        ) {
+                          return null;
+                        }
+                        return (
+                          <div className="space-y-2 rounded-md bg-secondary/60 p-2.5 text-xs text-muted-foreground">
+                            {item.question.explanation ||
+                            item.question.explanation_rich ? (
+                              <div>
+                                <strong className="text-foreground">
+                                  {t("study.explanation")}:{" "}
+                                </strong>
+                                <SafeRichText
+                                  rich={item.question.explanation_rich}
+                                  fallbackText={item.question.explanation}
+                                  inline
+                                />
+                              </div>
+                            ) : (
+                              <strong className="block text-foreground">
+                                {t("study.explanation")}:
+                              </strong>
+                            )}
+                            {wrongExpMedia.length > 0 ? (
+                              <MediaGallery
+                                items={wrongExpMedia}
+                                variant="compact"
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -2021,14 +2082,15 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                           fallbackText={currentItem.question.prompt}
                         />
                       </h2>
-                      {currentItem.question.prompt_image_url &&
-                      currentItem.question.question_type !== "image_hotspot" ? (
-                        <ZoomableImage
-                          src={currentItem.question.prompt_image_url}
-                          alt={lText(
-                            locale,
-                            "Hình ảnh câu hỏi",
-                            "Question illustration",
+                      {currentItem.question.question_type !== "image_hotspot" ? (
+                        <MediaGallery
+                          items={getQuestionPromptDisplayItems(
+                            currentItem.question,
+                            lText(
+                              locale,
+                              "Hình ảnh câu hỏi",
+                              "Question illustration",
+                            ),
                           )}
                         />
                       ) : null}
@@ -2100,12 +2162,12 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                               );
                             const isCorrectOpt = option.is_correct;
                             const submitted = currentAnswer.isSubmitted;
-                            const hasOptImage = isSafeDisplayImageUrl(
-                              option.image_url,
+                            const optionMediaItems = getOptionDisplayItems(option);
+                            const hasOptImage = optionMediaItems.length > 0;
+                            const hasOptText = hasRenderableText(
+                              option.content,
+                              option.content_rich,
                             );
-                            const hasOptText =
-                              option.content.trim().length > 0 ||
-                              Boolean(option.content_rich);
 
                             let stateStyle =
                               "border-border bg-card hover:bg-secondary/60 text-foreground";
@@ -2126,118 +2188,82 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             }
 
                             return (
-                              <div key={option.id} className="relative">
-                                <button
-                                  type="button"
-                                  role={isCurrentMultiChoice ? "checkbox" : "radio"}
-                                  aria-checked={isSelected}
-                                  disabled={submitted}
-                                  onClick={() => handleOptionClick(option.id)}
-                                  className={cn(
-                                    "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                                    stateStyle,
-                                  )}
-                                >
-                                  <div className="flex w-full items-start gap-3">
-                                    <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-current/25 text-xs font-semibold">
-                                      {option.displayLabel}
-                                    </span>
-                                    <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
-                                      {hasOptText ? (
-                                        <SafeRichText
-                                          rich={option.content_rich}
-                                          fallbackText={option.content}
-                                          inline
-                                        />
-                                      ) : hasOptImage ? (
-                                        <span className="text-xs text-muted-foreground">
-                                          {lText(
-                                            locale,
-                                            `Hình phương án ${option.displayLabel}`,
-                                            `Option ${option.displayLabel} image`,
-                                          )}
-                                        </span>
-                                      ) : null}
-                                    </div>
-                                    {submitted && isCorrectOpt ? (
-                                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
-                                        <CheckCircle2
-                                          className="size-4"
-                                          aria-hidden="true"
-                                        />
-                                        <span className="sr-only">
-                                          {t("study.correctAnswer")}
-                                        </span>
-                                      </span>
-                                    ) : null}
-                                    {submitted &&
-                                    isSelected &&
-                                    !isCorrectOpt ? (
-                                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
-                                        <XCircle
-                                          className="size-4"
-                                          aria-hidden="true"
-                                        />
-                                        <span className="sr-only">
-                                          {t("study.incorrect")}
-                                        </span>
+                              <div
+                                key={option.id}
+                                role={isCurrentMultiChoice ? "checkbox" : "radio"}
+                                aria-checked={isSelected}
+                                aria-disabled={submitted}
+                                tabIndex={submitted ? -1 : 0}
+                                onClick={() => {
+                                  if (!submitted) handleOptionClick(option.id);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (submitted) return;
+                                  if (e.target !== e.currentTarget) return;
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    handleOptionClick(option.id);
+                                  }
+                                }}
+                                className={cn(
+                                  "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                  submitted ? "cursor-default" : "cursor-pointer",
+                                  stateStyle,
+                                )}
+                              >
+                                <div className="flex w-full items-start gap-3">
+                                  <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-current/25 text-xs font-semibold">
+                                    {option.displayLabel}
+                                  </span>
+                                  <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
+                                    {hasOptText ? (
+                                      <SafeRichText
+                                        rich={option.content_rich}
+                                        fallbackText={option.content}
+                                        inline
+                                      />
+                                    ) : hasOptImage ? (
+                                      <span className="text-xs text-muted-foreground">
+                                        {lText(
+                                          locale,
+                                          `Hình phương án ${option.displayLabel}`,
+                                          `Option ${option.displayLabel} image`,
+                                        )}
                                       </span>
                                     ) : null}
                                   </div>
-
-                                  {hasOptImage ? (
-                                    <div className="w-full pt-1">
-                                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                                      <img
-                                        src={option.image_url ?? ""}
-                                        alt={
-                                          option.image_alt ||
-                                          option.content ||
-                                          lText(
-                                            locale,
-                                            `Hình phương án ${option.displayLabel}`,
-                                            `Option ${option.displayLabel} image`,
-                                          )
-                                        }
-                                        loading="lazy"
-                                        decoding="async"
-                                        className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
+                                  {submitted && isCorrectOpt ? (
+                                    <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
+                                      <CheckCircle2
+                                        className="size-4"
+                                        aria-hidden="true"
                                       />
-                                    </div>
+                                      <span className="sr-only">
+                                        {t("study.correctAnswer")}
+                                      </span>
+                                    </span>
                                   ) : null}
-                                </button>
+                                  {submitted &&
+                                  isSelected &&
+                                  !isCorrectOpt ? (
+                                    <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
+                                      <XCircle
+                                        className="size-4"
+                                        aria-hidden="true"
+                                      />
+                                      <span className="sr-only">
+                                        {t("study.incorrect")}
+                                      </span>
+                                    </span>
+                                  ) : null}
+                                </div>
 
                                 {hasOptImage ? (
-                                  <Button
-                                    type="button"
-                                    size="icon"
-                                    variant="secondary"
-                                    className="absolute right-2 bottom-2 size-8 opacity-90 shadow-xs"
-                                    aria-label={lText(
-                                      locale,
-                                      `Phóng to hình phương án ${option.displayLabel}`,
-                                      `Zoom option ${option.displayLabel} image`,
-                                    )}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setOptionLightbox({
-                                        src: option.image_url!,
-                                        alt:
-                                          option.image_alt ||
-                                          option.content ||
-                                          lText(
-                                            locale,
-                                            `Hình phương án ${option.displayLabel}`,
-                                            `Option ${option.displayLabel} image`,
-                                          ),
-                                      });
-                                    }}
-                                  >
-                                    <ZoomIn
-                                      className="size-3.5"
-                                      aria-hidden="true"
-                                    />
-                                  </Button>
+                                  <MediaGallery
+                                    items={optionMediaItems}
+                                    variant="option"
+                                    className="pt-1"
+                                  />
                                 ) : null}
                               </div>
                             );
@@ -2336,23 +2362,52 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             </span>
                           </div>
                         ) : null}
-                        {showExplanation &&
-                        (showExplanationOnCorrect || !currentAnswer.isCorrect) &&
-                        (currentItem.question.explanation ||
-                          currentItem.question.explanation_rich) ? (
-                          <div className="text-sm text-foreground/90">
-                            <strong>{t("study.explanation")}: </strong>
-                            <SafeRichText
-                              rich={currentItem.question.explanation_rich}
-                              fallbackText={currentItem.question.explanation}
-                              inline
-                            />
-                          </div>
-                        ) : null}
+                        {(() => {
+                          const expMediaItems = getQuestionExplanationDisplayItems(
+                            currentItem.question,
+                            lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                          );
+                          const hasExpContent =
+                            Boolean(currentItem.question.explanation) ||
+                            Boolean(currentItem.question.explanation_rich) ||
+                            expMediaItems.length > 0;
+                          if (
+                            !showExplanation ||
+                            (!showExplanationOnCorrect && currentAnswer.isCorrect) ||
+                            !hasExpContent
+                          ) {
+                            return null;
+                          }
+                          return (
+                            <div className="space-y-2 text-sm text-foreground/90">
+                              {currentItem.question.explanation ||
+                              currentItem.question.explanation_rich ? (
+                                <div>
+                                  <strong>{t("study.explanation")}: </strong>
+                                  <SafeRichText
+                                    rich={currentItem.question.explanation_rich}
+                                    fallbackText={currentItem.question.explanation}
+                                    inline
+                                  />
+                                </div>
+                              ) : (
+                                <strong className="block">
+                                  {t("study.explanation")}:
+                                </strong>
+                              )}
+                              {expMediaItems.length > 0 ? (
+                                <MediaGallery
+                                  items={expMediaItems}
+                                  variant="compact"
+                                />
+                              ) : null}
+                            </div>
+                          );
+                        })()}
                       </div>
                     ) : null}
 
-                    {/* Personal Notes & Question Error Report Bar */}
+                    {/* Personal Notes, Report & Contextual Edit Bar */}
                     <div className="border-t border-border/60 pt-3">
                       <QuestionNotesAndReportBar
                         key={currentItem.question.id}
@@ -2360,6 +2415,14 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                         questionId={currentItem.question.id}
                         showReportButton
                         compact
+                        canEdit={canEdit}
+                        onEditQuestion={() => {
+                          if (autoNextTimerRef.current) {
+                            clearTimeout(autoNextTimerRef.current);
+                            autoNextTimerRef.current = null;
+                          }
+                          setEditingQuestionId(currentItem.question.id);
+                        }}
                       />
                     </div>
                   </CardContent>
@@ -2399,13 +2462,21 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         </div>
       )}
 
-      <ImageLightbox
-        open={Boolean(optionLightbox)}
+      <ContextualQuestionEditorModal
+        open={Boolean(editingQuestionId) && canEdit}
         onOpenChange={(open) => {
-          if (!open) setOptionLightbox(null);
+          if (!open) setEditingQuestionId(null);
         }}
-        src={optionLightbox?.src}
-        alt={optionLightbox?.alt}
+        studySetId={setId}
+        questionId={editingQuestionId}
+        initialQuestion={
+          editingQuestionId
+            ? (items.find((it) => it.question.id === editingQuestionId)
+                ?.question ?? null)
+            : null
+        }
+        chapters={bundle.chapters}
+        onSaved={(saved) => handleContextualQuestionSaved(saved)}
       />
     </FocusModeShell>
   );

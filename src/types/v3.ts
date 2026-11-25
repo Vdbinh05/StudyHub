@@ -182,6 +182,38 @@ export interface ContentMediaRelation {
   media?: MediaAsset;
 }
 
+/**
+ * Canonical hydrated media attachment shape (V32-053) shared across
+ * Question, QuestionOption, ExamSnapshotQuestion, ExamSnapshotOption,
+ * UnifiedQuestionEditorModal, MediaGallery, PDF Export, and Offline Bundles.
+ */
+export interface QuestionMediaAttachment {
+  id?: string;
+  media_id: string;
+  url: string;
+  role: MediaAttachmentRole;
+  sort_order: number;
+  alt_text?: string | null;
+  caption?: string | null;
+  mime_type?: string | null;
+  width?: number | null;
+  height?: number | null;
+  /** Optional storage/join metadata when hydrated from DB or exam snapshots */
+  storage_path?: string | null;
+  proxy_url?: string | null;
+  entity_type?: MediaEntityType;
+  entity_id?: string;
+  created_at?: string;
+  media?: MediaAsset;
+}
+
+export type QuestionMediaFilter =
+  | "all"
+  | "has_images"
+  | "no_images"
+  | "missing_media"
+  | "needs_media_review";
+
 // ============================================================================
 // 4. Shared Reading Passages & Interactive Diagrams
 // ============================================================================

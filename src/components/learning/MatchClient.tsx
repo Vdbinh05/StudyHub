@@ -13,6 +13,7 @@ import {
   Trophy,
   XCircle,
 } from "lucide-react";
+import { useResilientImage } from "@/components/media/use-resilient-image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,6 +39,7 @@ import {
   type MatchBoardState,
 } from "@/lib/learning/match-engine";
 import { invalidateLearningCaches } from "@/lib/query-keys";
+import { resolveSafeMediaUrl } from "@/lib/media/urls";
 import { cn } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
@@ -47,6 +49,32 @@ import {
   StudyLoadingSkeleton,
   useStudySetBundle,
 } from "./useStudySetBundle";
+
+function MatchTileThumbnail({
+  url,
+  alt,
+}: {
+  url: string;
+  alt: string;
+}) {
+  const { resolvedSrc, hasError, handleLoad, handleError } =
+    useResilientImage(url);
+  if (hasError) return null;
+  return (
+    <div className="mt-1.5 flex w-full items-center justify-center">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={resolvedSrc}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        onLoad={handleLoad}
+        onError={handleError}
+        className="max-h-20 w-auto max-w-full rounded-md border border-border/60 object-contain"
+      />
+    </div>
+  );
+}
 
 interface MatchClientProps {
   setId: string;
@@ -490,7 +518,10 @@ export function MatchClient({ setId }: MatchClientProps) {
                     tile.side === "prompt"
                       ? lText(locale, "Câu hỏi", "Prompt")
                       : lText(locale, "Đáp án", "Answer")
-                  }: ${tile.text}${
+                  }: ${
+                    tile.text ||
+                    lText(locale, "Hình ảnh minh họa", "Image card")
+                  }${
                     isMatched
                       ? ` (${lText(locale, "Đã ghép", "Matched")})`
                       : ""
@@ -528,9 +559,27 @@ export function MatchClient({ setId }: MatchClientProps) {
                       <XCircle className="size-3.5" aria-hidden="true" />
                     ) : null}
                   </div>
-                  <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm font-medium leading-snug">
-                    {tile.text}
-                  </p>
+                  {(() => {
+                    const safeThumb = resolveSafeMediaUrl({
+                      url: tile.imageUrl,
+                    });
+                    return safeThumb ? (
+                      <MatchTileThumbnail
+                        url={safeThumb}
+                        alt={
+                          tile.text ||
+                          (tile.side === "prompt"
+                            ? lText(locale, "Hình câu hỏi", "Prompt image")
+                            : lText(locale, "Hình đáp án", "Answer image"))
+                        }
+                      />
+                    ) : null;
+                  })()}
+                  {tile.text ? (
+                    <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm font-medium leading-snug">
+                      {tile.text}
+                    </p>
+                  ) : null}
                 </motion.button>
               );
             })}

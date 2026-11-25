@@ -1,9 +1,16 @@
 import * as React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n";
 import { DEFAULT_USER_PREFERENCES } from "@/lib/preferences";
+import type { QuestionWithRelations } from "@/types/domain";
 import {
   DEFAULT_SHORTCUT_CATALOG,
   IME_COMPOSITION_WINDOW_MS,
@@ -19,7 +26,62 @@ import {
 
 const mockRouterReplace = vi.fn();
 const mockRouterRefresh = vi.fn();
+const mockApiFetch = vi.fn();
 let mockSearchParamsString = "";
+
+interface MockUnifiedEditorProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  studySetId: string;
+  questionId: string | null;
+  initialQuestion?: QuestionWithRelations | null;
+  questionIds?: string[];
+  currentIndex?: number;
+  onNavigateQuestion?: (nextQuestionId: string, nextIndex: number) => void;
+  onSaved?: (
+    savedQuestion: QuestionWithRelations,
+    action: "save" | "save_and_next",
+  ) => void;
+  chapters?: string[];
+}
+
+let lastMockEditorProps: MockUnifiedEditorProps | null = null;
+
+vi.mock("next/dynamic", () => ({
+  default: (loader: () => Promise<unknown>) => {
+    const src = loader.toString();
+    if (src.includes("UnifiedQuestionEditorModal")) {
+      return function MockUnifiedQuestionEditorModal(
+        props: MockUnifiedEditorProps,
+      ) {
+        lastMockEditorProps = props;
+        if (!props.open) return null;
+        return React.createElement(
+          "div",
+          {
+            "data-testid": "mock-unified-editor-modal",
+            "data-question-id": props.questionId ?? "",
+            "data-current-index": String(props.currentIndex ?? -1),
+          },
+          `Editor:${props.questionId ?? ""}`,
+        );
+      };
+    }
+    return function MockDynamicStub() {
+      return null;
+    };
+  },
+}));
+
+vi.mock("@/components/layout/api-client", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/layout/api-client")>();
+  return {
+    ...actual,
+    isSupabaseConfiguredClient: () => true,
+    apiFetch: (...args: unknown[]) => mockApiFetch(...args),
+  };
+});
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -78,7 +140,9 @@ afterEach(() => {
   mockSearchParamsString = "";
   mockRouterReplace.mockReset();
   mockRouterRefresh.mockReset();
+  mockApiFetch.mockReset();
   mockUpdatePreferences.mockClear();
+  lastMockEditorProps = null;
 });
 
 function makeKeyEvent(
@@ -540,6 +604,60 @@ describe("GlobalSearchDialog payload normalization", () => {
       }),
     ).toBe("/sets/set-1");
   });
+
+  it("deep-links server-authorized editable hits to /sets/[id]/edit?questionId= while keeping viewer hits on /sets/[id]?q= (V32-053)", async () => {
+    const { normalizeSearchPayload, resolveResultHref } = await import(
+      "@/components/layout/GlobalSearchDialog"
+    );
+
+    // Owner/editor live RPC returns `/sets/<setId>/edit?q=<questionId>`
+    const items = normalizeSearchPayload({
+      items: [
+        {
+          result_type: "question",
+          id: "q-42",
+          study_set_id: "set-1",
+          title: "Cloud base formula",
+          href: "/sets/set-1/edit?q=q-42",
+        },
+        {
+          result_type: "option",
+          id: "opt-9",
+          study_set_id: "set-1",
+          title: "Cumulonimbus",
+          href: "/sets/set-1/edit?q=q-42",
+        },
+        {
+          result_type: "note",
+          id: "note-7",
+          study_set_id: "set-1",
+          title: "Remember ISA lapse rate",
+          href: "/sets/set-1/edit?q=q-99",
+        },
+        {
+          result_type: "question",
+          id: "q-55",
+          study_set_id: "set-shared-view",
+          title: "Read-only shared question",
+          href: "/sets/set-shared-view?q=q-55",
+        },
+        {
+          result_type: "question",
+          id: "q-77",
+          study_set_id: "set-shared-view",
+          title: "Explicit non-editable hit",
+          href: "/sets/set-shared-view/edit?q=q-77",
+          can_edit: false,
+        },
+      ],
+    });
+
+    expect(resolveResultHref(items[0]!)).toBe("/sets/set-1/edit?questionId=q-42");
+    expect(resolveResultHref(items[1]!)).toBe("/sets/set-1/edit?questionId=q-42");
+    expect(resolveResultHref(items[2]!)).toBe("/sets/set-1/edit?questionId=q-99");
+    expect(resolveResultHref(items[3]!)).toBe("/sets/set-shared-view?q=q-55");
+    expect(resolveResultHref(items[4]!)).toBe("/sets/set-shared-view?q=q-77");
+  });
 });
 
 describe("StudyHub V3.2 — Shared shouldIgnoreShortcutEvent Guard (src/lib/ui/shortcuts.ts)", () => {
@@ -710,5 +828,350 @@ describe("StudyHub V3.2 — SettingsView Synchronous Tab Switch & URL Sync (V32-
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("StudyHub V3.2 — V32-053 Question Editor i18n Parity (src/lib/i18n/*)", () => {
+  it("provides crisp VI and EN labels for all V32-053 multimedia editor & filter strings", async () => {
+    const [{ viDictionary }, { enDictionary }] = await Promise.all([
+      import("@/lib/i18n/vi"),
+      import("@/lib/i18n/en"),
+    ]);
+
+    const viKeys = Object.keys(viDictionary.questionEditor).sort();
+    const enKeys = Object.keys(enDictionary.questionEditor).sort();
+    expect(viKeys).toEqual(enKeys);
+    expect(viKeys.length).toBeGreaterThanOrEqual(20);
+
+    for (const key of viKeys) {
+      const k = key as keyof typeof viDictionary.questionEditor;
+      expect(viDictionary.questionEditor[k].trim().length).toBeGreaterThan(0);
+      expect(enDictionary.questionEditor[k].trim().length).toBeGreaterThan(0);
+    }
+
+    expect(viDictionary.questionEditor.addQuestionImage).toBe("Thêm ảnh câu hỏi");
+    expect(viDictionary.questionEditor.addOptionImage).toBe("Thêm ảnh đáp án");
+    expect(viDictionary.questionEditor.addExplanationImage).toBe("Thêm ảnh giải thích");
+    expect(viDictionary.questionEditor.viewAndEditQuestions).toBe(
+      "Xem và chỉnh sửa câu hỏi",
+    );
+    expect(viDictionary.questionEditor.saveAndNext).toBe("Lưu & Câu tiếp");
+    expect(viDictionary.questionEditor.previousQuestion).toBe("Câu trước");
+    expect(viDictionary.questionEditor.nextQuestion).toBe("Câu tiếp");
+    expect(viDictionary.questionEditor.mediaFilterHasImages).toBe("Có ảnh");
+    expect(viDictionary.questionEditor.mediaFilterNoImages).toBe("Chưa có ảnh");
+    expect(viDictionary.questionEditor.mediaFilterMissing).toBe("Thiếu/lỗi ảnh");
+    expect(viDictionary.questionEditor.mediaFilterNeedsReview).toBe(
+      "Cần rà soát ảnh",
+    );
+  });
+});
+
+describe("StudyHub V3.2 — StudySetHub Per-Card Edit, Media Filters & Multi-Image Galleries (V32-053)", () => {
+  const sampleQuestions: QuestionWithRelations[] = [
+    {
+      id: "q-1",
+      study_set_id: "set-1",
+      question_type: "single_choice",
+      position: 0,
+      chapter: "Chapter 1",
+      prompt: "Identify the dual-image diagram question",
+      prompt_image_url: "/api/uploads/signed-url?path=prompt-1.png",
+      back_text: null,
+      back_image_url: null,
+      explanation: "See both schematic references",
+      hint: null,
+      difficulty: "medium",
+      source_metadata: {},
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      is_starred: true,
+      media_attachments: [
+        {
+          id: "rel-p1",
+          media_id: "m-p1",
+          url: "/api/uploads/signed-url?path=prompt-1.png",
+          role: "prompt",
+          sort_order: 0,
+          alt_text: "Prompt 1",
+        },
+        {
+          id: "rel-p2",
+          media_id: "m-p2",
+          url: "/api/uploads/signed-url?path=prompt-2.png",
+          role: "prompt",
+          sort_order: 1,
+          alt_text: "Prompt 2",
+        },
+        {
+          id: "rel-e1",
+          media_id: "m-e1",
+          url: "/api/uploads/signed-url?path=exp-1.png",
+          role: "explanation",
+          sort_order: 0,
+          alt_text: "Explanation diagram",
+        },
+      ],
+      options: [
+        {
+          id: "opt-a",
+          question_id: "q-1",
+          study_set_id: "set-1",
+          position: 0,
+          label: "A",
+          content: "Dual image option",
+          image_url: "/api/uploads/signed-url?path=opt-a1.png",
+          is_correct: true,
+          created_at: "2026-01-01T00:00:00Z",
+          media_attachments: [
+            {
+              id: "rel-oa1",
+              media_id: "m-oa1",
+              url: "/api/uploads/signed-url?path=opt-a1.png",
+              role: "option",
+              sort_order: 0,
+              alt_text: "Opt A1",
+            },
+            {
+              id: "rel-oa2",
+              media_id: "m-oa2",
+              url: "/api/uploads/signed-url?path=opt-a2.png",
+              role: "option",
+              sort_order: 1,
+              alt_text: "Opt A2",
+            },
+          ],
+        },
+        {
+          id: "opt-b",
+          question_id: "q-1",
+          study_set_id: "set-1",
+          position: 1,
+          label: "B",
+          content: "",
+          image_url: "/api/uploads/signed-url?path=opt-b.png",
+          is_correct: false,
+          created_at: "2026-01-01T00:00:00Z",
+          media_attachments: [
+            {
+              id: "rel-ob1",
+              media_id: "m-ob1",
+              url: "/api/uploads/signed-url?path=opt-b.png",
+              role: "option",
+              sort_order: 0,
+              alt_text: "Image-only option B",
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: "q-2",
+      study_set_id: "set-1",
+      question_type: "single_choice",
+      position: 11,
+      chapter: "Chapter 2",
+      prompt: "Question #12 text-only prompt",
+      prompt_image_url: null,
+      back_text: null,
+      back_image_url: null,
+      explanation: null,
+      hint: null,
+      difficulty: "easy",
+      source_metadata: {},
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      is_starred: false,
+      options: [],
+    },
+  ];
+
+  function configureHubApi(role: "owner" | "viewer") {
+    const requestedUrls: string[] = [];
+    mockApiFetch.mockImplementation(async (url: string) => {
+      requestedUrls.push(url);
+      if (url === "/api/sets/set-1") {
+        return {
+          data: {
+            id: "set-1",
+            owner_id: "owner-1",
+            folder_id: null,
+            title: "Aviation Meteorology",
+            description: null,
+            subject: "Meteorology",
+            set_type: "multiple_choice",
+            visibility: "private",
+            source_language: "vi",
+            question_count: 2,
+            default_exam_duration_minutes: 30,
+            default_pass_threshold: 70,
+            is_archived: false,
+            last_studied_at: null,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            role,
+            can_edit: role === "owner",
+            chapters: ["Chapter 1", "Chapter 2"],
+          },
+        };
+      }
+      if (url.startsWith("/api/sets/set-1/questions")) {
+        return {
+          data: sampleQuestions,
+          meta: { total: sampleQuestions.length, hasMore: false },
+        };
+      }
+      if (url === "/api/sets/set-1/diagrams") {
+        return { data: [] };
+      }
+      if (url.startsWith("/api/checkpoints")) {
+        return { data: [] };
+      }
+      return { data: [] };
+    });
+    return requestedUrls;
+  }
+
+  it("renders 1-tap Edit per card, multi-image prompt/option/explanation galleries, 5 media filter pills, and in-place cache updates for owners", async () => {
+    const requestedUrls = configureHubApi("owner");
+    const { StudySetHub } = await import("@/components/library/study-set-hub");
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const I18nProviderCompat = I18nProvider as React.ComponentType<{
+      defaultLocale?: "vi" | "en";
+      children?: React.ReactNode;
+    }>;
+
+    const { container } = render(
+      React.createElement(
+        QueryClientProvider,
+        { client: qc },
+        React.createElement(
+          I18nProviderCompat,
+          { defaultLocale: "vi" },
+          React.createElement(StudySetHub, { setId: "set-1" }),
+        ),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hub-edit-question-q-1")).toBeTruthy();
+      expect(screen.getByTestId("hub-edit-question-q-2")).toBeTruthy();
+    });
+
+    // Multi-image prompt (2), multi-image option A (2), image-only option B (1), and explanation image (1) all rendered
+    expect(container.querySelector('img[src*="prompt-1.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src*="prompt-2.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src*="opt-a1.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src*="opt-a2.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src*="opt-b.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src*="exp-1.png"]')).not.toBeNull();
+
+    // True question number badge `#12` shown for position 11
+    expect(screen.getByText("#12")).toBeTruthy();
+
+    // All 5 media filter pills exist and wire mediaFilter query param
+    for (const key of [
+      "all",
+      "has_images",
+      "no_images",
+      "missing_media",
+      "needs_media_review",
+    ]) {
+      expect(screen.getByTestId(`hub-media-filter-${key}`)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByTestId("hub-media-filter-has_images"));
+    await waitFor(() => {
+      expect(
+        requestedUrls.some((u) =>
+          u.includes("/api/sets/set-1/questions") &&
+          u.includes("mediaFilter=has_images"),
+        ),
+      ).toBe(true);
+    });
+
+    // Wait for filtered page render, then 1-tap Edit opens UnifiedQuestionEditorModal in-place with page questionIds
+    const editBtnQ1 = await screen.findByTestId("hub-edit-question-q-1");
+    fireEvent.click(editBtnQ1);
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-unified-editor-modal")).toBeTruthy();
+    });
+    expect(lastMockEditorProps?.questionId).toBe("q-1");
+    expect(lastMockEditorProps?.questionIds).toEqual(["q-1", "q-2"]);
+    expect(lastMockEditorProps?.currentIndex).toBe(0);
+
+    // Trigger Save & Next -> patches q-1 in-place while preserving active mediaFilter AND advances to q-2!
+    const updatedQ1: QuestionWithRelations = {
+      ...sampleQuestions[0]!,
+      prompt: "Updated Q1 prompt saved in-place",
+      media_attachments: [
+        ...(sampleQuestions[0]!.media_attachments ?? []),
+        {
+          id: "rel-p3",
+          media_id: "m-p3",
+          url: "/api/uploads/signed-url?path=prompt-3.png",
+          role: "prompt",
+          sort_order: 2,
+          alt_text: "Prompt 3",
+        },
+      ],
+    };
+    React.act(() => {
+      lastMockEditorProps?.onSaved?.(updatedQ1, "save_and_next");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Updated Q1 prompt saved in-place")).toBeTruthy();
+      expect(container.querySelector('img[src*="prompt-3.png"]')).not.toBeNull();
+      expect(
+        screen
+          .getByTestId("mock-unified-editor-modal")
+          .getAttribute("data-question-id"),
+      ).toBe("q-2");
+    });
+
+    // Active media filter stays selected without resetting
+    expect(
+      screen
+        .getByTestId("hub-media-filter-has_images")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("hides all per-card and header Edit controls from read-only viewers (V32-053 RBAC)", async () => {
+    configureHubApi("viewer");
+    const { StudySetHub } = await import("@/components/library/study-set-hub");
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const I18nProviderCompat = I18nProvider as React.ComponentType<{
+      defaultLocale?: "vi" | "en";
+      children?: React.ReactNode;
+    }>;
+
+    const { container } = render(
+      React.createElement(
+        QueryClientProvider,
+        { client: qc },
+        React.createElement(
+          I18nProviderCompat,
+          { defaultLocale: "vi" },
+          React.createElement(StudySetHub, { setId: "set-1" }),
+        ),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Identify the dual-image diagram question"),
+      ).toBeTruthy();
+    });
+
+    expect(
+      container.querySelectorAll('[data-testid^="hub-edit-question-"]').length,
+    ).toBe(0);
+    expect(container.querySelector('a[href="/sets/set-1/edit"]')).toBeNull();
   });
 });

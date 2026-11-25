@@ -1426,6 +1426,7 @@ export interface Database {
           diagram_snapshot: Json | null;
           type_payload_snapshot: Json | null;
           media_snapshot: Json;
+          review_media_snapshot: Json;
           explanation_snapshot: string | null;
           explanation_rich_snapshot: Json | null;
           options_snapshot: ExamSnapshotOption[];
@@ -1452,6 +1453,7 @@ export interface Database {
           diagram_snapshot?: Json | null;
           type_payload_snapshot?: Json | null;
           media_snapshot?: Json;
+          review_media_snapshot?: Json;
           explanation_snapshot?: string | null;
           explanation_rich_snapshot?: Json | null;
           options_snapshot?: ExamSnapshotOption[];

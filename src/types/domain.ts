@@ -6,11 +6,11 @@
 
 import type {
   ConfidenceLevel,
-  ContentMediaRelation,
   DiagramSet,
   MediaAttachmentRole,
   MistakeStatus,
   ModePreferences,
+  QuestionMediaAttachment,
   QuestionTypePayload,
   RichTextDoc,
   SharedPassage,
@@ -186,6 +186,8 @@ export interface QuestionOption {
   image_url: string | null;
   media_id?: string | null;
   image_alt?: string | null;
+  /** Hydrated multi-image attachments (entity_type = 'question_option', role = 'option') */
+  media_attachments?: QuestionMediaAttachment[];
   is_correct: boolean;
   created_at: string;
 }
@@ -245,9 +247,20 @@ export interface Question {
   options?: QuestionOption[];
   accepted_answers?: QuestionAcceptedAnswer[];
   tags?: Tag[];
-  media_attachments?: ContentMediaRelation[];
+  media_attachments?: QuestionMediaAttachment[];
   passage?: SharedPassage | null;
   diagram?: DiagramSet | null;
+  is_starred?: boolean;
+  progress?: Partial<UserQuestionProgress> | null;
+}
+
+export interface QuestionWithRelations extends Question {
+  options: QuestionOption[];
+  accepted_answers?: QuestionAcceptedAnswer[];
+  tags?: Tag[];
+  media_attachments?: QuestionMediaAttachment[];
+  is_starred?: boolean;
+  progress?: Partial<UserQuestionProgress> | null;
 }
 
 export interface UserQuestionProgress {
@@ -330,6 +343,8 @@ export interface ExamSnapshotOption {
   image_url: string | null;
   media_id?: string | null;
   image_alt?: string | null;
+  /** Multi-image option snapshot attachments captured at exam creation (V32-053) */
+  media?: QuestionMediaAttachment[];
   position: number;
 }
 
@@ -446,14 +461,24 @@ export interface ExamSnapshotQuestion {
   diagram_snapshot?: Partial<DiagramSet> | null;
   type_payload_snapshot?: QuestionTypePayload | null;
   media_snapshot?: Array<{
+    id?: string;
     media_id: string;
+    url?: string;
     role: MediaAttachmentRole;
+    sort_order?: number;
     storage_path: string;
     proxy_url: string;
     mime_type: string;
+    width?: number | null;
+    height?: number | null;
     alt_text?: string | null;
     caption?: string | null;
   }>;
+  /**
+   * Post-submit ONLY answer-revealing media (explanation, hint, back).
+   * STRICTLY omitted while `attempt.status === 'in_progress'` (V32-053).
+   */
+  review_media_snapshot?: QuestionMediaAttachment[];
   options_snapshot: ExamSnapshotOption[];
   explanation_snapshot?: string | null;
   explanation_rich_snapshot?: RichTextDoc | null;
@@ -734,7 +759,7 @@ export interface ExamTagBreakdown {
 export interface PracticeQuestionItem extends Question {
   source_subject_title?: string | null;
   is_starred?: boolean;
-  progress?: UserQuestionProgress | null;
+  progress?: Partial<UserQuestionProgress> | null;
 }
 
 export interface PracticePoolResponse {

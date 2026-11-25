@@ -9,6 +9,7 @@ import {
   BookOpen,
   CheckCircle2,
   ClipboardCheck,
+  Edit3,
   Layers,
   Loader2,
   Play,
@@ -473,12 +474,25 @@ export function StepCommit({
               </div>
             </div>
 
-            {/* Primary 1-Tap Study CTA + Secondary Actions */}
+            {/* Primary 1-Tap Study & Edit CTAs + Secondary Actions */}
             <div className="flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-center">
               <Button asChild size="lg" className="min-h-[44px] w-full sm:w-auto">
                 <Link href={`/sets/${studySetId}/practice`}>
                   <Play className="mr-2 size-4" aria-hidden="true" />
                   {locale === "en" ? "Start Studying" : "Học ngay"}
+                </Link>
+              </Button>
+              <Button
+                asChild
+                variant="secondary"
+                size="lg"
+                className="min-h-[44px] w-full sm:w-auto"
+              >
+                <Link href={`/sets/${studySetId}/edit`}>
+                  <Edit3 className="mr-2 size-4" aria-hidden="true" />
+                  {locale === "en"
+                    ? "Review & Edit Questions"
+                    : "Xem và chỉnh sửa câu hỏi"}
                 </Link>
               </Button>
               <Button

@@ -12,6 +12,24 @@ import {
   questionTypePayloadSchema,
 } from "./v3";
 
+export const questionMediaFilterSchema = z.enum([
+  "all",
+  "has_images",
+  "no_images",
+  "missing_media",
+  "needs_media_review",
+]);
+
+export const optionMediaAttachmentInputSchema = z.object({
+  id: uuidSchema.optional(),
+  media_id: uuidSchema,
+  url: nullableSafeUrlSchema,
+  role: z.literal("option").default("option"),
+  sort_order: z.number().int().min(0).max(50).default(0),
+  alt_text: z.string().trim().max(500).nullable().optional(),
+  caption: z.string().trim().max(1000).nullable().optional(),
+});
+
 export const questionOptionInputSchema = z
   .object({
     id: uuidSchema.optional(),
@@ -22,13 +40,15 @@ export const questionOptionInputSchema = z
     image_url: nullableSafeUrlSchema,
     media_id: uuidSchema.nullable().optional(),
     image_alt: z.string().trim().max(500).nullable().optional(),
+    media_attachments: z.array(optionMediaAttachmentInputSchema).max(6).optional(),
     is_correct: z.boolean().default(false),
   })
   .refine(
     (opt) =>
       opt.content.trim().length > 0 ||
       Boolean(opt.image_url) ||
-      Boolean(opt.media_id),
+      Boolean(opt.media_id) ||
+      Boolean(opt.media_attachments && opt.media_attachments.length > 0),
     {
       message: "Each option requires text content or an image.",
       path: ["content"],
@@ -42,7 +62,9 @@ export const acceptedAnswerInputSchema = z.object({
 });
 
 export const questionMediaAttachmentInputSchema = z.object({
+  id: uuidSchema.optional(),
   media_id: uuidSchema,
+  url: nullableSafeUrlSchema,
   role: mediaRoleSchema.default("prompt"),
   sort_order: z.number().int().min(0).max(100).default(0),
   alt_text: z.string().trim().max(500).nullable().optional(),
@@ -302,9 +324,11 @@ export const listQuestionsQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(500).default(100),
   chapter: z.string().trim().max(200).optional(),
   search: z.string().trim().max(200).optional(),
+  q: z.string().trim().max(200).optional(),
   tagId: uuidSchema.optional(),
   difficulty: difficultySchema.optional(),
   questionType: questionTypeSchema.optional(),
+  mediaFilter: questionMediaFilterSchema.optional(),
   starredOnly: z
     .union([z.literal("true"), z.literal("false")])
     .transform((v) => v === "true")

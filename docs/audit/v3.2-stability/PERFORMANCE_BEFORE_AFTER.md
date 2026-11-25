@@ -191,3 +191,61 @@ All **14 / 14** live production screenshots captured on deployment `studyhub-9zf
 - **Teardown & DB Hygiene Attestation (100% Clean):**
   - Deleted `1/1` disposable `v32-w7-perf-*` user, `1` synthetic 250Q study set (+ `2` temporary DOCX import sets), `4` exam attempts, `1` `media_assets` row, and `2` Storage objects (`study-media` + `study-temp`).
   - Pre-sweep vs Post-sweep real owner DB counts verified **100% identical**: `auth.users: 2`, `profiles: 2`, `user_preferences: 2`, `study_sets: 4`, `questions: 599`, `question_options: 2,400`, `exam_attempts: 2`, `study_sessions: 27`, `user_question_progress: 87`, `media_assets: 0`, `leftoverDisposable: 0`. Zero production files (`src/*`, `supabase/*`) modified.
+
+---
+
+## 8. `V32-053` Addendum — Scenario I: 500-Question Bank Performance, Lazy Loading & Memory (`:3064`)
+
+> **Owner:** `perf-auditor-2` (Agent 8 — Independent Performance Auditor)  
+> **Scope & Environment:** Compiled `.next` build (`#96`, Migration `0020` live) on isolated local production server **`http://127.0.0.1:3064`** connected to live Supabase Cloud Tokyo (`cuoaifyupfmkstqhcjwy`, `~112 ms` VN→Tokyo RTT per DB hop), tested against a synthetic **500-question, 2,000-option, 5-chapter bank** (`V32 Add Perf 500Q Bank`, 5 questions with attached PNGs in `content_media_relations` + 1 active 250-Q exam attempt) under isolated disposable prefix `v32-add-perf-*`.  
+> **Verdict (`V32-053` Scenario I):** **`PASS`** — **ZERO full 500Q bank reloads**, **`0px` scroll drift** on Q1/Q123/Q500, **`0` progressive slowdown** across 20 consecutive `Save & Next` cycles (`0.82×` ratio), **`0` leaked blob URLs** (`3/3` revoked), and **100% on-demand lazy loading** of `UnifiedQuestionEditorModal`, `MediaAttachmentEditor`, and `@tiptap`.
+
+### 8.1 Lazy-Load & Bundle Isolation Audit (`UnifiedQuestionEditorModal`, `MediaAttachmentEditor`, `@tiptap`)
+
+| Lazy Subsystem & Chunk | Raw | Gzip | Brotli | SSR HTML Refs (`/`, `/login`, `/sets/[id]`, `/exams/[id]`) | Loaded Initially on `/sets/[id]`? | Loaded Initially on `/exams/[attemptId]`? | Loaded On-Demand After Clicking Edit on `/sets/[id]`? |
+| --- | ---: | ---: | ---: | :---: | :---: | :---: | :---: |
+| **`UnifiedQuestionEditorModal`** (`2pn91vlctxmdk.js`) | `61.8 KB` | `16.0 KB` | `13.9 KB` | **`0`** | **NO (`0 KB`)** | **NO (`0 KB`)** | **YES (`17.1 KB` wire on click)** |
+| **`MediaAttachmentEditor`** (`1mn1e8-kuro7b.js`) | `47.6 KB` | `14.0 KB` | `12.4 KB` | **`0`** | **NO (`0 KB`)** | **NO (`0 KB`)** | **YES (`15.1 KB` wire on click)** |
+| **`RichTextEditor` / `@tiptap`** (`3gnmaj3ipu8j_.js`) | `466.4 KB` | `145.3 KB` | `122.3 KB` | **`0`** | **NO (`0 KB`)** | **NO (`0 KB`)** | **NO** *(only when Rich Text toggled)* |
+| **Import Inline Editor** (`3mt-me6irfpf1.js`) | `90.3 KB` | `24.5 KB` | `20.8 KB` | **`0`** | **NO (`0 KB`)** | **NO (`0 KB`)** | **NO** *(import wizard only)* |
+
+*Honest Overall Cold JS Note (`:3064` gzip):* `UnifiedQuestionEditorModal` (`16.0 KB` gz), `MediaAttachmentEditor` (`14.0 KB` gz), and `@tiptap` (`145.3 KB` gz) contribute **`0.0 KB`** to initial page loads on `/sets/[id]` and `/exams/[attemptId]` (verified via both `study-set-hub.tsx:152,2055` conditional `dynamic()` mount and cold Playwright CDP network captures). Total local gzip cold JS on `/sets/[id]` (`417.9 KB`, vs `372.7 KB` W5 `:3044` gzip) and `/exams/[attemptId]` (`387.1 KB`, vs `357.1 KB` W5 `:3044` gzip) reflects lightweight multi-image display helpers (`MediaGallery`, `ImageLightbox`, `question-media`, and i18n strings — expected ~`345–365 KB` under Vercel Edge Brotli).
+
+### 8.2 500-Question Bank API Latencies (`:3064` Local VN → Supabase Tokyo, `n = 5` Warm Median)
+
+| Endpoint | HTTP | Payload | Items / Total | Cold | Warm Median (`n=5`) | Warm p95 | Notes |
+| --- | :---: | ---: | :---: | ---: | ---: | ---: | --- |
+| `GET /api/sets/[id]/questions/[q1Id]` (Single Q1) | `200` | **`2.92 KB`** | `1` | `651.2 ms` | **`598.4 ms`** | `913.7 ms` | Lightweight single-Q hydration (`~2.9 KB` vs `1,160 KB` bank!) |
+| `GET /api/sets/[id]/questions/[q123Id]` (Single Q123) | `200` | **`2.94 KB`** | `1` | `773.2 ms` | **`666.8 ms`** | `2,322.0 ms` | Constant `O(1)` size regardless of index |
+| `GET /api/sets/[id]/questions/[q500Id]` (Single Q500) | `200` | **`2.93 KB`** | `1` | `1,173.7 ms` | **`607.7 ms`** | `731.7 ms` | Constant `O(1)` size at bank tail |
+| `GET /questions?pageSize=20&search=%23123` | `200` | **`3.02 KB`** | `1 / 1` | `3,407.1 ms` | **`454.3 ms`** | `1,118.6 ms` | Exact `#123` Q# lookup |
+| `GET /questions?pageSize=500&search=%23123` | `200` | **`3.02 KB`** | `1 / 1` | `239.1 ms` | **`239.4 ms`** | `330.6 ms` | Exact `#123` Q# lookup (Editor) |
+| `GET /questions?mediaFilter=has_images` | `200` | **`14.76 KB`** | `5 / 5` | `240.5 ms` | **`226.0 ms`** | `249.4 ms` | Fast filtered payload |
+| `GET /questions?mediaFilter=no_images` | `200` | `1,160.23 KB` | `495 / 495` | `705.5 ms` | **`552.4 ms`** | `647.6 ms` | Full 495-Q page in virtualized editor |
+| `GET /questions?mediaFilter=missing_media` | `200` | `0.07 KB` | `0 / 0` | `255.2 ms` | **`253.2 ms`** | `255.4 ms` | Fast server filter (`0` matching rows) |
+| `GET /questions?mediaFilter=needs_media_review` | `200` | `0.07 KB` | `0 / 0` | `247.4 ms` | **`246.8 ms`** | `271.0 ms` | Fast server filter (`0` matching rows) |
+| `PATCH /api/sets/[id]/questions/[q1Id]` | `200` | **`2.86 KB`** | `1` | `1,225.6 ms` | **`840.3 ms`** | `1,057.1 ms` | Local VN→Tokyo RTT floor (`~112 ms/hop`; projects `~180–260 ms` on `hnd1`) |
+
+### 8.3 Interactive Q1, Q123 (`#123` Search) & Q500 Edit Benchmarks (Scroll & Reload Preservation)
+
+| Workflow (500-Question Bank on `:3064`) | Open Modal | Save Latency | Scroll Before → After (`Delta`) | Full 500Q Reloads (`GET /questions?`) | Media Filter / Search UI Timing |
+| --- | ---: | ---: | ---: | :---: | --- |
+| **Edit Q1 on `/sets/[id]` (Set Hub)** | `496.6 ms` *(incl. lazy chunk load)* | `2,034.1 ms` *(VN→Tokyo)* | `window.scrollY`: **`420 → 420 px` (`0 px`!)** | **`0` on Open, `0` on Save** | Single-Q `GET` + `PATCH` + in-place cache update |
+| **Search `#123` + Edit Q123 on `/sets/[id]/edit`** | **`161.4 ms`** | `1,920.3 ms` | Preserved (`#123` filter intact) | **`0` on Open, `0` on Save** | `#123` UI search → Q123 visible: **`865.9 ms`** (`1` API call) |
+| **Scroll to Q500 + Edit Q500 on `/sets/[id]/edit`** | **`125.4 ms`** | `2,018.8 ms` | Virtual `scrollTop`: **`45,148 → 45,148 px` (`0 px`!)** (`scrollHeight: 45,768 px`) | **`0` on Open, `0` on Save** | Q500 stays visible in place at bottom of 500Q virtual list |
+| **Media Filter Chips UI (`/sets/[id]/edit`)** | — | — | — | — | `Có ảnh`: **`292.7 ms`** (`5`), `Chưa có ảnh`: **`746.5 ms`** (`495`), `Thiếu/lỗi ảnh`: **`289.0 ms`**, `Cần rà soát ảnh`: **`292.1 ms`**, `Tất cả`: **`0 ms` cache hit** |
+
+### 8.4 Sustained 20-Cycle Consecutive Edit / `Save & Next` Endurance & Memory Leak Benchmark
+
+*20 consecutive edits (`Q1 → Q20`) inside `UnifiedQuestionEditorModal` via **`Lưu & Câu tiếp`** (`Save & Next`), including 3 real PNG file uploads on cycles `5`, `10`, and `15` to stress `URL.createObjectURL` / `URL.revokeObjectURL`:*
+
+| Endurance / Memory Metric | Measured Value (`:3064` VN → Supabase Tokyo) | Target / Verdict |
+| --- | ---: | :---: |
+| **`Save & Next` Overall Median / p95 (`n = 20`)** | **`1,724.2 ms`** / `2,021.2 ms` (`1,526.4–2,369.7 ms`) | **PASS** *(VN→Tokyo multi-hop; `~350–500 ms` on `hnd1`)* |
+| **Progressive Slowdown Check (Cycles 1–5 Med vs 16–20 Med)** | **`1,954.2 ms` → `1,597.1 ms`** (`ratio = 0.82×`) | **PASS (`0` progressive slowdown!)** |
+| **Full 500Q Bank Reloads Across ALL 20 Cycles** | **`0 / 20` cycles** (`20` single `PATCH` + `19` single-Q `2.9 KB` `GET` + `1` cache hit) | **PASS (`0` full reloads!)** |
+| **Blob URL Leak Check (3 real PNG uploads on c5, c10, c15)** | **`created: 3, revoked: 3, active: 0`** (at T10, T20, and post-close) | **PASS (`0` leaked blob URLs!)** |
+| **CDP JS Heap (`T0 → T10 → T20 → T_postGC` closed)** | **`12.73 → 15.62 → 15.04 → 14.23 MB`** (`+1.50 MB` bounded delta) | **PASS (plateaued & reclaimed after GC)** |
+| **CDP DOM Nodes / Event Listeners (`T0 → T_postGC`)** | `1,098 → 3,088` Nodes / `1,557 → 2,635` Listeners | Bounded (`T10: 3,106` → `T_postGC: 3,088` flat) |
+
+- **Teardown & Hygiene Attestation (`:3064`):** Port `3064` stopped cleanly (`PORT_3064_LISTEN_COUNT: 0`); `1/1` `v32-add-perf-*` disposable user, `1` 500Q set, `1` exam, `4` `media_assets`, and `5` Storage objects deleted cleanly (`ourLeftoverV32AddPerf: 0`). Pre-existing real owner data confirmed 100% untouched (`realOwnerAuthUsers: 2`, `realOwnerStudySets: 4`, `realOwnerQuestions: 599`, `realOwnerExamAttempts: 2`). Zero edits to `src/*`, `supabase/*`, or `tests/*`.

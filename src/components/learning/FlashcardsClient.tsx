@@ -11,8 +11,8 @@ import {
   ChevronRight,
   Keyboard,
   Maximize2,
-  Mic,
   Minimize2,
+  Pencil,
   RotateCcw,
   Shuffle,
   Star,
@@ -21,6 +21,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -65,18 +66,20 @@ import {
   projectQuestionToFlashcard,
   type ProjectedFlashcard,
 } from "@/lib/learning/flashcard-projection";
+import { attachmentToDisplayItem } from "@/lib/learning/media-helpers";
 import { createSeededRng, fisherYatesShuffle } from "@/lib/learning/shuffle";
 import { calculateNextReview } from "@/lib/learning/sm2";
 import { invalidateLearningCaches } from "@/lib/query-keys";
 import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import type { SelfRating } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
 import { ResetProgressDialog } from "./ResetProgressDialog";
 import { ResumeSessionBanner } from "./ResumeSessionBanner";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -133,8 +136,10 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     isError,
     error,
     refetch,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
   } = useStudySetBundle(setId);
 
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
@@ -171,6 +176,9 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const [isNativeFullscreen, setIsNativeFullscreen] = React.useState(false);
   const [isSpeaking, setIsSpeaking] = React.useState(false);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
   const [pendingResume, setPendingResume] = React.useState<{
     source: "remote" | "local";
     currentIndex: number;
@@ -755,7 +763,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   // Global keyboard shortcuts: strictly 1=Again, 2=Hard, 3=Good, 4=Easy (SH-021 + V32-023!)
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isCompleted || !activeCard) return;
+      if (isCompleted || !activeCard || editingQuestionId) return;
       if (shouldIgnoreShortcutEvent(event, { shortcutsEnabled })) return;
 
       if (event.code === "Space" && !isInteractiveControlTarget(event.target)) {
@@ -789,6 +797,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     activeCard,
+    editingQuestionId,
     goToIndex,
     handleFlipToggle,
     handleRateCard,
@@ -879,6 +888,38 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       ? activeCard.frontMedia ?? []
       : activeCard.backMedia ?? []
     : [];
+  const explanationMedia = activeCard?.explanationMedia ?? [];
+
+  const frontGalleryItems = frontMedia
+    .map((m, idx) =>
+      attachmentToDisplayItem(
+        m,
+        lText(locale, "Hình ảnh mặt trước", "Front side illustration"),
+        idx,
+      ),
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const backGalleryItems = backMedia
+    .map((m, idx) =>
+      attachmentToDisplayItem(
+        m,
+        lText(locale, "Hình ảnh mặt sau", "Back side illustration"),
+        idx,
+      ),
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const explanationGalleryItems = explanationMedia
+    .map((m, idx) =>
+      attachmentToDisplayItem(
+        m,
+        lText(locale, "Hình ảnh giải thích", "Explanation illustration"),
+        idx,
+      ),
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const activeEditingQuestion = editingQuestionId
+    ? (bundle.questions.find((q) => q.id === editingQuestionId) ?? null)
+    : null;
 
   const isFullscreenActive = isNativeFullscreen || isFallbackFullscreen;
 
@@ -1260,28 +1301,30 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                           )}
                         </Button>
 
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="min-h-10 min-w-10"
-                          asChild
-                          aria-label={lText(
-                            locale,
-                            "Gắn âm thanh / sửa thẻ",
-                            "Attach audio / edit card",
-                          )}
-                        >
-                          <Link
-                            href={`/sets/${setId}/edit?questionId=${activeCard.questionId}`}
+                        {canEdit ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="min-h-10 min-w-10"
+                            onClick={() => {
+                              stopSpeech();
+                              setEditingQuestionId(activeCard.questionId);
+                            }}
+                            aria-label={lText(
+                              locale,
+                              "Chỉnh sửa câu hỏi / đa phương tiện",
+                              "Edit card / multimedia",
+                            )}
                             title={lText(
                               locale,
-                              "Ghi âm / Sửa thẻ",
-                              "Record audio / Edit card",
+                              "Chỉnh sửa câu hỏi",
+                              "Edit card",
                             )}
                           >
-                            <Mic className="size-4 text-muted-foreground" aria-hidden="true" />
-                          </Link>
-                        </Button>
+                            <Pencil className="size-4 text-muted-foreground" aria-hidden="true" />
+                          </Button>
+                        ) : null}
 
                         <Button
                           variant="ghost"
@@ -1333,31 +1376,35 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                               }
                               className="text-lg font-medium leading-relaxed sm:text-xl"
                             />
-                            <div
-                              onClick={(e) => e.stopPropagation()}
-                              className="flex flex-wrap items-center justify-center gap-3"
-                            >
-                              <ZoomableImage
-                                src={isFlipped ? backImage : frontImage}
-                                alt={lText(
-                                  locale,
-                                  "Hình ảnh minh họa thẻ",
-                                  "Flashcard illustration",
-                                )}
-                                className="mx-auto max-h-56"
-                              />
-                              {(isFlipped ? backMedia : frontMedia)
-                                .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
-                                .map((m) => (
-                                  <ZoomableImage
-                                    key={m.id}
-                                    src={m.media?.proxy_url}
-                                    alt={m.alt_text ?? m.media?.alt_text ?? ""}
-                                    caption={m.caption ?? m.media?.caption}
-                                    className="max-h-44"
-                                  />
-                                ))}
-                            </div>
+                            {(isFlipped ? backGalleryItems : frontGalleryItems)
+                              .length > 0 ||
+                            (isFlipped ? backImage : frontImage) ? (
+                              <div onClick={(e) => e.stopPropagation()}>
+                                <MediaGallery
+                                  items={
+                                    isFlipped
+                                      ? backGalleryItems
+                                      : frontGalleryItems
+                                  }
+                                  fallbackImageUrl={
+                                    (isFlipped
+                                      ? backGalleryItems
+                                      : frontGalleryItems
+                                    ).length === 0
+                                      ? isFlipped
+                                        ? backImage
+                                        : frontImage
+                                      : null
+                                  }
+                                  fallbackAlt={lText(
+                                    locale,
+                                    "Hình ảnh minh họa thẻ",
+                                    "Flashcard illustration",
+                                  )}
+                                  variant="compact"
+                                />
+                              </div>
+                            ) : null}
                             {isSafeDisplayImageUrl(
                               isFlipped ? backAudio : frontAudio,
                             ) ? (
@@ -1373,15 +1420,36 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 />
                               </div>
                             ) : null}
-                            {isFlipped && (activeCard.explanation || activeCard.explanationRich) ? (
-                              <div className="mt-4 rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
-                                <span className="font-semibold text-foreground">
-                                  {t("study.explanation")}:{" "}
-                                </span>
-                                <SafeRichText
-                                  rich={activeCard.explanationRich}
-                                  fallbackText={activeCard.explanation}
-                                />
+                            {isFlipped &&
+                            (activeCard.explanation ||
+                              activeCard.explanationRich ||
+                              explanationGalleryItems.length > 0) ? (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="mt-4 space-y-2 rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground"
+                              >
+                                {activeCard.explanation ||
+                                activeCard.explanationRich ? (
+                                  <div>
+                                    <span className="font-semibold text-foreground">
+                                      {t("study.explanation")}:{" "}
+                                    </span>
+                                    <SafeRichText
+                                      rich={activeCard.explanationRich}
+                                      fallbackText={activeCard.explanation}
+                                    />
+                                  </div>
+                                ) : (
+                                  <span className="block font-semibold text-foreground">
+                                    {t("study.explanation")}:
+                                  </span>
+                                )}
+                                {explanationGalleryItems.length > 0 ? (
+                                  <MediaGallery
+                                    items={explanationGalleryItems}
+                                    variant="compact"
+                                  />
+                                ) : null}
                               </div>
                             ) : null}
                           </div>
@@ -1436,31 +1504,24 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 }
                                 className="text-lg font-medium leading-relaxed sm:text-xl"
                               />
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="flex flex-wrap items-center justify-center gap-3"
-                              >
-                                <ZoomableImage
-                                  src={frontImage}
-                                  alt={lText(
-                                    locale,
-                                    "Hình ảnh mặt trước",
-                                    "Front side illustration",
-                                  )}
-                                  className="mx-auto max-h-56"
-                                />
-                                {frontMedia
-                                  .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
-                                  .map((m) => (
-                                    <ZoomableImage
-                                      key={m.id}
-                                      src={m.media?.proxy_url}
-                                      alt={m.alt_text ?? m.media?.alt_text ?? ""}
-                                      caption={m.caption ?? m.media?.caption}
-                                      className="max-h-44"
-                                    />
-                                  ))}
-                              </div>
+                              {frontGalleryItems.length > 0 || frontImage ? (
+                                <div onClick={(e) => e.stopPropagation()}>
+                                  <MediaGallery
+                                    items={frontGalleryItems}
+                                    fallbackImageUrl={
+                                      frontGalleryItems.length === 0
+                                        ? frontImage
+                                        : null
+                                    }
+                                    fallbackAlt={lText(
+                                      locale,
+                                      "Hình ảnh mặt trước",
+                                      "Front side illustration",
+                                    )}
+                                    variant="compact"
+                                  />
+                                </div>
+                              ) : null}
                               {isSafeDisplayImageUrl(frontAudio) ? (
                                 <div
                                   onClick={(e) => e.stopPropagation()}
@@ -1526,31 +1587,24 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                 }
                                 className="text-lg font-medium leading-relaxed text-foreground sm:text-xl"
                               />
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="flex flex-wrap items-center justify-center gap-3"
-                              >
-                                <ZoomableImage
-                                  src={backImage}
-                                  alt={lText(
-                                    locale,
-                                    "Hình ảnh mặt sau",
-                                    "Back side illustration",
-                                  )}
-                                  className="mx-auto max-h-56"
-                                />
-                                {backMedia
-                                  .filter((m) => m.media?.kind === "image" && m.media.proxy_url)
-                                  .map((m) => (
-                                    <ZoomableImage
-                                      key={m.id}
-                                      src={m.media?.proxy_url}
-                                      alt={m.alt_text ?? m.media?.alt_text ?? ""}
-                                      caption={m.caption ?? m.media?.caption}
-                                      className="max-h-44"
-                                    />
-                                  ))}
-                              </div>
+                              {backGalleryItems.length > 0 || backImage ? (
+                                <div onClick={(e) => e.stopPropagation()}>
+                                  <MediaGallery
+                                    items={backGalleryItems}
+                                    fallbackImageUrl={
+                                      backGalleryItems.length === 0
+                                        ? backImage
+                                        : null
+                                    }
+                                    fallbackAlt={lText(
+                                      locale,
+                                      "Hình ảnh mặt sau",
+                                      "Back side illustration",
+                                    )}
+                                    variant="compact"
+                                  />
+                                </div>
+                              ) : null}
                               {isSafeDisplayImageUrl(backAudio) ? (
                                 <div
                                   onClick={(e) => e.stopPropagation()}
@@ -1564,15 +1618,35 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                   />
                                 </div>
                               ) : null}
-                              {activeCard.explanation || activeCard.explanationRich ? (
-                                <div className="rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground">
-                                  <span className="font-semibold text-foreground">
-                                    {t("study.explanation")}:{" "}
-                                  </span>
-                                  <SafeRichText
-                                    rich={activeCard.explanationRich}
-                                    fallbackText={activeCard.explanation}
-                                  />
+                              {activeCard.explanation ||
+                              activeCard.explanationRich ||
+                              explanationGalleryItems.length > 0 ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="space-y-2 rounded-lg bg-secondary/70 p-3.5 text-left text-sm text-muted-foreground"
+                                >
+                                  {activeCard.explanation ||
+                                  activeCard.explanationRich ? (
+                                    <div>
+                                      <span className="font-semibold text-foreground">
+                                        {t("study.explanation")}:{" "}
+                                      </span>
+                                      <SafeRichText
+                                        rich={activeCard.explanationRich}
+                                        fallbackText={activeCard.explanation}
+                                      />
+                                    </div>
+                                  ) : (
+                                    <span className="block font-semibold text-foreground">
+                                      {t("study.explanation")}:
+                                    </span>
+                                  )}
+                                  {explanationGalleryItems.length > 0 ? (
+                                    <MediaGallery
+                                      items={explanationGalleryItems}
+                                      variant="compact"
+                                    />
+                                  ) : null}
                                 </div>
                               ) : null}
                             </div>
@@ -1748,12 +1822,29 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                     studySetId={setId}
                     questionId={activeCard.questionId}
                     compact
+                    canEdit={canEdit}
+                    onEditQuestion={() => {
+                      stopSpeech();
+                      setEditingQuestionId(activeCard.questionId);
+                    }}
                   />
                 </div>
               ) : null}
             </div>
           </div>
         ) : null}
+
+        <ContextualQuestionEditorModal
+          open={Boolean(editingQuestionId) && canEdit}
+          onOpenChange={(open) => {
+            if (!open) setEditingQuestionId(null);
+          }}
+          studySetId={setId}
+          questionId={editingQuestionId}
+          initialQuestion={activeEditingQuestion}
+          chapters={bundle.chapters}
+          onSaved={(saved) => updateLocalQuestion(saved)}
+        />
 
         <ResetProgressDialog
           open={resetDialogOpen}

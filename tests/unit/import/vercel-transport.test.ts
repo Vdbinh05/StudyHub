@@ -11,6 +11,7 @@ import {
   compactPreviewForTransport,
   type ExtendedImportPreviewResult,
 } from "@/lib/import/index";
+import { validateParsedQuestion } from "@/lib/import/validator";
 import {
   uploadAudioSmart,
   uploadFileToTempStorage,
@@ -205,6 +206,48 @@ describe("Vercel Hobby transport hardening", () => {
         ["q-1"],
         ["q-2"],
       ]);
+    });
+
+    it("counts explanationMedia bytes in estimateQuestionPayloadBytes and preserves explanationMedia through validateParsedQuestion (V32-054)", () => {
+      const expDataUrl = `data:image/png;base64,${"E".repeat(900_000)}`;
+      const expAttachment = makeAttachment("rIdExp1", {
+        dataUrl: expDataUrl,
+        tempStoragePath: `user-1/import-media/${"c".repeat(64)}.png`,
+        alt: "Explanation diagram",
+      });
+
+      const baseQ = makeQuestion(0);
+      const withExpQ = makeQuestion(0, {
+        explanation: "See explanation diagram",
+        explanationMedia: [expAttachment],
+      });
+
+      const baseBytes = estimateQuestionPayloadBytes(baseQ);
+      const expBytes = estimateQuestionPayloadBytes(withExpQ);
+      expect(expBytes - baseBytes).toBeGreaterThanOrEqual(900_000);
+
+      // 4 questions x ~900 KB explanationMedia = ~3.6 MB -> must split into 2 safe <= 2.5 MB chunks!
+      const batch = Array.from({ length: 4 }, (_, i) =>
+        validateParsedQuestion(
+          makeQuestion(i, {
+            explanation: "Diagram explanation",
+            explanationMedia: [makeAttachment(`rIdExp${i}`, { dataUrl: expDataUrl })],
+          }),
+          i,
+        ),
+      );
+      expect(batch[0].explanationMedia).toHaveLength(1);
+      expect(batch[0].explanationMedia?.[0].dataUrl).toBe(expDataUrl);
+
+      const chunks = buildVercelSafeCommitChunks(batch);
+      expect(chunks.length).toBe(2);
+      for (const chunk of chunks) {
+        const serializedBytes = Buffer.byteLength(
+          JSON.stringify({ questions: chunk }),
+          "utf8",
+        );
+        expect(serializedBytes).toBeLessThanOrEqual(VERCEL_SAFE_COMMIT_CHUNK_BYTES);
+      }
     });
   });
 

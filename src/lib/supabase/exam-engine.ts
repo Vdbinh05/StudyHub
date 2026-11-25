@@ -1203,6 +1203,7 @@ export function stripPreSubmitQuestions(
         ...(opt.content_rich !== undefined ? { content_rich: opt.content_rich } : {}),
         ...(opt.media_id !== undefined ? { media_id: opt.media_id } : {}),
         ...(opt.image_alt !== undefined ? { image_alt: opt.image_alt } : {}),
+        ...(opt.media !== undefined ? { media: opt.media } : {}),
       })),
       created_at: q.created_at,
     };
@@ -1230,7 +1231,17 @@ export function stripPreSubmitQuestions(
       ) as QuestionTypePayload | null;
     }
     if (q.media_snapshot !== undefined) {
-      base.media_snapshot = q.media_snapshot;
+      // V32-053 defense-in-depth: strictly strip answer-revealing roles ('explanation', 'hint', 'back')
+      // and NEVER include `review_media_snapshot` while the exam is in_progress!
+      const SAFE_PRE_SUBMIT_ROLES = new Set([
+        "prompt",
+        "audio",
+        "passage",
+        "diagram_base",
+      ]);
+      base.media_snapshot = q.media_snapshot.filter((item) =>
+        SAFE_PRE_SUBMIT_ROLES.has(item.role),
+      );
     }
 
     return base;

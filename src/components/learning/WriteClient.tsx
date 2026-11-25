@@ -13,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,6 +40,10 @@ import {
   updateStudySession,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+} from "@/lib/learning/media-helpers";
 import { createSeededRng, fisherYatesShuffle } from "@/lib/learning/shuffle";
 import { calculateNextReview } from "@/lib/learning/sm2";
 import {
@@ -49,9 +54,11 @@ import {
 import { invalidateLearningCaches } from "@/lib/query-keys";
 import type { Question } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { SafeRichText } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -76,9 +83,14 @@ export function WriteClient({ setId }: WriteClientProps) {
     isError,
     error,
     refetch,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
   } = useStudySetBundle(setId);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
 
   const [selectedChapter, setSelectedChapter] = React.useState("all");
   const [strictMode, setStrictMode] = React.useState(false);
@@ -714,16 +726,16 @@ export function WriteClient({ setId }: WriteClientProps) {
                         fallbackText={currentQuestion.prompt}
                       />
                     </h2>
-                    {currentQuestion.prompt_image_url ? (
-                      <ZoomableImage
-                        src={currentQuestion.prompt_image_url}
-                        alt={lText(
+                    <MediaGallery
+                      items={getQuestionPromptDisplayItems(
+                        currentQuestion,
+                        lText(
                           locale,
                           "Hình ảnh câu hỏi",
                           "Question illustration",
-                        )}
-                      />
-                    ) : null}
+                        ),
+                      )}
+                    />
                   </div>
 
                   <form onSubmit={handleCheck} className="space-y-3">
@@ -867,19 +879,46 @@ export function WriteClient({ setId }: WriteClientProps) {
                           <strong>{t("study.correctAnswer")}: </strong>
                           {result.acceptedTexts.join(" / ")}
                         </p>
-                        {currentQuestion.explanation ||
-                        currentQuestion.explanation_rich ? (
-                          <div className="pt-1 text-muted-foreground">
-                            <strong className="text-foreground">
-                              {t("study.explanation")}:{" "}
-                            </strong>
-                            <SafeRichText
-                              rich={currentQuestion.explanation_rich}
-                              fallbackText={currentQuestion.explanation}
-                              inline
-                            />
-                          </div>
-                        ) : null}
+                        {(() => {
+                          const expMediaItems = getQuestionExplanationDisplayItems(
+                            currentQuestion,
+                            lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                          );
+                          if (
+                            !currentQuestion.explanation &&
+                            !currentQuestion.explanation_rich &&
+                            expMediaItems.length === 0
+                          ) {
+                            return null;
+                          }
+                          return (
+                            <div className="space-y-2 pt-1 text-muted-foreground">
+                              {currentQuestion.explanation ||
+                              currentQuestion.explanation_rich ? (
+                                <div>
+                                  <strong className="text-foreground">
+                                    {t("study.explanation")}:{" "}
+                                  </strong>
+                                  <SafeRichText
+                                    rich={currentQuestion.explanation_rich}
+                                    fallbackText={currentQuestion.explanation}
+                                    inline
+                                  />
+                                </div>
+                              ) : (
+                                <strong className="block text-foreground">
+                                  {t("study.explanation")}:
+                                </strong>
+                              )}
+                              {expMediaItems.length > 0 ? (
+                                <MediaGallery
+                                  items={expMediaItems}
+                                  variant="compact"
+                                />
+                              ) : null}
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {result.awaitingSelfAssess ? (
@@ -926,12 +965,42 @@ export function WriteClient({ setId }: WriteClientProps) {
                       )}
                     </div>
                   ) : null}
+
+                  <div className="border-t border-border/60 pt-3">
+                    <QuestionNotesAndReportBar
+                      key={currentQuestion.id}
+                      studySetId={setId}
+                      questionId={currentQuestion.id}
+                      showReportButton
+                      compact
+                      canEdit={canEdit}
+                      onEditQuestion={() =>
+                        setEditingQuestionId(currentQuestion.id)
+                      }
+                    />
+                  </div>
                 </CardContent>
               </Card>
             </motion.div>
           </AnimatePresence>
         </div>
       ) : null}
+
+      <ContextualQuestionEditorModal
+        open={Boolean(editingQuestionId) && canEdit}
+        onOpenChange={(open) => {
+          if (!open) setEditingQuestionId(null);
+        }}
+        studySetId={setId}
+        questionId={editingQuestionId}
+        initialQuestion={
+          editingQuestionId
+            ? (bundle.questions.find((q) => q.id === editingQuestionId) ?? null)
+            : null
+        }
+        chapters={bundle.chapters}
+        onSaved={(saved) => updateLocalQuestion(saved)}
+      />
     </FocusModeShell>
   );
 }

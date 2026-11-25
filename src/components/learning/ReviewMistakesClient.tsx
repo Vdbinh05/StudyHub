@@ -22,6 +22,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,6 +52,13 @@ import {
   type MistakeItem,
 } from "@/lib/learning/api-client";
 import { formatCorrectAnswerDisplay } from "@/lib/learning/answer-display";
+import {
+  getOptionDisplayItems,
+  getQuestionBackAttachments,
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+  attachmentToDisplayItem,
+} from "@/lib/learning/media-helpers";
 import { calculateNextReview, isQuestionDue } from "@/lib/learning/sm2";
 import { invalidateLearningCaches } from "@/lib/query-keys";
 import {
@@ -59,9 +67,11 @@ import {
   type QuestionType,
 } from "@/types/domain";
 import { cn } from "@/lib/utils";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
+import { useEditableSetIds } from "./useStudySetBundle";
 
 const QUESTION_TYPE_LABELS: Record<QuestionType, { vi: string; en: string }> = {
   single_choice: { vi: "Trắc nghiệm (1 đáp án)", en: "Single Choice" },
@@ -117,6 +127,12 @@ export function ReviewMistakesClient() {
   const [dueSessionActive, setDueSessionActive] = React.useState(false);
   const [dueIndex, setDueIndex] = React.useState(0);
   const [dueRevealed, setDueRevealed] = React.useState(false);
+  const [editingQuestion, setEditingQuestion] = React.useState<{
+    studySetId: string;
+    questionId: string;
+    initialQuestion?: MistakeItem["question"] | null;
+  } | null>(null);
+  const { canEditSet } = useEditableSetIds(true);
 
   const setsQuery = useQuery({
     queryKey: ["accessible-sets"],
@@ -612,10 +628,12 @@ export function ReviewMistakesClient() {
               fallbackText={q.prompt}
               className="text-sm font-medium leading-relaxed sm:text-base"
             />
-            <ZoomableImage
-              src={q.prompt_image_url}
-              alt={lText(locale, "Hình ảnh câu hỏi", "Question image")}
-              lazy
+            <MediaGallery
+              items={getQuestionPromptDisplayItems(
+                q,
+                lText(locale, "Hình ảnh câu hỏi", "Question image"),
+              )}
+              variant="compact"
             />
             {isSafeDisplayImageUrl(audioSrc) ? (
               <audio
@@ -628,44 +646,87 @@ export function ReviewMistakesClient() {
           </div>
 
           {/* Previous Wrong Answer vs Correct Answer */}
-          <div className="grid gap-2.5 sm:grid-cols-2">
-            {(wrongOptions.length > 0 || item.last_typed_answer) ? (
-              <div className="rounded-lg border border-destructive/40 bg-destructive-subtle/40 p-3 text-xs">
-                <p className="font-semibold text-destructive-subtle-foreground">
-                  {lText(locale, "Câu trả lời sai gần nhất:", "Your last wrong answer:")}
-                </p>
-                <p className="mt-1 whitespace-pre-wrap text-foreground">
-                  {wrongOptions.length > 0
-                    ? wrongOptions.map((o) => o.content || o.label).join(" / ")
-                    : item.last_typed_answer}
-                </p>
-              </div>
-            ) : null}
+          {(() => {
+            const wrongOptMedia = wrongOptions.flatMap((o) =>
+              getOptionDisplayItems(o),
+            );
+            const correctOptions = (q.options ?? []).filter((o) => o.is_correct);
+            const correctOptMedia = correctOptions.flatMap((o) =>
+              getOptionDisplayItems(o),
+            );
+            return (
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {wrongOptions.length > 0 || item.last_typed_answer ? (
+                  <div className="space-y-2 rounded-lg border border-destructive/40 bg-destructive-subtle/40 p-3 text-xs">
+                    <p className="font-semibold text-destructive-subtle-foreground">
+                      {lText(
+                        locale,
+                        "Câu trả lời sai gần nhất:",
+                        "Your last wrong answer:",
+                      )}
+                    </p>
+                    <p className="whitespace-pre-wrap text-foreground">
+                      {wrongOptions.length > 0
+                        ? wrongOptions
+                            .map((o) => o.content || o.label)
+                            .join(" / ")
+                        : item.last_typed_answer}
+                    </p>
+                    {wrongOptMedia.length > 0 ? (
+                      <MediaGallery items={wrongOptMedia} variant="option" />
+                    ) : null}
+                  </div>
+                ) : null}
 
-            <div className="rounded-lg border border-success/40 bg-success-subtle/40 p-3 text-xs">
-              <p className="font-semibold text-success-subtle-foreground">
-                {lText(locale, "Đáp án đúng:", "Correct answer:")}
-              </p>
-              <p className="mt-1 whitespace-pre-wrap text-foreground">
-                {formattedCorrectAnswer}
-              </p>
-            </div>
-          </div>
+                <div className="space-y-2 rounded-lg border border-success/40 bg-success-subtle/40 p-3 text-xs">
+                  <p className="font-semibold text-success-subtle-foreground">
+                    {lText(locale, "Đáp án đúng:", "Correct answer:")}
+                  </p>
+                  <p className="whitespace-pre-wrap text-foreground">
+                    {formattedCorrectAnswer}
+                  </p>
+                  {correctOptMedia.length > 0 ? (
+                    <MediaGallery items={correctOptMedia} variant="option" />
+                  ) : null}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Explanation */}
-          {q.explanation || q.explanation_rich ? (
-            <div className="rounded-lg bg-secondary/50 p-3 text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">
-                {t("study.explanation")}:{" "}
-              </span>
-              <SafeRichText
-                rich={q.explanation_rich}
-                fallbackText={q.explanation}
-              />
-            </div>
-          ) : null}
+          {(() => {
+            const expMediaItems = getQuestionExplanationDisplayItems(
+              q,
+              lText(locale, "Hình ảnh giải thích", "Explanation image"),
+            );
+            if (!q.explanation && !q.explanation_rich && expMediaItems.length === 0) {
+              return null;
+            }
+            return (
+              <div className="space-y-2 rounded-lg bg-secondary/50 p-3 text-xs text-muted-foreground">
+                {q.explanation || q.explanation_rich ? (
+                  <div>
+                    <span className="font-semibold text-foreground">
+                      {t("study.explanation")}:{" "}
+                    </span>
+                    <SafeRichText
+                      rich={q.explanation_rich}
+                      fallbackText={q.explanation}
+                    />
+                  </div>
+                ) : (
+                  <span className="block font-semibold text-foreground">
+                    {t("study.explanation")}:
+                  </span>
+                )}
+                {expMediaItems.length > 0 ? (
+                  <MediaGallery items={expMediaItems} variant="compact" />
+                ) : null}
+              </div>
+            );
+          })()}
 
-          {/* Timestamps & Personal Notes + Report Bar */}
+          {/* Timestamps & Personal Notes + Report + Contextual Edit Bar */}
           <div className="flex flex-col gap-2 border-t border-border pt-3">
             <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
               {item.last_reviewed_at ? (
@@ -694,6 +755,14 @@ export function ReviewMistakesClient() {
               studySetId={item.study_set_id}
               questionId={item.question_id}
               compact
+              canEdit={canEditSet(item.study_set_id)}
+              onEditQuestion={() =>
+                setEditingQuestion({
+                  studySetId: item.study_set_id,
+                  questionId: item.question_id,
+                  initialQuestion: q,
+                })
+              }
             />
           </div>
         </CardContent>
@@ -1315,13 +1384,20 @@ export function ReviewMistakesClient() {
                   fallbackText={dueItems[dueIndex].question.prompt}
                   className="text-base font-medium"
                 />
+                <MediaGallery
+                  items={getQuestionPromptDisplayItems(
+                    dueItems[dueIndex].question,
+                    lText(locale, "Hình ảnh câu hỏi", "Question image"),
+                  )}
+                  variant="compact"
+                />
                 {!dueRevealed ? (
                   <Button type="button" onClick={() => setDueRevealed(true)}>
                     {lText(locale, "Hiện đáp án", "Reveal Answer")}
                   </Button>
                 ) : (
                   <div className="space-y-4">
-                    <div className="rounded-lg border border-primary/30 bg-accent/30 p-3.5 text-sm">
+                    <div className="space-y-2 rounded-lg border border-primary/30 bg-accent/30 p-3.5 text-sm">
                       <SafeRichText
                         rich={dueItems[dueIndex].question.back_rich}
                         fallbackText={
@@ -1331,6 +1407,62 @@ export function ReviewMistakesClient() {
                           ) || "—"
                         }
                       />
+                      {(() => {
+                        const dueQ = dueItems[dueIndex].question;
+                        const backItems = getQuestionBackAttachments(dueQ)
+                          .map((att, i) =>
+                            attachmentToDisplayItem(
+                              att,
+                              lText(locale, "Hình ảnh đáp án", "Answer image"),
+                              i,
+                            ),
+                          )
+                          .filter(
+                            (it): it is NonNullable<typeof it> => it !== null,
+                          );
+                        const correctOptItems = (dueQ.options ?? [])
+                          .filter((o) => o.is_correct)
+                          .flatMap((o) => getOptionDisplayItems(o));
+                        const answerMedia =
+                          backItems.length > 0 ? backItems : correctOptItems;
+                        const expMedia = getQuestionExplanationDisplayItems(
+                          dueQ,
+                          lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                        );
+                        return (
+                          <>
+                            {answerMedia.length > 0 ? (
+                              <MediaGallery
+                                items={answerMedia}
+                                variant="compact"
+                              />
+                            ) : null}
+                            {dueQ.explanation ||
+                            dueQ.explanation_rich ||
+                            expMedia.length > 0 ? (
+                              <div className="space-y-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+                                {dueQ.explanation || dueQ.explanation_rich ? (
+                                  <div>
+                                    <span className="font-semibold text-foreground">
+                                      {t("study.explanation")}:{" "}
+                                    </span>
+                                    <SafeRichText
+                                      rich={dueQ.explanation_rich}
+                                      fallbackText={dueQ.explanation}
+                                    />
+                                  </div>
+                                ) : null}
+                                {expMedia.length > 0 ? (
+                                  <MediaGallery
+                                    items={expMedia}
+                                    variant="compact"
+                                  />
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </>
+                        );
+                      })()}
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                       {(
@@ -1383,6 +1515,26 @@ export function ReviewMistakesClient() {
           )}
         </TabsContent>
       </Tabs>
+
+      <ContextualQuestionEditorModal
+        open={
+          Boolean(editingQuestion) && canEditSet(editingQuestion?.studySetId)
+        }
+        onOpenChange={(open) => {
+          if (!open) setEditingQuestion(null);
+        }}
+        studySetId={editingQuestion?.studySetId ?? ""}
+        questionId={editingQuestion?.questionId ?? null}
+        initialQuestion={editingQuestion?.initialQuestion ?? null}
+        onSaved={() => {
+          void queryClient.invalidateQueries({
+            queryKey: ["review-mistakes-v3"],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["due-questions-v3"],
+          });
+        }}
+      />
     </div>
   );
 }

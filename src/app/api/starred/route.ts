@@ -97,6 +97,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           progress: progMap.get(q.id) ?? null,
           question: {
             ...q,
+            media_attachments: relations.questionMediaByQ.get(q.id) ?? [],
             options: relations.optionsByQ.get(q.id) ?? [],
             accepted_answers: relations.answersByQ.get(q.id) ?? [],
             tags: relations.tagsByQ.get(q.id) ?? [],

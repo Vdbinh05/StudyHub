@@ -41,7 +41,10 @@ export interface PdfExportOption {
   content: string;
   contentRich?: RichTextDoc | null;
   isCorrect: boolean;
+  /** Primary option image (kept for backward compatibility) */
   image?: PdfEmbeddedImage | null;
+  /** Multi-image option attachments (V32-053) */
+  images?: PdfEmbeddedImage[];
 }
 
 export interface PdfExportQuestion {
@@ -54,6 +57,8 @@ export interface PdfExportQuestion {
   backRich?: RichTextDoc | null;
   explanation?: string | null;
   explanationRich?: RichTextDoc | null;
+  /** Multi-image explanation attachments — rendered ONLY on non-question_paper modes (V32-053) */
+  explanationImages?: PdfEmbeddedImage[];
   hint?: string | null;
   passageId?: string | null;
   passageTitle?: string | null;
@@ -1079,14 +1084,27 @@ export async function exportStudySetToPdf(
           const optText = formatAcademicTextForPdf(opt.contentRich, opt.content);
           const marker =
             showInlineAnswers && opt.isCorrect ? " [✓]" : "";
-          drawWrapped(`${opt.label}. ${optText}${marker}`, {
+          const optImages =
+            opt.images && opt.images.length > 0
+              ? opt.images
+              : opt.image
+                ? [opt.image]
+                : [];
+          const displayOptText =
+            optText ||
+            (optImages.length > 0
+              ? isVi
+                ? "[Hình ảnh]"
+                : "[Image]"
+              : "");
+          drawWrapped(`${opt.label}. ${displayOptText}${marker}`, {
             font: showInlineAnswers && opt.isCorrect ? fontBold : fontRegular,
             size: fontSize,
             indent: 16,
             color: showInlineAnswers && opt.isCorrect ? palette.success : palette.text,
           });
-          if (opt.image) {
-            await drawEmbeddedImage(opt.image, 28, Math.min(contentWidth - 48, 220), 110);
+          for (const optImg of optImages) {
+            await drawEmbeddedImage(optImg, 28, Math.min(contentWidth - 48, 220), 110);
           }
         }
       } else if (q.questionType === "ordering" && q.typePayload?.type === "ordering") {
@@ -1194,6 +1212,7 @@ export async function exportStudySetToPdf(
           },
         );
         const expText = formatAcademicTextForPdf(q.explanationRich, q.explanation);
+        const expImages = q.explanationImages ?? [];
         if (expText) {
           drawWrapped(`${isVi ? "Giải thích" : "Explanation"}: ${expText}`, {
             font: fontRegular,
@@ -1201,6 +1220,16 @@ export async function exportStudySetToPdf(
             indent: 12,
             color: palette.muted,
           });
+        } else if (expImages.length > 0) {
+          drawWrapped(`${isVi ? "Giải thích" : "Explanation"}:`, {
+            font: fontRegular,
+            size: fontSize - 0.5,
+            indent: 12,
+            color: palette.muted,
+          });
+        }
+        for (const expImg of expImages) {
+          await drawEmbeddedImage(expImg, 20, Math.min(contentWidth - 36, 300), 150);
         }
       }
 

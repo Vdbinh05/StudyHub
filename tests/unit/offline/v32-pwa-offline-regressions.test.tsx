@@ -825,12 +825,8 @@ describe("V3.2 Mobile, PWA & Offline Stability Regressions", () => {
       screen.getByTestId("offline-option-image-opt-img-b"),
     ).toBeInTheDocument();
 
-    const optABtn = screen
-      .getByTestId("offline-option-image-opt-img-a")
-      .closest("button")!;
-    const optCBtn = screen
-      .getByTestId("offline-option-image-opt-img-c")
-      .closest("button")!;
+    const optABtn = screen.getByTestId("offline-option-opt-img-a");
+    const optCBtn = screen.getByTestId("offline-option-opt-img-c");
     fireEvent.click(optABtn);
     fireEvent.click(optCBtn);
 

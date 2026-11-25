@@ -371,4 +371,70 @@ describe("V3.2 PDF Export Regressions (V32-030 / FUNC-21)", () => {
       ),
     ).toBe("SECRET_ALTIMETER_LABEL");
   });
+
+  it("renders multi-image prompt, multi-image options, and explanationImages in paper_with_explanations while omitting explanationImages in question_paper (V32-053)", async () => {
+    // Valid 1x1 red PNG
+    const tinyPng = Uint8Array.from(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    );
+
+    const multiImageQuestion: PdfExportQuestion = {
+      id: "q-multi-img",
+      questionType: "single_choice",
+      prompt: "Quan sát hai biểu đồ và chọn đáp án đúng:",
+      explanation: "Giải thích kèm hình minh họa:",
+      promptImages: [
+        { bytes: tinyPng, mimeType: "image/png" },
+        { bytes: tinyPng, mimeType: "image/png" },
+      ],
+      explanationImages: [{ bytes: tinyPng, mimeType: "image/png" }],
+      options: [
+        {
+          id: "opt-a",
+          label: "A",
+          content: "",
+          isCorrect: true,
+          image: { bytes: tinyPng, mimeType: "image/png" },
+          images: [
+            { bytes: tinyPng, mimeType: "image/png" },
+            { bytes: tinyPng, mimeType: "image/png" },
+          ],
+        },
+        {
+          id: "opt-b",
+          label: "B",
+          content: "Đáp án văn bản",
+          isCorrect: false,
+          image: null,
+          images: [],
+        },
+      ],
+    };
+
+    const paperOnly = await exportStudySetToPdf([multiImageQuestion], {
+      mode: "question_paper",
+      locale: "vi",
+      title: "Đề đa ảnh",
+    });
+    const withExplanations = await exportStudySetToPdf([multiImageQuestion], {
+      mode: "paper_with_explanations",
+      locale: "vi",
+      title: "Đề đa ảnh có lời giải",
+    });
+
+    expect(new TextDecoder().decode(paperOnly.bytes.subarray(0, 5))).toBe("%PDF-");
+    expect(new TextDecoder().decode(withExplanations.bytes.subarray(0, 5))).toBe("%PDF-");
+
+    const paperText = await extractPdfText(paperOnly.bytes);
+    const expText = await extractPdfText(withExplanations.bytes);
+
+    expect(paperText).toContain("A. [Hình ảnh]");
+    expect(paperText).not.toContain("Giải thích kèm hình minh họa");
+    expect(expText).toContain("Giải thích kèm hình minh họa");
+    // Embedding explanation image + inline answer block makes paper_with_explanations strictly larger
+    expect(withExplanations.bytes.byteLength).toBeGreaterThan(paperOnly.bytes.byteLength);
+  });
 });

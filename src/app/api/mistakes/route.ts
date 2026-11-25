@@ -5,6 +5,7 @@ import {
   fetchAllPages,
   fetchInChunks,
   fetchQuestionRelationsChunked,
+  hydrateQuestionAndOptionMedia,
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
 import {
@@ -71,8 +72,66 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
 
     if (!rpcErr && rpcMistakes) {
-      const items = Array.isArray(rpcMistakes.items) ? rpcMistakes.items : [];
-      const total = Number(rpcMistakes.total ?? items.length);
+      const rawItems = Array.isArray(rpcMistakes.items) ? rpcMistakes.items : [];
+      const total = Number(rpcMistakes.total ?? rawItems.length);
+
+      // V32-055: Hydrate multi-image question & option media_attachments onto RPC items
+      const rpcQuestionIds: string[] = [];
+      const rpcOptionIds: string[] = [];
+      for (const rawItem of rawItems) {
+        if (!rawItem || typeof rawItem !== "object") continue;
+        const qObj = (rawItem as Record<string, unknown>).question as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        if (qObj && typeof qObj.id === "string") {
+          rpcQuestionIds.push(qObj.id);
+          const opts = Array.isArray(qObj.options) ? qObj.options : [];
+          for (const opt of opts) {
+            if (opt && typeof opt === "object" && typeof (opt as Record<string, unknown>).id === "string") {
+              rpcOptionIds.push((opt as Record<string, unknown>).id as string);
+            }
+          }
+        }
+      }
+
+      const items =
+        rpcQuestionIds.length > 0
+          ? await (async () => {
+              const { questionMediaByQ, optionMediaByOpt } =
+                await hydrateQuestionAndOptionMedia(
+                  supabase,
+                  rpcQuestionIds,
+                  rpcOptionIds,
+                );
+              return rawItems.map((rawItem) => {
+                if (!rawItem || typeof rawItem !== "object") return rawItem;
+                const rec = rawItem as Record<string, unknown>;
+                const qObj = rec.question as Record<string, unknown> | null | undefined;
+                if (!qObj || typeof qObj.id !== "string") return rawItem;
+                const opts = Array.isArray(qObj.options) ? qObj.options : [];
+                return {
+                  ...rec,
+                  question: {
+                    ...qObj,
+                    media_attachments: questionMediaByQ.get(qObj.id) ?? [],
+                    options: opts.map((opt) => {
+                      if (!opt || typeof opt !== "object") return opt;
+                      const optRec = opt as Record<string, unknown>;
+                      const optId = typeof optRec.id === "string" ? optRec.id : "";
+                      return {
+                        ...optRec,
+                        media_attachments: optId
+                          ? (optionMediaByOpt.get(optId) ?? [])
+                          : [],
+                      };
+                    }),
+                  },
+                };
+              });
+            })()
+          : rawItems;
+
       return apiSuccess(items, {
         total,
         page: query.page,
@@ -522,6 +581,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           study_set: setMap.get(prog.study_set_id) ?? null,
           question: {
             ...q,
+            media_attachments: relations.questionMediaByQ.get(q.id) ?? [],
             options: relations.optionsByQ.get(q.id) ?? [],
             accepted_answers: relations.answersByQ.get(q.id) ?? [],
             tags: relations.tagsByQ.get(q.id) ?? [],

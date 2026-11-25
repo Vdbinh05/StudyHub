@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -189,7 +190,7 @@ export function ReportsInboxPanel({
                     </span>
                   </div>
 
-                  {onEditQuestion && (
+                  {onEditQuestion ? (
                     <Button
                       type="button"
                       size="sm"
@@ -199,6 +200,20 @@ export function ReportsInboxPanel({
                     >
                       <Edit3 className="size-3.5" aria-hidden="true" />
                       {isVi ? "Mở câu hỏi để sửa" : "Edit Question"}
+                    </Button>
+                  ) : (
+                    <Button
+                      asChild
+                      size="sm"
+                      variant="outline"
+                      className="h-8 gap-1.5 text-xs"
+                    >
+                      <Link
+                        href={`/sets/${studySetId}/edit?questionId=${encodeURIComponent(report.question_id)}`}
+                      >
+                        <Edit3 className="size-3.5" aria-hidden="true" />
+                        {isVi ? "Mở câu hỏi để sửa" : "Edit Question"}
+                      </Link>
                     </Button>
                   )}
                 </div>

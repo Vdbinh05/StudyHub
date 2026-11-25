@@ -8,6 +8,11 @@ import { useResilientImage } from "@/components/media/use-resilient-image";
 import { Button } from "@/components/ui/button";
 import { useOptionalI18n } from "@/lib/i18n";
 import {
+  canonicalizeMediaUrlKey,
+  questionMediaToDisplayItem,
+  type QuestionMediaAttachment,
+} from "@/lib/media/question-media";
+import {
   assetToDisplayItem,
   relationToDisplayItem,
   resolveSafeMediaUrl,
@@ -16,9 +21,19 @@ import {
 import { cn } from "@/lib/utils";
 import type { ContentMediaRelation, MediaAsset } from "@/types/v3";
 
+export type MediaGalleryItemInput = MediaDisplayItem | QuestionMediaAttachment;
+
+function isMediaDisplayItem(
+  item: MediaGalleryItemInput,
+): item is MediaDisplayItem {
+  return "kind" in item && (item.kind === "image" || item.kind === "audio");
+}
+
 export interface MediaGalleryProps {
-  /** Direct display items, V3 `ContentMediaRelation[]`, or `MediaAsset[]`. */
-  items?: readonly MediaDisplayItem[];
+  /** Direct display items or V32-053 `QuestionMediaAttachment[]` (e.g. from `getQuestionPromptMedia`). */
+  items?: readonly MediaGalleryItemInput[];
+  /** Explicit alias for `QuestionMediaAttachment[]`. */
+  attachments?: readonly QuestionMediaAttachment[];
   relations?: readonly ContentMediaRelation[];
   assets?: readonly MediaAsset[];
   /** Legacy fallback URL (e.g. `question.prompt_image_url` or `option.image_url`). */
@@ -152,6 +167,7 @@ function GalleryImageFigure({
 
 export function MediaGallery({
   items,
+  attachments,
   relations,
   assets,
   fallbackImageUrl,
@@ -166,7 +182,8 @@ export function MediaGallery({
 
   const normalizedItems = React.useMemo<MediaDisplayItem[]>(() => {
     const collected: MediaDisplayItem[] = [];
-    const seenUrls = new Set<string>();
+    const seenUrlKeys = new Set<string>();
+    const seenMediaIds = new Set<string>();
 
     const pushSafe = (item: MediaDisplayItem | null) => {
       if (!item) return;
@@ -174,13 +191,31 @@ export function MediaGallery({
         url: item.url,
         storage_path: item.storage_path,
       });
-      if (!safeUrl || seenUrls.has(safeUrl)) return;
-      seenUrls.add(safeUrl);
+      if (!safeUrl) return;
+      const urlKey = canonicalizeMediaUrlKey(safeUrl);
+      const realMediaId =
+        item.media_id && !item.media_id.startsWith("legacy:") ? item.media_id : null;
+      if ((realMediaId && seenMediaIds.has(realMediaId)) || (urlKey && seenUrlKeys.has(urlKey))) {
+        return;
+      }
+      if (realMediaId) seenMediaIds.add(realMediaId);
+      if (urlKey) seenUrlKeys.add(urlKey);
       collected.push({ ...item, url: safeUrl });
     };
 
     if (items && items.length > 0) {
-      for (const item of items) pushSafe(item);
+      items.forEach((item, idx) => {
+        if (isMediaDisplayItem(item)) {
+          pushSafe(item);
+        } else {
+          pushSafe(questionMediaToDisplayItem(item, idx));
+        }
+      });
+    }
+    if (attachments && attachments.length > 0) {
+      attachments.forEach((att, idx) => {
+        pushSafe(questionMediaToDisplayItem(att, idx));
+      });
     }
     if (relations && relations.length > 0) {
       const sorted = [...relations].sort((a, b) => a.sort_order - b.sort_order);
@@ -203,7 +238,7 @@ export function MediaGallery({
     }
 
     return collected;
-  }, [items, relations, assets, fallbackImageUrl, fallbackAlt]);
+  }, [items, attachments, relations, assets, fallbackImageUrl, fallbackAlt]);
 
   const imageItems = React.useMemo(
     () => normalizedItems.filter((item) => item.kind === "image"),

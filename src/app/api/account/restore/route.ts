@@ -180,6 +180,7 @@ const v3RestoreBackupSchema = z.object({
   question_options: z
     .array(
       z.object({
+        id: z.string().optional(),
         question_id: z.string(),
         position: z.number().int().min(0).optional(),
         label: z.string().trim().min(1).max(10),
@@ -232,6 +233,20 @@ const v3RestoreBackupSchema = z.object({
       }),
     )
     .max(50_000)
+    .optional(),
+  content_media_relations: z
+    .array(
+      z.object({
+        media_id: z.string().uuid(),
+        entity_type: z.enum(["question", "question_option"]),
+        entity_id: z.string(),
+        role: z.enum(["prompt", "back", "option", "explanation", "hint", "audio"]),
+        sort_order: z.number().int().min(0).max(100).optional(),
+        alt_text: z.string().trim().max(500).nullable().optional(),
+        caption: z.string().trim().max(1000).nullable().optional(),
+      }),
+    )
+    .max(100_000)
     .optional(),
 });
 
@@ -388,6 +403,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
     for (const o of input.question_options ?? []) {
       if (o.media_id) candidateMediaIds.add(o.media_id);
+    }
+    for (const rel of input.content_media_relations ?? []) {
+      if (rel.media_id) candidateMediaIds.add(rel.media_id);
     }
 
     const validOwnedMediaIds = new Set<string>();
@@ -735,12 +753,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       restoredQuestions += batch.length;
     }
 
-    // 6. Restore options (preserving V3 content_rich & image_alt), accepted answers, question_tags & notes
+    // 6. Restore options (preserving V3 content_rich & image_alt & mapping IDs for option media relations),
+    // accepted answers, question_tags, content_media_relations & notes
     let restoredOptions = 0;
+    const optionIdMap = new Map<string, string>();
     const validOptions = (input.question_options ?? [])
       .map((o, idx) => {
         const mapped = questionIdMap.get(o.question_id);
         if (!mapped) return null;
+        const newOptionId = randomUUID();
+        if (o.id) optionIdMap.set(o.id, newOptionId);
         const verifiedMediaId =
           o.media_id && validOwnedMediaIds.has(o.media_id) ? o.media_id : null;
         const normalizedContent =
@@ -748,6 +770,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             ? o.content
             : o.label;
         return {
+          id: newOptionId,
           question_id: mapped.newId,
           study_set_id: mapped.newSetId,
           position: o.position ?? idx,
@@ -768,6 +791,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         .insert(batch);
       if (oErr) throw oErr;
       restoredOptions += batch.length;
+    }
+
+    // 6b. Restore content_media_relations for caller-owned media_assets (prompt, back, option, explanation, hint, audio)
+    let restoredMediaRelations = 0;
+    const validMediaRelations = (input.content_media_relations ?? [])
+      .map((rel, idx) => {
+        if (!validOwnedMediaIds.has(rel.media_id)) return null;
+        const newEntityId =
+          rel.entity_type === "question"
+            ? questionIdMap.get(rel.entity_id)?.newId
+            : optionIdMap.get(rel.entity_id);
+        if (!newEntityId) return null;
+        return {
+          media_id: rel.media_id,
+          entity_type: rel.entity_type,
+          entity_id: newEntityId,
+          role: rel.role,
+          sort_order: rel.sort_order ?? idx,
+          alt_text: rel.alt_text ?? null,
+          caption: rel.caption ?? null,
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
+
+    for (const batch of chunkArray(validMediaRelations, INSERT_BATCH_SIZE)) {
+      const { error: mrErr } = await supabase
+        .from("content_media_relations")
+        .upsert(batch, {
+          onConflict: "media_id,entity_type,entity_id,role",
+          ignoreDuplicates: true,
+        });
+      if (mrErr) throw mrErr;
+      restoredMediaRelations += batch.length;
     }
 
     let restoredAccepted = 0;
@@ -856,6 +912,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           options: restoredOptions,
           accepted_answers: restoredAccepted,
           tags: restoredTags,
+          content_media_relations: restoredMediaRelations,
           user_question_notes: restoredNotes,
         },
       },

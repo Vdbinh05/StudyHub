@@ -581,16 +581,18 @@ export function ImageLightbox({
 }
 
 export interface ZoomableImageProps {
-  src: string;
+  src: string | null | undefined;
   alt?: string;
   caption?: string | null;
   className?: string;
   imgClassName?: string;
   aspectClassName?: string;
+  lazy?: boolean;
+  stopPropagation?: boolean;
 }
 
 /**
- * Click/tap-to-enlarge image wrapper with preserved aspect ratio and accessible trigger.
+ * Click/tap-to-enlarge image wrapper with preserved aspect ratio, resilient retry, and accessible trigger.
  */
 export function ZoomableImage({
   src,
@@ -599,13 +601,16 @@ export function ZoomableImage({
   className,
   imgClassName,
   aspectClassName = "max-h-72",
+  lazy = true,
+  stopPropagation = false,
 }: ZoomableImageProps) {
   const [open, setOpen] = React.useState(false);
   const i18n = useOptionalI18n();
   const vi = (i18n?.locale ?? "vi") === "vi";
-  const imageState = useResilientImage(src);
+  const safeSrc = typeof src === "string" ? src : "";
+  const imageState = useResilientImage(safeSrc);
 
-  if (!isRenderableImageUrl(src)) {
+  if (!isRenderableImageUrl(safeSrc)) {
     return null;
   }
 
@@ -625,7 +630,10 @@ export function ZoomableImage({
             variant="outline"
             size="sm"
             className="h-8 gap-1.5 text-xs"
-            onClick={imageState.retry}
+            onClick={(event) => {
+              if (stopPropagation) event.stopPropagation();
+              imageState.retry();
+            }}
           >
             <RotateCcw className="size-3.5" aria-hidden="true" />
             <span>{vi ? "Thử lại" : "Retry"}</span>
@@ -634,7 +642,10 @@ export function ZoomableImage({
       ) : (
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={(event) => {
+            if (stopPropagation) event.stopPropagation();
+            setOpen(true);
+          }}
           aria-label={
             vi
               ? `Phóng to ảnh${alt ? `: ${alt}` : ""}`
@@ -646,7 +657,7 @@ export function ZoomableImage({
           <img
             src={imageState.resolvedSrc}
             alt={alt}
-            loading="lazy"
+            loading={lazy ? "lazy" : undefined}
             decoding="async"
             onLoad={imageState.handleLoad}
             onError={imageState.handleError}
@@ -668,7 +679,7 @@ export function ZoomableImage({
         <ImageLightbox
           open={open}
           onOpenChange={setOpen}
-          src={src}
+          src={safeSrc}
           alt={alt}
           caption={caption}
         />

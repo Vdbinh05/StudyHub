@@ -5,7 +5,6 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  ImagePlus,
   Loader2,
   Plus,
   Trash2,
@@ -13,7 +12,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { getFriendlyErrorMessage } from "@/components/layout/api-client";
-import { uploadAudioSmart, uploadImageSmart } from "@/lib/media/direct-upload";
+import {
+  extractClipboardImageFiles,
+  MediaAttachmentEditor,
+  type EditableMediaAttachment,
+  type MediaAttachmentEditorHandle,
+} from "@/components/media/MediaAttachmentEditor";
+import { uploadAudioSmart } from "@/lib/media/direct-upload";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -46,7 +52,10 @@ export interface EditableOption {
   content: string;
   content_rich?: RichTextDoc | null;
   image_url?: string;
+  media_id?: string | null;
   image_alt?: string;
+  /** Multi-image attachments for this option (max 6, synced with image_url/media_id[0]) */
+  media_attachments?: EditableMediaAttachment[];
   is_correct: boolean;
 }
 
@@ -63,12 +72,16 @@ export interface QuestionDraft {
   prompt: string;
   prompt_rich?: RichTextDoc | null;
   prompt_image_url: string;
+  prompt_media?: EditableMediaAttachment[];
   back_text: string;
   back_rich?: RichTextDoc | null;
+  back_image_url?: string;
+  back_media?: EditableMediaAttachment[];
   chapter: string;
   difficulty: "easy" | "medium" | "hard";
   explanation: string;
   explanation_rich?: RichTextDoc | null;
+  explanation_media?: EditableMediaAttachment[];
   hint: string;
   tagsText: string;
   audio_url: string;
@@ -304,6 +317,7 @@ export interface V3QuestionTypeFieldsProps {
   setDraft: React.Dispatch<React.SetStateAction<QuestionDraft>>;
   passages: SharedPassage[];
   diagrams: DiagramSet[];
+  onMediaUploaded?: (mediaId: string) => void;
 }
 
 export function V3QuestionTypeFields({
@@ -313,9 +327,14 @@ export function V3QuestionTypeFields({
   setDraft,
   passages,
   diagrams,
+  onMediaUploaded,
 }: V3QuestionTypeFieldsProps): React.ReactElement {
   const vi = locale === "vi";
   const [uploadingKey, setUploadingKey] = React.useState<string | null>(null);
+  const optionMediaRefs = React.useRef<Map<string, MediaAttachmentEditorHandle | null>>(
+    new Map(),
+  );
+  const backMediaRef = React.useRef<MediaAttachmentEditorHandle | null>(null);
   const blankResetToken = `${draft.id ?? "new"}:${draft.question_type}`;
   const [blankRowKeys, setBlankRowKeys] = React.useState<{
     token: string;
@@ -336,50 +355,6 @@ export function V3QuestionTypeFields({
     if (base.length === count) return base;
     return Array.from({ length: count }, (_, i) => base[i] ?? `blank-row-${i}`);
   }, [blankRowKeys, blankResetToken, draft.type_payload]);
-
-  const uploadImageForTarget = async (
-    file: File | undefined,
-    key: string,
-    onSuccess: (proxyUrl: string) => void,
-  ): Promise<void> => {
-    if (!file) return;
-    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
-      toast.error(
-        vi
-          ? "Chỉ chấp nhận ảnh PNG, JPEG, WebP hoặc GIF (từ chối SVG)."
-          : "Only PNG, JPEG, WebP, or GIF images are allowed (SVG rejected).",
-      );
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error(vi ? "Ảnh vượt quá 5 MB." : "Image exceeds 5 MB.");
-      return;
-    }
-    setUploadingKey(key);
-    try {
-      const response = await uploadImageSmart({
-        file,
-        fileName: file.name,
-        purpose: "question",
-        studySetId: setId,
-      });
-      const res = (await response.json()) as {
-        data?: { proxyUrl?: string; signedUrl?: string; path?: string };
-        error?: { message?: string };
-      };
-      if (!response.ok) {
-        throw new Error(res.error?.message ?? "Upload failed");
-      }
-      const url = res.data?.proxyUrl ?? res.data?.signedUrl ?? res.data?.path ?? "";
-      if (!url) throw new Error("Upload failed");
-      onSuccess(url);
-      toast.success(vi ? "Đã tải ảnh lên." : "Image uploaded.");
-    } catch (err) {
-      toast.error(getFriendlyErrorMessage(err, locale));
-    } finally {
-      setUploadingKey(null);
-    }
-  };
 
   const uploadAudioFile = async (file: File | undefined): Promise<void> => {
     if (!file) return;
@@ -1344,11 +1319,37 @@ export function V3QuestionTypeFields({
             )}
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             {draft.options.map((opt, idx) => {
               const letter = String.fromCharCode(65 + idx);
+              const optMedia = opt.media_attachments ?? [];
+              const isImageOnlyOption =
+                opt.content.trim().length === 0 &&
+                (optMedia.length > 0 || Boolean(opt.image_url?.trim()));
+
+              const moveOption = (toIdx: number) => {
+                if (toIdx < 0 || toIdx >= draft.options.length || toIdx === idx) return;
+                setDraft((prev) => {
+                  const next = [...prev.options];
+                  const [moved] = next.splice(idx, 1);
+                  next.splice(toIdx, 0, moved);
+                  return { ...prev, options: next };
+                });
+              };
+
               return (
-                <div key={opt.localKey} className="space-y-1.5 rounded-lg border border-border/70 p-2">
+                <div
+                  key={opt.localKey}
+                  onPaste={(event) => {
+                    const pastedImages = extractClipboardImageFiles(event.clipboardData);
+                    if (pastedImages.length > 0) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      optionMediaRefs.current.get(opt.localKey)?.pasteFiles(pastedImages);
+                    }
+                  }}
+                  className="space-y-2 rounded-lg border border-border/80 bg-card/50 p-2.5"
+                >
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
@@ -1368,7 +1369,7 @@ export function V3QuestionTypeFields({
                       aria-pressed={opt.is_correct}
                       aria-label={`${vi ? "Đánh dấu đáp án đúng" : "Mark correct"} ${letter}`}
                       className={cn(
-                        "flex size-9 shrink-0 items-center justify-center rounded-lg border font-mono text-xs font-bold transition-colors",
+                        "flex min-h-10 min-w-10 shrink-0 items-center justify-center rounded-lg border font-mono text-xs font-bold transition-colors sm:min-h-9 sm:min-w-9",
                         opt.is_correct
                           ? "border-success bg-success text-success-foreground"
                           : "border-border bg-secondary text-muted-foreground hover:text-foreground",
@@ -1382,12 +1383,13 @@ export function V3QuestionTypeFields({
                     </button>
                     <Input
                       value={opt.content}
+                      aria-label={`${vi ? "Nội dung phương án" : "Option text"} ${letter}`}
                       placeholder={
-                        draft.question_type === "image_choice"
+                        draft.question_type === "image_choice" || optMedia.length > 0
                           ? vi
-                            ? `Nhãn hình ${letter} (tùy chọn)`
-                            : `Image caption ${letter} (optional)`
-                          : `${vi ? "Phương án" : "Option"} ${letter}`
+                            ? `Nhãn phương án ${letter} (tùy chọn khi đã có ảnh)`
+                            : `Option ${letter} text (optional when image attached)`
+                          : `${vi ? "Phương án" : "Option"} ${letter} (${vi ? "hoặc đính kèm ảnh bên dưới" : "or attach image below"})`
                       }
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1399,39 +1401,32 @@ export function V3QuestionTypeFields({
                         }));
                       }}
                     />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon-sm"
-                      asChild
-                      disabled={uploadingKey === opt.localKey}
-                      title={vi ? "Tải ảnh cho phương án" : "Upload option image"}
-                    >
-                      <label className="cursor-pointer">
-                        {uploadingKey === opt.localKey ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <ImagePlus className="size-3.5" />
-                        )}
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/gif"
-                          className="sr-only"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0];
-                            e.target.value = "";
-                            void uploadImageForTarget(f, opt.localKey, (url) => {
-                              setDraft((prev) => ({
-                                ...prev,
-                                options: prev.options.map((item, i) =>
-                                  i === idx ? { ...item, image_url: url } : item,
-                                ),
-                              }));
-                            });
-                          }}
-                        />
-                      </label>
-                    </Button>
+
+                    {draft.options.length > 1 && draft.question_type !== "true_false" && (
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled={idx === 0}
+                          aria-label={`${vi ? "Di chuyển phương án lên" : "Move option up"} ${letter}`}
+                          onClick={() => moveOption(idx - 1)}
+                        >
+                          <ArrowUp className="size-3.5" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled={idx === draft.options.length - 1}
+                          aria-label={`${vi ? "Di chuyển phương án xuống" : "Move option down"} ${letter}`}
+                          onClick={() => moveOption(idx + 1)}
+                        >
+                          <ArrowDown className="size-3.5" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    )}
+
                     {draft.options.length > 2 && draft.question_type !== "true_false" && (
                       <Button
                         type="button"
@@ -1445,38 +1440,52 @@ export function V3QuestionTypeFields({
                           }))
                         }
                       >
-                        <Trash2 className="size-4" aria-hidden="true" />
+                        <Trash2 className="size-4 text-muted-foreground hover:text-destructive" aria-hidden="true" />
                       </Button>
                     )}
                   </div>
-                  {opt.image_url && (
-                    <div className="flex items-center gap-2 pl-11">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={opt.image_url}
-                        alt={opt.image_alt || `Option ${letter}`}
-                        loading="lazy"
-                        decoding="async"
-                        className="h-12 max-w-[120px] rounded border border-border object-contain bg-background"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive"
-                        onClick={() =>
-                          setDraft((prev) => ({
-                            ...prev,
-                            options: prev.options.map((item, i) =>
-                              i === idx ? { ...item, image_url: "" } : item,
-                            ),
-                          }))
-                        }
-                      >
-                        {vi ? "Gỡ ảnh" : "Remove image"}
-                      </Button>
-                    </div>
-                  )}
+
+                  <div className="space-y-1.5 pl-0 sm:pl-11">
+                    {isImageOnlyOption && (
+                      <Badge variant="secondary" className="text-[10px]">
+                        {vi ? "Đáp án chỉ dùng hình ảnh" : "Image-only option"}
+                      </Badge>
+                    )}
+                    <MediaAttachmentEditor
+                      ref={(handle) => {
+                        optionMediaRefs.current.set(opt.localKey, handle);
+                      }}
+                      studySetId={setId}
+                      role="option"
+                      compact
+                      allowImages
+                      allowAudio={false}
+                      maxItems={6}
+                      zoneName={
+                        vi ? `Ảnh cho phương án ${letter}` : `Images for option ${letter}`
+                      }
+                      addButtonLabel={vi ? `Thêm ảnh ${letter}` : `Add image ${letter}`}
+                      value={optMedia}
+                      onMediaUploaded={onMediaUploaded}
+                      onChange={(nextMedia) => {
+                        const primary = nextMedia[0];
+                        setDraft((prev) => ({
+                          ...prev,
+                          options: prev.options.map((item, i) =>
+                            i === idx
+                              ? {
+                                  ...item,
+                                  media_attachments: nextMedia,
+                                  image_url: primary?.url ?? "",
+                                  media_id: primary?.media_id ?? null,
+                                  image_alt: primary?.alt_text ?? "",
+                                }
+                              : item,
+                          ),
+                        }));
+                      }}
+                    />
+                  </div>
                 </div>
               );
             })}
@@ -1488,7 +1497,17 @@ export function V3QuestionTypeFields({
       {showShortAnswerBlock && (
         <div className="space-y-3">
           {draft.question_type === "flashcard" && (
-            <div className="space-y-1.5">
+            <div
+              onPaste={(event) => {
+                const pastedImages = extractClipboardImageFiles(event.clipboardData);
+                if (pastedImages.length > 0) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  backMediaRef.current?.pasteFiles(pastedImages);
+                }
+              }}
+              className="space-y-2"
+            >
               <Label htmlFor="q-back-text">
                 {vi ? "Mặt sau / Định nghĩa" : "Back / Definition"}
               </Label>
@@ -1498,6 +1517,26 @@ export function V3QuestionTypeFields({
                 value={draft.back_text}
                 onChange={(e) =>
                   setDraft((prev) => ({ ...prev, back_text: e.target.value }))
+                }
+              />
+              <MediaAttachmentEditor
+                ref={backMediaRef}
+                studySetId={setId}
+                role="back"
+                compact
+                allowImages
+                allowAudio={false}
+                maxItems={4}
+                zoneName={vi ? "Ảnh mặt sau thẻ" : "Flashcard back images"}
+                addButtonLabel={vi ? "Thêm ảnh mặt sau" : "Add back image"}
+                value={draft.back_media ?? []}
+                onMediaUploaded={onMediaUploaded}
+                onChange={(nextMedia) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    back_media: nextMedia,
+                    back_image_url: nextMedia[0]?.url ?? "",
+                  }))
                 }
               />
             </div>

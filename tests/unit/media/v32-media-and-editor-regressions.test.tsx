@@ -33,7 +33,16 @@ vi.mock("@tanstack/react-virtual", () => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
+
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as typeof ResizeObserver;
+}
 
 vi.mock("@/components/layout/api-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/layout/api-client")>();
@@ -431,7 +440,7 @@ describe("V3.2 Question Editor, V3 Fields & Reports Inbox Regressions (FUNC-06, 
       id: "q-row-1",
       study_set_id: SET_ID,
       question_type: "single_choice",
-      position: 1,
+      position: 0,
       chapter: "Chương 1",
       prompt: "Câu hỏi có ảnh và âm thanh minh họa",
       prompt_image_url: "/api/uploads/signed-url?path=u1/s1/p.png&redirect=1",
@@ -550,7 +559,7 @@ describe("V3.2 Question Editor, V3 Fields & Reports Inbox Regressions (FUNC-06, 
     expect(screen.queryByText(/bảo toàn mã định danh/i)).not.toBeInTheDocument();
 
     // Sticky Save button is rendered with form="question-editor-form"
-    const saveBtn = screen.getByRole("button", { name: /Lưu câu hỏi/i });
+    const saveBtn = screen.getByRole("button", { name: /Lưu thay đổi|Lưu câu hỏi/i });
     expect(saveBtn).toHaveAttribute("form", "question-editor-form");
 
     // Secondary fields (Explanation, Hint, Tags) are collapsed by default and expand on click

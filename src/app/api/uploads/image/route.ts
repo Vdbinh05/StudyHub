@@ -85,6 +85,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     let rawSetId: string;
     let width: number | null;
     let height: number | null;
+    let altText: string | null = null;
+    let caption: string | null = null;
 
     if (isJsonMode) {
       const body = jsonUploadSchema.parse(await parseJsonBody(request, 64 * 1024));
@@ -105,6 +107,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       rawSetId = body.studySetId ?? "";
       width = body.width ?? null;
       height = body.height ?? null;
+      altText = body.altText ? body.altText.trim().slice(0, 500) : null;
+      caption = body.caption ? body.caption.trim().slice(0, 1000) : null;
     } else {
       const formData = await request.formData().catch(() => {
         throw new AppError("BAD_REQUEST", "Expected multipart/form-data payload.", 400);
@@ -136,6 +140,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       rawSetId = String(formData.get("studySetId") ?? "").trim();
       width = parseOptionalPositiveInt(formData.get("width"), 20_000);
       height = parseOptionalPositiveInt(formData.get("height"), 20_000);
+      const rawAlt = formData.get("altText");
+      const rawCaption = formData.get("caption");
+      altText =
+        typeof rawAlt === "string" && rawAlt.trim()
+          ? rawAlt.trim().slice(0, 500)
+          : null;
+      caption =
+        typeof rawCaption === "string" && rawCaption.trim()
+          ? rawCaption.trim().slice(0, 1000)
+          : null;
     }
 
     if (!ALLOWED_PURPOSES.has(rawPurpose)) {
@@ -251,6 +265,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         sha256_hash: sha256,
         width,
         height,
+        alt_text: altText,
+        caption,
       })
       .select("id")
       .single();

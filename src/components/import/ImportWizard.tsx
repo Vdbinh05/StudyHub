@@ -712,27 +712,35 @@ export function ImportWizard({
         const moved =
           sourceSlot === "prompt"
             ? (srcQ.promptMedia ?? []).find((m) => m.id === mediaId)
-            : srcQ.options
-                .find((o) => o.id === sourceSlot)
-                ?.media?.find((m) => m.id === mediaId);
+            : sourceSlot === "explanation"
+              ? (srcQ.explanationMedia ?? []).find((m) => m.id === mediaId)
+              : srcQ.options
+                  .find((o) => o.id === sourceSlot)
+                  ?.media?.find((m) => m.id === mediaId);
         if (!moved) return prev;
 
         const cleanMoved = { ...moved, ambiguous: false };
         const nextList = prev.slice();
 
         const nextSrcPromptMedia = (srcQ.promptMedia ?? []).filter((m) => m.id !== mediaId);
+        const nextSrcExplanationMedia = (srcQ.explanationMedia ?? []).filter(
+          (m) => m.id !== mediaId,
+        );
         const nextSrcOptions = srcQ.options.map((o) => {
           const rem = (o.media ?? []).filter((m) => m.id !== mediaId);
           return { ...o, media: rem.length > 0 ? rem : undefined };
         });
         const srcStillFloating =
           nextSrcPromptMedia.some((m) => m.ambiguous) ||
+          nextSrcExplanationMedia.some((m) => m.ambiguous) ||
           nextSrcOptions.some((o) => (o.media ?? []).some((m) => m.ambiguous));
 
         nextList[srcIdx] = validateParsedQuestion(
           {
             ...srcQ,
             promptMedia: nextSrcPromptMedia.length > 0 ? nextSrcPromptMedia : undefined,
+            explanationMedia:
+              nextSrcExplanationMedia.length > 0 ? nextSrcExplanationMedia : undefined,
             options: nextSrcOptions,
             ambiguousMedia: srcStillFloating ? true : undefined,
             issues: srcStillFloating
@@ -800,6 +808,9 @@ export function ImportWizard({
         promptMedia: q.promptMedia?.map((m) =>
           stripPreviewUrl(m as typeof m & { previewUrl?: string }),
         ),
+        explanationMedia: q.explanationMedia?.map((m) =>
+          stripPreviewUrl(m as typeof m & { previewUrl?: string }),
+        ),
         options: q.options.map((o) => ({
           ...o,
           media: o.media?.map((m) =>
@@ -814,6 +825,9 @@ export function ImportWizard({
         new Set(
           commitPayloadQuestions.flatMap((q) => [
             ...(q.promptMedia ?? [])
+              .map((m) => m.tempStoragePath)
+              .filter((p): p is string => Boolean(p)),
+            ...(q.explanationMedia ?? [])
               .map((m) => m.tempStoragePath)
               .filter((p): p is string => Boolean(p)),
             ...q.options.flatMap((o) =>

@@ -20,6 +20,7 @@ import {
   Volume2,
   XCircle,
 } from "lucide-react";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +30,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { useOptionalI18n } from "@/lib/i18n";
 import { selectMatchTile, type MatchBoardState } from "@/lib/learning/match-engine";
 import {
+  canonicalizeMediaUrlKey,
+  getOptionMedia,
+  getQuestionBackMedia,
+  getQuestionExplanationMedia,
+  getQuestionPromptMedia,
+} from "@/lib/media/question-media";
+import {
   clearOfflineCheckpoint,
   createOfflineMatchSession,
   evaluateOfflineDiagramHit,
@@ -36,7 +44,10 @@ import {
   gradeOfflineAnswer,
   loadOfflineCheckpoint,
   loadOfflineStudyBundle,
+  mapOfflineMediaAttachments,
   recordOfflineStudyAction,
+  resolveOfflineAttachmentUrl,
+  resolveOfflineQuestionMediaMap,
   resolveOfflineSpellAudio,
   saveOfflineCheckpoint,
   saveOfflineNote,
@@ -228,44 +239,6 @@ function formatExpectedAnswerSummary(
     .filter(Boolean);
   if (accepted.length > 0) return accepted.join(" / ");
   return vi ? "—" : "—";
-}
-
-function collectQuestionMediaUrls(question: OfflineQuestionRecord): string[] {
-  const urls = new Set<string>();
-  const add = (u: string | null | undefined) => {
-    if (u && u.trim().length > 0) urls.add(u);
-  };
-
-  add(question.prompt_image_url);
-  add(question.back_image_url);
-  add(question.audio_url);
-
-  for (const opt of question.options ?? []) {
-    add(opt.image_url);
-  }
-
-  const payload = question.type_payload;
-  if (payload) {
-    if (payload.type === "listening") {
-      add(payload.audio_url);
-    } else if (payload.type === "image_hotspot") {
-      add(payload.image_url);
-    } else if (payload.type === "ordering") {
-      for (const item of payload.items) {
-        add(item.image_url);
-      }
-    } else if (payload.type === "matching") {
-      for (const pair of payload.pairs) {
-        add(pair.left_image_url);
-        add(pair.right_image_url);
-      }
-      for (const dist of payload.distractors ?? []) {
-        add(dist.right_image_url);
-      }
-    }
-  }
-
-  return Array.from(urls);
 }
 
 export function OfflineStudyRunner({
@@ -499,21 +472,11 @@ export function OfflineStudyRunner({
 
     void (async () => {
       if (currentQuestion) {
-        const urls = collectQuestionMediaUrls(currentQuestion);
-        const resolvedEntries = await Promise.all(
-          urls.map(async (url) => {
-            const blobUrl = await bundle.resolveMediaUrl(url);
-            return [url, blobUrl] as const;
-          }),
+        const nextMap = await resolveOfflineQuestionMediaMap(
+          bundle,
+          currentQuestion,
         );
         if (!active) return;
-
-        const nextMap: Record<string, string> = {};
-        for (const [rawUrl, blobUrl] of resolvedEntries) {
-          if (blobUrl) {
-            nextMap[rawUrl] = blobUrl;
-          }
-        }
         setMediaSrcMap(nextMap);
 
         const existingNote = bundle.notesByQuestionId.get(currentQuestion.id);
@@ -551,10 +514,64 @@ export function OfflineStudyRunner({
     (rawUrl: string | null | undefined): string | null => {
       if (!rawUrl) return null;
       if (mediaSrcMap[rawUrl]) return mediaSrcMap[rawUrl];
+      const canonTarget = canonicalizeMediaUrlKey(rawUrl);
+      if (canonTarget) {
+        for (const [k, v] of Object.entries(mediaSrcMap)) {
+          if (canonicalizeMediaUrlKey(k) === canonTarget) {
+            return v;
+          }
+        }
+      }
       return isOnline ? rawUrl : null;
     },
     [mediaSrcMap, isOnline],
   );
+
+  const promptMedia = React.useMemo(() => {
+    if (!currentQuestion) return { items: [], missingOfflineCount: 0 };
+    const rawAttachments = getQuestionPromptMedia(currentQuestion);
+    const hotspotBaseKey =
+      mode !== "flashcards" &&
+      mode !== "write" &&
+      mode !== "spell" &&
+      currentQuestion.type_payload?.type === "image_hotspot" &&
+      currentQuestion.type_payload.image_url
+        ? canonicalizeMediaUrlKey(currentQuestion.type_payload.image_url)
+        : null;
+    const filtered = hotspotBaseKey
+      ? rawAttachments.filter(
+          (att) => canonicalizeMediaUrlKey(att.url) !== hotspotBaseKey,
+        )
+      : rawAttachments;
+    return mapOfflineMediaAttachments(filtered, mediaSrcMap, {
+      isOnline,
+      fallbackAlt: vi ? "Hình ảnh câu hỏi" : "Question illustration",
+    });
+  }, [currentQuestion, mediaSrcMap, isOnline, vi, mode]);
+
+  const backMedia = React.useMemo(() => {
+    if (!currentQuestion) return { items: [], missingOfflineCount: 0 };
+    return mapOfflineMediaAttachments(
+      getQuestionBackMedia(currentQuestion),
+      mediaSrcMap,
+      {
+        isOnline,
+        fallbackAlt: vi ? "Hình ảnh mặt sau" : "Back illustration",
+      },
+    );
+  }, [currentQuestion, mediaSrcMap, isOnline, vi]);
+
+  const explanationMedia = React.useMemo(() => {
+    if (!currentQuestion) return { items: [], missingOfflineCount: 0 };
+    return mapOfflineMediaAttachments(
+      getQuestionExplanationMedia(currentQuestion),
+      mediaSrcMap,
+      {
+        isOnline,
+        fallbackAlt: vi ? "Hình ảnh giải thích" : "Explanation illustration",
+      },
+    );
+  }, [currentQuestion, mediaSrcMap, isOnline, vi]);
 
   const matchingRightChoices = React.useMemo(
     () => (currentQuestion ? buildShuffledMatchingChoices(currentQuestion) : []),
@@ -1051,20 +1068,53 @@ export function OfflineStudyRunner({
   const progressPct =
     totalQuestions > 0 ? Math.min(100, Math.round((index / totalQuestions) * 100)) : 0;
 
-  const promptImageSrc = resolveRenderableMediaSrc(
-    currentQuestion?.prompt_image_url,
-  );
-  const backImageSrc = resolveRenderableMediaSrc(currentQuestion?.back_image_url);
   const questionAudioRawUrl =
     currentQuestion?.audio_url ??
     (currentQuestion?.type_payload?.type === "listening"
       ? currentQuestion.type_payload.audio_url
-      : null);
+      : null) ??
+    resolveOfflineAttachmentUrl(
+      currentQuestion?.media_attachments?.find(
+        (att) =>
+          att.role === "audio" ||
+          att.media?.kind === "audio" ||
+          Boolean(att.mime_type?.toLowerCase().startsWith("audio/")),
+      ),
+    );
   const questionAudioSrc = resolveRenderableMediaSrc(questionAudioRawUrl);
   const currentPayload = currentQuestion?.type_payload ?? null;
   const isChoiceMulti = currentQuestion
     ? isMultiSelectQuestion(currentQuestion)
     : false;
+
+  const explanationBlock =
+    currentQuestion &&
+    (Boolean(currentQuestion.explanation) ||
+      explanationMedia.items.length > 0 ||
+      explanationMedia.missingOfflineCount > 0) ? (
+      <div
+        data-testid="offline-explanation-section"
+        className="bg-secondary/50 border-border space-y-2 rounded-lg border p-3"
+      >
+        {currentQuestion.explanation && (
+          <p className="text-muted-foreground text-xs whitespace-pre-wrap sm:text-sm">
+            {currentQuestion.explanation}
+          </p>
+        )}
+        {explanationMedia.items.length > 0 && (
+          <div data-testid="offline-explanation-media-gallery">
+            <MediaGallery items={explanationMedia.items} variant="compact" />
+          </div>
+        )}
+        {explanationMedia.missingOfflineCount > 0 && (
+          <p className="text-muted-foreground text-xs italic">
+            {vi
+              ? `[${explanationMedia.missingOfflineCount} hình ảnh giải thích chưa lưu ngoại tuyến]`
+              : `[${explanationMedia.missingOfflineCount} explanation image(s) not cached offline]`}
+          </p>
+        )}
+      </div>
+    ) : null;
 
   const isStructuredOrdering =
     mode !== "flashcards" &&
@@ -1513,20 +1563,24 @@ export function OfflineStudyRunner({
               </div>
             )}
 
-            {/* Question Prompt & Cached Image */}
+            {/* Question Prompt & Cached Multi-Image Gallery */}
             <div className="space-y-3">
               {currentQuestion.prompt.trim().length > 0 && (
                 <p className="text-base font-medium leading-relaxed">
                   {currentQuestion.prompt}
                 </p>
               )}
-              {promptImageSrc && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={promptImageSrc}
-                  alt={vi ? "Hình ảnh câu hỏi" : "Question illustration"}
-                  className="border-border max-h-72 rounded-lg border object-contain"
-                />
+              {promptMedia.items.length > 0 && (
+                <div data-testid="offline-prompt-media-gallery">
+                  <MediaGallery items={promptMedia.items} variant="default" />
+                </div>
+              )}
+              {promptMedia.missingOfflineCount > 0 && (
+                <p className="text-muted-foreground text-xs italic">
+                  {vi
+                    ? `[${promptMedia.missingOfflineCount} hình ảnh câu hỏi chưa lưu ngoại tuyến]`
+                    : `[${promptMedia.missingOfflineCount} question image(s) not cached offline]`}
+                </p>
               )}
             </div>
 
@@ -1553,26 +1607,26 @@ export function OfflineStudyRunner({
             {mode === "flashcards" ? (
               <div className="space-y-4">
                 {flipped ? (
-                  <div className="bg-secondary/50 border-border space-y-2 rounded-lg border p-4">
+                  <div className="bg-secondary/50 border-border space-y-3 rounded-lg border p-4">
                     <p className="text-xs font-medium text-muted-foreground">
                       {vi ? "Đáp án / Mặt sau" : "Answer / Back"}
                     </p>
                     <p className="text-sm font-medium sm:text-base">
                       {formatExpectedAnswerSummary(currentQuestion, vi)}
                     </p>
-                    {backImageSrc && (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={backImageSrc}
-                        alt={vi ? "Hình ảnh mặt sau" : "Back illustration"}
-                        className="border-border max-h-60 rounded-lg border object-contain"
-                      />
+                    {backMedia.items.length > 0 && (
+                      <div data-testid="offline-back-media-gallery">
+                        <MediaGallery items={backMedia.items} variant="compact" />
+                      </div>
                     )}
-                    {currentQuestion.explanation && (
-                      <p className="text-muted-foreground text-xs sm:text-sm">
-                        {currentQuestion.explanation}
+                    {backMedia.missingOfflineCount > 0 && (
+                      <p className="text-muted-foreground text-xs italic">
+                        {vi
+                          ? `[${backMedia.missingOfflineCount} hình ảnh mặt sau chưa lưu ngoại tuyến]`
+                          : `[${backMedia.missingOfflineCount} back image(s) not cached offline]`}
                       </p>
                     )}
+                    {explanationBlock}
                   </div>
                 ) : (
                   <Button
@@ -1688,11 +1742,7 @@ export function OfflineStudyRunner({
                             : `Correct answer: ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
-                    {currentQuestion.explanation && (
-                      <p className="text-muted-foreground bg-secondary/50 rounded-lg p-3 text-xs sm:text-sm">
-                        {currentQuestion.explanation}
-                      </p>
-                    )}
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>
@@ -1778,6 +1828,7 @@ export function OfflineStudyRunner({
                             : `Correct answer: ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>
@@ -1883,6 +1934,7 @@ export function OfflineStudyRunner({
                             : `Correct order: ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>
@@ -1981,6 +2033,7 @@ export function OfflineStudyRunner({
                             : `Correct matches: ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>
@@ -2145,6 +2198,7 @@ export function OfflineStudyRunner({
                             : `Target region(s): ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>
@@ -2202,6 +2256,7 @@ export function OfflineStudyRunner({
                             : `Correct answer: ${formatExpectedAnswerSummary(currentQuestion, vi)}`}
                       </span>
                     </div>
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next item"}
                     </Button>
@@ -2209,7 +2264,7 @@ export function OfflineStudyRunner({
                 )}
               </div>
             ) : (
-              /* Single / Multiple Choice & Image Choice offline */
+              /* Single / Multiple Choice & Image Choice offline (multi-image MediaGallery) */
               <div className="space-y-3">
                 {isChoiceMulti && (
                   <p className="text-muted-foreground text-xs font-medium">
@@ -2218,26 +2273,38 @@ export function OfflineStudyRunner({
                       : "Select all correct answers:"}
                   </p>
                 )}
-                <div className="space-y-2">
+                <div
+                  className={
+                    currentQuestion.question_type === "image_choice"
+                      ? "grid gap-2.5 sm:grid-cols-2"
+                      : "space-y-2"
+                  }
+                >
                   {(currentQuestion.options ?? []).map((opt) => {
                     const selected = selectedOptionIds.includes(opt.id);
-                    const optImgSrc = resolveRenderableMediaSrc(opt.image_url);
+                    const optMedia = mapOfflineMediaAttachments(
+                      getOptionMedia(opt),
+                      mediaSrcMap,
+                      {
+                        isOnline,
+                        fallbackAlt:
+                          opt.content.trim() ||
+                          (vi
+                            ? `Hình ảnh đáp án ${opt.label}`
+                            : `Option ${opt.label} image`),
+                      },
+                    );
+                    const hasOptText = opt.content.trim().length > 0;
+                    const hasOptImages =
+                      optMedia.items.length > 0 ||
+                      optMedia.missingOfflineCount > 0;
+
                     return (
-                      <button
+                      <div
                         key={opt.id}
-                        type="button"
-                        disabled={feedback.checked}
-                        aria-pressed={selected}
-                        onClick={() => {
-                          setSelectedOptionIds((prev) => {
-                            if (!isChoiceMulti) return [opt.id];
-                            return prev.includes(opt.id)
-                              ? prev.filter((id) => id !== opt.id)
-                              : [...prev, opt.id];
-                          });
-                        }}
+                        data-testid={`offline-option-card-${opt.id}`}
                         className={cn(
-                          "flex min-h-11 w-full items-start gap-3 rounded-lg border p-3 text-left text-sm transition-colors",
+                          "rounded-lg border transition-colors",
                           selected &&
                             !feedback.checked &&
                             "border-primary bg-accent ring-1 ring-primary",
@@ -2250,41 +2317,70 @@ export function OfflineStudyRunner({
                             "border-destructive bg-destructive-subtle text-destructive-subtle-foreground",
                           !selected &&
                             !feedback.checked &&
-                            "border-border hover:bg-secondary",
+                            "border-border bg-card hover:bg-secondary/60",
                         )}
                       >
-                        <span className="shrink-0 pt-0.5 font-semibold">
-                          {opt.label}.
-                        </span>
-                        <div className="min-w-0 flex-1 space-y-2">
-                          {opt.content.trim().length > 0 && (
-                            <span className="block break-words">
-                              {opt.content}
-                            </span>
-                          )}
-                          {opt.image_url &&
-                            (optImgSrc ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={optImgSrc}
-                                alt={
-                                  opt.content.trim() ||
-                                  (vi
-                                    ? `Hình ảnh đáp án ${opt.label}`
-                                    : `Option ${opt.label} image`)
-                                }
-                                className="border-border max-h-44 max-w-full rounded-md border object-contain"
-                                data-testid={`offline-option-image-${opt.id}`}
-                              />
-                            ) : (
-                              <span className="text-muted-foreground inline-block text-xs italic">
-                                {vi
-                                  ? "[Hình ảnh chưa lưu ngoại tuyến]"
-                                  : "[Option image not cached offline]"}
+                        <button
+                          type="button"
+                          disabled={feedback.checked}
+                          aria-pressed={selected}
+                          data-testid={`offline-option-${opt.id}`}
+                          onClick={() => {
+                            setSelectedOptionIds((prev) => {
+                              if (!isChoiceMulti) return [opt.id];
+                              return prev.includes(opt.id)
+                                ? prev.filter((id) => id !== opt.id)
+                                : [...prev, opt.id];
+                            });
+                          }}
+                          className="focus-visible:ring-ring flex min-h-11 w-full items-start gap-3 rounded-lg p-3 text-left text-sm focus-visible:ring-2 focus-visible:outline-none"
+                        >
+                          <span className="shrink-0 pt-0.5 font-semibold">
+                            {opt.label}.
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            {hasOptText ? (
+                              <span className="block break-words">
+                                {opt.content}
                               </span>
-                            ))}
-                        </div>
-                      </button>
+                            ) : hasOptImages ? (
+                              <span className="text-muted-foreground block text-xs">
+                                {vi
+                                  ? `Chọn đáp án ${opt.label}${optMedia.items.length > 1 ? ` (${optMedia.items.length} hình)` : ""}`
+                                  : `Select option ${opt.label}${optMedia.items.length > 1 ? ` (${optMedia.items.length} images)` : ""}`}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground block text-xs">
+                                {vi
+                                  ? `Đáp án ${opt.label}`
+                                  : `Option ${opt.label}`}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                        {optMedia.items.length > 0 && (
+                          <div
+                            className="px-3 pb-3"
+                            data-testid={`offline-option-image-${opt.id}`}
+                          >
+                            <MediaGallery
+                              items={optMedia.items}
+                              variant="option"
+                            />
+                          </div>
+                        )}
+                        {optMedia.missingOfflineCount > 0 && (
+                          <p className="text-muted-foreground px-3 pb-3 text-xs italic">
+                            {vi
+                              ? optMedia.missingOfflineCount > 1
+                                ? `[${optMedia.missingOfflineCount} hình ảnh đáp án chưa lưu ngoại tuyến]`
+                                : "[Hình ảnh chưa lưu ngoại tuyến]"
+                              : optMedia.missingOfflineCount > 1
+                                ? `[${optMedia.missingOfflineCount} option images not cached offline]`
+                                : "[Option image not cached offline]"}
+                          </p>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -2298,11 +2394,7 @@ export function OfflineStudyRunner({
                   </Button>
                 ) : (
                   <div className="space-y-2">
-                    {currentQuestion.explanation && (
-                      <p className="text-muted-foreground bg-secondary/50 rounded-lg p-3 text-xs sm:text-sm">
-                        {currentQuestion.explanation}
-                      </p>
-                    )}
+                    {explanationBlock}
                     <Button onClick={() => void advanceQuestion(feedback.isCorrect)}>
                       {vi ? "Câu tiếp theo" : "Next question"}
                     </Button>

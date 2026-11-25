@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { AudioPlayer } from "@/components/audio/AudioPlayer";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,13 +56,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ContextualQuestionEditorModal } from "@/components/learning/ContextualQuestionEditorModal";
 import { FocusModeShell } from "@/components/learning/FocusModeShell";
 import { lText } from "@/components/learning/learning-copy";
 import { QuestionNotesAndReportBar } from "@/components/learning/QuestionNotesAndReportBar";
-import { SafeRichText, ZoomableImage } from "@/components/learning/SafeRichText";
+import { SafeRichText } from "@/components/learning/SafeRichText";
 import {
   StudyErrorState,
   StudyLoadingSkeleton,
+  useEditableSetIds,
 } from "@/components/learning/useStudySetBundle";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -71,7 +74,12 @@ import {
   issueCoverageNextExam,
   type ExamAttemptPayload,
 } from "@/lib/learning/api-client";
-import { dedupeQuestionMediaImages } from "@/lib/learning/answer-display";
+import {
+  getExamSnapshotExplanationDisplayItems,
+  getExamSnapshotPromptDisplayItems,
+  getOptionDisplayItems,
+  hasRenderableText,
+} from "@/lib/learning/media-helpers";
 import { summarizeConfidenceCalibration } from "@/lib/learning/confidence";
 import { scoreExamAttempt } from "@/lib/learning/exam-scoring";
 import { indexToOptionLabel } from "@/lib/learning/shuffle";
@@ -202,6 +210,11 @@ export function ExamResultsClient({
   >("paper_with_explanations");
   const [pdfIncludeImages, setPdfIncludeImages] = React.useState(true);
   const [isExportingPdf, setIsExportingPdf] = React.useState(false);
+  const [editingSourceQuestion, setEditingSourceQuestion] = React.useState<{
+    studySetId: string;
+    questionId: string;
+  } | null>(null);
+  const { canEditSet } = useEditableSetIds(true);
 
   const reviewScrollRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -1426,46 +1439,25 @@ export function ExamResultsClient({
                               />
 
                               {(() => {
-                                const rawImgAttachments = (q.media_snapshot ?? []).filter(
-                                  (m) =>
-                                    m.mime_type.startsWith("image/") &&
-                                    isSafeDisplayImageUrl(m.proxy_url),
-                                );
-                                const { promptImageUrl: dedupPromptImg, attachments: dedupAttachments } =
-                                  dedupeQuestionMediaImages(
-                                    isSafeDisplayImageUrl(q.prompt_image_url_snapshot)
-                                      ? q.prompt_image_url_snapshot
-                                      : null,
-                                    rawImgAttachments,
+                                // Strictly filter prompt-side media ONLY (prompt / passage / diagram_base) —
+                                // fixes V32-053 role leak where option/explanation images appeared under prompt!
+                                const promptMediaItems =
+                                  getExamSnapshotPromptDisplayItems(
+                                    q,
+                                    lText(
+                                      locale,
+                                      "Hình ảnh câu hỏi",
+                                      "Question illustration",
+                                    ),
                                   );
-                                if (!dedupPromptImg && dedupAttachments.length === 0) {
+                                if (promptMediaItems.length === 0) {
                                   return null;
                                 }
                                 return (
-                                  <div className="flex flex-wrap gap-2">
-                                    {dedupPromptImg ? (
-                                      <ZoomableImage
-                                        src={dedupPromptImg}
-                                        alt={lText(
-                                          locale,
-                                          "Hình ảnh câu hỏi",
-                                          "Question illustration",
-                                        )}
-                                        className="max-h-56"
-                                        lazy
-                                      />
-                                    ) : null}
-                                    {dedupAttachments.map((m) => (
-                                      <ZoomableImage
-                                        key={m.media_id}
-                                        src={m.proxy_url}
-                                        alt={m.alt_text ?? ""}
-                                        caption={m.caption}
-                                        className="max-h-44"
-                                        lazy
-                                      />
-                                    ))}
-                                  </div>
+                                  <MediaGallery
+                                    items={promptMediaItems}
+                                    variant="compact"
+                                  />
                                 );
                               })()}
                             </div>
@@ -1518,6 +1510,13 @@ export function ExamResultsClient({
                                       "border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
                                   }
 
+                                  const optMediaItems = getOptionDisplayItems(opt);
+                                  const hasOptText = hasRenderableText(
+                                    opt.content,
+                                    opt.content_rich,
+                                  );
+                                  const displayLetter = indexToOptionLabel(idx);
+
                                   return (
                                     <div
                                       key={opt.id}
@@ -1528,13 +1527,23 @@ export function ExamResultsClient({
                                     >
                                       <div className="flex items-start gap-3">
                                         <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded border border-current/25 text-xs font-semibold">
-                                          {indexToOptionLabel(idx)}
+                                          {displayLetter}
                                         </span>
                                         <div className="flex-1 leading-relaxed">
-                                          <SafeRichText
-                                            rich={opt.content_rich}
-                                            fallbackText={opt.content}
-                                          />
+                                          {hasOptText ? (
+                                            <SafeRichText
+                                              rich={opt.content_rich}
+                                              fallbackText={opt.content}
+                                            />
+                                          ) : optMediaItems.length > 0 ? (
+                                            <span className="text-xs text-muted-foreground">
+                                              {lText(
+                                                locale,
+                                                `Hình phương án ${displayLetter}`,
+                                                `Option ${displayLetter} image`,
+                                              )}
+                                            </span>
+                                          ) : null}
                                         </div>
                                         {isOptCorrect ? (
                                           <Badge variant="success" className="shrink-0">
@@ -1557,12 +1566,10 @@ export function ExamResultsClient({
                                           </Badge>
                                         ) : null}
                                       </div>
-                                      {isSafeDisplayImageUrl(opt.image_url) ? (
-                                        <ZoomableImage
-                                          src={opt.image_url}
-                                          alt={opt.image_alt ?? opt.content ?? ""}
-                                          className="max-h-36"
-                                          lazy
+                                      {optMediaItems.length > 0 ? (
+                                        <MediaGallery
+                                          items={optMediaItems}
+                                          variant="option"
                                         />
                                       ) : null}
                                     </div>
@@ -1571,31 +1578,78 @@ export function ExamResultsClient({
                               </div>
                             )}
 
-                            {q.explanation_snapshot || q.explanation_rich_snapshot ? (
-                              <div className="rounded-lg bg-secondary/60 p-3.5 text-sm text-muted-foreground">
-                                <strong className="text-foreground">
-                                  {t("study.explanation")}:{" "}
-                                </strong>
-                                <SafeRichText
-                                  rich={q.explanation_rich_snapshot}
-                                  fallbackText={q.explanation_snapshot}
-                                />
-                              </div>
-                            ) : null}
+                            {(() => {
+                              const expMediaItems =
+                                getExamSnapshotExplanationDisplayItems(
+                                  q,
+                                  lText(
+                                    locale,
+                                    "Hình ảnh giải thích",
+                                    "Explanation image",
+                                  ),
+                                );
+                              if (
+                                !q.explanation_snapshot &&
+                                !q.explanation_rich_snapshot &&
+                                expMediaItems.length === 0
+                              ) {
+                                return null;
+                              }
+                              return (
+                                <div className="space-y-2 rounded-lg bg-secondary/60 p-3.5 text-sm text-muted-foreground">
+                                  {q.explanation_snapshot ||
+                                  q.explanation_rich_snapshot ? (
+                                    <div>
+                                      <strong className="text-foreground">
+                                        {t("study.explanation")}:{" "}
+                                      </strong>
+                                      <SafeRichText
+                                        rich={q.explanation_rich_snapshot}
+                                        fallbackText={q.explanation_snapshot}
+                                      />
+                                    </div>
+                                  ) : (
+                                    <strong className="block text-foreground">
+                                      {t("study.explanation")}:
+                                    </strong>
+                                  )}
+                                  {expMediaItems.length > 0 ? (
+                                    <MediaGallery
+                                      items={expMediaItems}
+                                      variant="compact"
+                                    />
+                                  ) : null}
+                                </div>
+                              );
+                            })()}
 
-                            {q.question_id &&
-                            (q.source_study_set_id ?? attempt.study_set_id) ? (
-                              <div className="border-t border-border/60 pt-2">
-                                <QuestionNotesAndReportBar
-                                  studySetId={
-                                    (q.source_study_set_id ??
-                                      attempt.study_set_id)!
-                                  }
-                                  questionId={q.question_id}
-                                  compact
-                                />
-                              </div>
-                            ) : null}
+                            {(() => {
+                              const sourceSetId =
+                                q.source_study_set_id ?? attempt.study_set_id;
+                              if (!q.question_id || !sourceSetId) return null;
+                              const editable = canEditSet(sourceSetId);
+                              return (
+                                <div className="border-t border-border/60 pt-2">
+                                  <QuestionNotesAndReportBar
+                                    studySetId={sourceSetId}
+                                    questionId={q.question_id}
+                                    compact
+                                    canEdit={editable}
+                                    editLabel={lText(
+                                      locale,
+                                      "Chỉnh sửa câu hỏi gốc",
+                                      "Edit Source Question",
+                                    )}
+                                    onEditQuestion={() =>
+                                      setEditingSourceQuestion({
+                                        studySetId: sourceSetId,
+                                        questionId: q.question_id!,
+                                      })
+                                    }
+                                  />
+                                </div>
+                              );
+                            })()}
                           </CardContent>
                         </Card>
                       </div>
@@ -1718,6 +1772,23 @@ export function ExamResultsClient({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ContextualQuestionEditorModal
+        open={
+          Boolean(editingSourceQuestion) &&
+          canEditSet(editingSourceQuestion?.studySetId)
+        }
+        onOpenChange={(open) => {
+          if (!open) setEditingSourceQuestion(null);
+        }}
+        studySetId={editingSourceQuestion?.studySetId ?? ""}
+        questionId={editingSourceQuestion?.questionId ?? null}
+        contextNotice={lText(
+          locale,
+          "Chỉnh sửa này chỉ cập nhật câu hỏi trong học phần gốc cho các lần học/thi sau và KHÔNG làm thay đổi bài thi lịch sử hoặc điểm số này.",
+          "Edits update the source study set for future sessions only and never alter this historical exam snapshot or score.",
+        )}
+      />
     </FocusModeShell>
   );
 }

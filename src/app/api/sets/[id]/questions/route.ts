@@ -15,7 +15,9 @@ import {
   fetchAllPages,
   fetchInChunks,
   fetchQuestionRelationsChunked,
+  hydrateQuestionAndOptionMedia,
   SAFE_IN_CHUNK_SIZE,
+  verifyEditableMediaOwnership,
 } from "@/lib/supabase/query-helpers";
 import {
   isMissingRpcError,
@@ -49,12 +51,14 @@ export async function GET(
 
     const rawParams = Object.fromEntries(request.nextUrl.searchParams.entries());
     const query = listQuestionsQuerySchema.parse(rawParams);
+    const effectiveSearch = query.search ?? query.q ?? null;
+    const mediaFilter = query.mediaFilter ?? "all";
     const isSummaryMode =
       request.nextUrl.searchParams.get("fields")?.trim().toLowerCase() ===
       "summary";
     const from = (query.page - 1) * query.pageSize;
 
-    // PERF-03 & DB-11 (Migration 0019): Single-RTT RPC replaces 4 sequential RTTs + strips heavy *_rich in summary mode
+    // PERF-03 & DB-11 & V32-053 (Migration 0019/0020): Single-RTT RPC with mediaFilter, #123 search & hydrated media_attachments
     const { data: rpcPage, error: rpcErr } = await rpcGetStudySetQuestionsPage(
       supabase,
       {
@@ -63,11 +67,12 @@ export async function GET(
         p_chapter: query.chapter ?? null,
         p_difficulty: query.difficulty ?? null,
         p_question_type: query.questionType ?? null,
-        p_search: query.search ?? null,
+        p_search: effectiveSearch,
         p_starred_only: Boolean(query.starredOnly),
         p_tag_id: query.tagId ?? null,
         p_page: query.page,
         p_page_size: query.pageSize,
+        p_media_filter: mediaFilter,
       },
     );
 
@@ -141,7 +146,15 @@ export async function GET(
     }
 
     const to = from + query.pageSize - 1;
-    const escapedSearch = query.search ? sanitizePostgrestSearch(query.search) : "";
+    const trimmedSearch = effectiveSearch?.trim() ?? "";
+    const escapedSearch = trimmedSearch ? sanitizePostgrestSearch(trimmedSearch) : "";
+    const numMatch = trimmedSearch.match(/^#?([0-9]{1,5})$/);
+    const searchQuestionNumber = numMatch ? Number(numMatch[1]) : null;
+    const searchOrExpr = escapedSearch
+      ? searchQuestionNumber && searchQuestionNumber >= 1
+        ? `position.eq.${searchQuestionNumber - 1},prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`
+        : `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`
+      : null;
 
     let rows: Array<Record<string, unknown> & { id: string }> = [];
     let total = 0;
@@ -159,10 +172,8 @@ export async function GET(
           if (query.chapter) q = q.eq("chapter", query.chapter);
           if (query.difficulty) q = q.eq("difficulty", query.difficulty);
           if (query.questionType) q = q.eq("question_type", query.questionType);
-          if (escapedSearch) {
-            q = q.or(
-              `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`,
-            );
+          if (searchOrExpr) {
+            q = q.or(searchOrExpr);
           }
           return q as unknown as Promise<{
             data: Array<Record<string, unknown> & { id: string; position: number; created_at: string }> | null;
@@ -192,10 +203,8 @@ export async function GET(
       if (query.questionType) {
         qQuery = qQuery.eq("question_type", query.questionType);
       }
-      if (escapedSearch) {
-        qQuery = qQuery.or(
-          `prompt.ilike.%${escapedSearch}%,back_text.ilike.%${escapedSearch}%,explanation.ilike.%${escapedSearch}%`,
-        );
+      if (searchOrExpr) {
+        qQuery = qQuery.or(searchOrExpr);
       }
 
       const { data: questions, count, error } = await qQuery
@@ -222,7 +231,7 @@ export async function GET(
     }
 
     if (isSummaryMode) {
-      // Compact summary mode for Study Set Hub list preview: fetches options + starred only
+      // Compact summary mode for Study Set Hub list preview: fetches options + media + starred only
       const [options, starred] = await Promise.all([
         fetchInChunks(
           questionIds,
@@ -249,16 +258,30 @@ export async function GET(
         ),
       ]);
 
-      const optionsByQ = new Map<string, typeof options>();
+      const { questionMediaByQ, optionMediaByOpt } =
+        await hydrateQuestionAndOptionMedia(
+          supabase,
+          questionIds,
+          options.map((o) => o.id),
+        );
+
+      const optionsByQ = new Map<
+        string,
+        Array<(typeof options)[number] & { media_attachments: ReturnType<typeof optionMediaByOpt.get> }>
+      >();
       for (const opt of options) {
         const arr = optionsByQ.get(opt.question_id) ?? [];
-        arr.push(opt);
+        arr.push({
+          ...opt,
+          media_attachments: optionMediaByOpt.get(opt.id) ?? [],
+        });
         optionsByQ.set(opt.question_id, arr);
       }
       const starredSet = new Set(starred.map((s) => s.question_id));
 
       const enriched = rows.map((q) => ({
         ...q,
+        media_attachments: questionMediaByQ.get(q.id) ?? [],
         options: optionsByQ.get(q.id) ?? [],
         accepted_answers: [],
         tags: [],
@@ -275,7 +298,7 @@ export async function GET(
     }
 
     // SH-005: Chunked relation fetching (<= 100 Qs/batch -> <= 400-600 options, NEVER hits 1,000-row cap!)
-    const [{ optionsByQ, answersByQ, tagsByQ }, starred, progress] =
+    const [{ optionsByQ, answersByQ, tagsByQ, questionMediaByQ }, starred, progress] =
       await Promise.all([
         fetchQuestionRelationsChunked(supabase, questionIds, setId),
         fetchInChunks(
@@ -307,6 +330,7 @@ export async function GET(
 
     const enriched = rows.map((q) => ({
       ...q,
+      media_attachments: questionMediaByQ.get(q.id) ?? [],
       options: optionsByQ.get(q.id) ?? [],
       accepted_answers: answersByQ.get(q.id) ?? [],
       tags: tagsByQ.get(q.id) ?? [],
@@ -339,6 +363,46 @@ export async function POST(
     const body = await parseJsonBody(request);
     const input = createQuestionSchema.parse(body);
 
+    // V32-053: Verify caller has edit ownership/access on EVERY referenced media_id before insert
+    const referencedMediaIds: string[] = [];
+    if (input.audio_media_id) referencedMediaIds.push(input.audio_media_id);
+    for (const att of input.media_attachments ?? []) {
+      referencedMediaIds.push(att.media_id);
+    }
+    for (const opt of input.options ?? []) {
+      if (opt.media_id) referencedMediaIds.push(opt.media_id);
+      for (const att of opt.media_attachments ?? []) {
+        referencedMediaIds.push(att.media_id);
+      }
+    }
+    const verifiedMedia = await verifyEditableMediaOwnership(
+      supabase,
+      user.id,
+      setId,
+      referencedMediaIds,
+    );
+
+    const sortedQuestionMedia = [...(input.media_attachments ?? [])].sort(
+      (a, b) => a.sort_order - b.sort_order,
+    );
+    const primaryPromptAtt = sortedQuestionMedia.find((a) => a.role === "prompt");
+    const primaryBackAtt = sortedQuestionMedia.find((a) => a.role === "back");
+
+    const resolvedPromptImageUrl =
+      input.prompt_image_url ??
+      (primaryPromptAtt
+        ? (verifiedMedia.get(primaryPromptAtt.media_id)?.proxy_url ??
+          primaryPromptAtt.url ??
+          null)
+        : null);
+    const resolvedBackImageUrl =
+      input.back_image_url ??
+      (primaryBackAtt
+        ? (verifiedMedia.get(primaryBackAtt.media_id)?.proxy_url ??
+          primaryBackAtt.url ??
+          null)
+        : null);
+
     let position = input.position;
     if (position === undefined) {
       const { data: allocatedPos, error: allocErr } =
@@ -366,10 +430,10 @@ export async function POST(
         chapter: input.chapter ?? null,
         prompt: input.prompt,
         prompt_rich: (input.prompt_rich ?? null) as Json | null,
-        prompt_image_url: input.prompt_image_url ?? null,
+        prompt_image_url: resolvedPromptImageUrl,
         back_text: input.back_text ?? null,
         back_rich: (input.back_rich ?? null) as Json | null,
-        back_image_url: input.back_image_url ?? null,
+        back_image_url: resolvedBackImageUrl,
         explanation: input.explanation ?? null,
         explanation_rich: (input.explanation_rich ?? null) as Json | null,
         hint: input.hint ?? null,
@@ -389,46 +453,124 @@ export async function POST(
     if (createErr) throw createErr;
 
     try {
-      let insertedOptions: unknown[] = [];
+      const optionMediaRelations: Array<{
+        media_id: string;
+        entity_type: "question_option";
+        entity_id: string;
+        role: "option";
+        sort_order: number;
+        alt_text: string | null;
+        caption: string | null;
+      }> = [];
+
       if (input.options && input.options.length > 0) {
-        const { data: opts, error: optErr } = await supabase
-          .from("question_options")
-          .insert(
-            input.options.map((opt, idx) => ({
+        const preparedOptions = input.options.map((opt, idx) => {
+          const sortedOptAtts = [...(opt.media_attachments ?? [])].sort(
+            (a, b) => a.sort_order - b.sort_order,
+          );
+          const primaryOptAtt = sortedOptAtts[0];
+          const primaryAsset = primaryOptAtt
+            ? verifiedMedia.get(primaryOptAtt.media_id)
+            : opt.media_id
+              ? verifiedMedia.get(opt.media_id)
+              : undefined;
+          return {
+            row: {
               question_id: created.id,
               study_set_id: setId,
               position: opt.position ?? idx,
               label: opt.label,
               content: opt.content,
               content_rich: (opt.content_rich ?? null) as Json | null,
-              image_url: opt.image_url ?? null,
-              media_id: opt.media_id ?? null,
-              image_alt: opt.image_alt ?? null,
+              image_url:
+                opt.image_url ??
+                primaryAsset?.proxy_url ??
+                primaryOptAtt?.url ??
+                null,
+              media_id: primaryOptAtt?.media_id ?? opt.media_id ?? null,
+              image_alt:
+                primaryOptAtt?.alt_text ??
+                opt.image_alt ??
+                primaryAsset?.alt_text ??
+                null,
               is_correct: opt.is_correct,
-            })),
-          )
-          .select("*")
+            },
+            attachments: sortedOptAtts,
+          };
+        });
+
+        const { data: opts, error: optErr } = await supabase
+          .from("question_options")
+          .insert(preparedOptions.map((item) => item.row))
+          .select("id, position")
           .order("position", { ascending: true });
 
         if (optErr) throw optErr;
-        insertedOptions = opts ?? [];
+        const insertedOpts = opts ?? [];
+        insertedOpts.forEach((optRow, idx) => {
+          const spec = preparedOptions[idx];
+          if (!spec) return;
+          if (spec.attachments.length > 0) {
+            spec.attachments.forEach((att, attIdx) => {
+              optionMediaRelations.push({
+                media_id: att.media_id,
+                entity_type: "question_option",
+                entity_id: optRow.id,
+                role: "option",
+                sort_order: att.sort_order ?? attIdx,
+                alt_text: att.alt_text ?? null,
+                caption: att.caption ?? null,
+              });
+            });
+          } else if (spec.row.media_id) {
+            optionMediaRelations.push({
+              media_id: spec.row.media_id,
+              entity_type: "question_option",
+              entity_id: optRow.id,
+              role: "option",
+              sort_order: 0,
+              alt_text: spec.row.image_alt,
+              caption: null,
+            });
+          }
+        });
       }
 
-      if (input.media_attachments && input.media_attachments.length > 0) {
+      const allRelationsToUpsert: Array<{
+        media_id: string;
+        entity_type: "question" | "question_option";
+        entity_id: string;
+        role:
+          | "prompt"
+          | "back"
+          | "option"
+          | "explanation"
+          | "hint"
+          | "audio"
+          | "diagram_base"
+          | "passage";
+        sort_order: number;
+        alt_text: string | null;
+        caption: string | null;
+      }> = [
+        ...sortedQuestionMedia.map((att, idx) => ({
+          media_id: att.media_id,
+          entity_type: "question" as const,
+          entity_id: created.id,
+          role: att.role,
+          sort_order: att.sort_order ?? idx,
+          alt_text: att.alt_text ?? null,
+          caption: att.caption ?? null,
+        })),
+        ...optionMediaRelations,
+      ];
+
+      if (allRelationsToUpsert.length > 0) {
         const { error: mediaRelErr } = await supabase
           .from("content_media_relations")
-          .upsert(
-            input.media_attachments.map((att, idx) => ({
-              media_id: att.media_id,
-              entity_type: "question" as const,
-              entity_id: created.id,
-              role: att.role,
-              sort_order: att.sort_order ?? idx,
-              alt_text: att.alt_text ?? null,
-              caption: att.caption ?? null,
-            })),
-            { onConflict: "media_id,entity_type,entity_id,role" },
-          );
+          .upsert(allRelationsToUpsert, {
+            onConflict: "media_id,entity_type,entity_id,role",
+          });
         if (mediaRelErr) throw mediaRelErr;
       }
 
@@ -451,9 +593,8 @@ export async function POST(
         }
       }
 
-      let insertedAccepted: unknown[] = [];
       if (input.accepted_answers && input.accepted_answers.length > 0) {
-        const { data: accs, error: accErr } = await supabase
+        const { error: accErr } = await supabase
           .from("question_accepted_answers")
           .insert(
             input.accepted_answers.map((ans) => ({
@@ -463,14 +604,11 @@ export async function POST(
               normalized_answer: normalizeAnswerText(ans.answer_text, ans.match_mode),
               match_mode: ans.match_mode,
             })),
-          )
-          .select("*");
+          );
 
         if (accErr) throw accErr;
-        insertedAccepted = accs ?? [];
       }
 
-      const attachedTags: unknown[] = [];
       if (input.tags && input.tags.length > 0) {
         const uniqueSlugs = new Map<string, string>();
         for (const name of input.tags) {
@@ -486,7 +624,7 @@ export async function POST(
         const { data: upsertedTags, error: tagErr } = await supabase
           .from("tags")
           .upsert(tagRows, { onConflict: "owner_id,slug" })
-          .select("*");
+          .select("id");
 
         if (tagErr) throw tagErr;
 
@@ -500,16 +638,22 @@ export async function POST(
             { onConflict: "question_id,tag_id" },
           );
           if (qtErr) throw qtErr;
-          attachedTags.push(...upsertedTags);
         }
       }
+
+      const relations = await fetchQuestionRelationsChunked(
+        supabase,
+        [created.id],
+        setId,
+      );
 
       return apiSuccess(
         {
           ...created,
-          options: insertedOptions,
-          accepted_answers: insertedAccepted,
-          tags: attachedTags,
+          media_attachments: relations.questionMediaByQ.get(created.id) ?? [],
+          options: relations.optionsByQ.get(created.id) ?? [],
+          accepted_answers: relations.answersByQ.get(created.id) ?? [],
+          tags: relations.tagsByQ.get(created.id) ?? [],
         },
         undefined,
         { status: 201 },

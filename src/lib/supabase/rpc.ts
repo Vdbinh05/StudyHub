@@ -702,13 +702,33 @@ export async function rpcGetStudySetQuestionsPage(
     p_tag_id?: string | null;
     p_page?: number;
     p_page_size?: number;
+    p_media_filter?: string | null;
   },
 ): Promise<{
   data: { items: Array<Record<string, unknown>>; total: number } | null;
   error: RpcError;
 }> {
   const rpc = getDynamicRpc(supabase);
-  const { data, error } = await rpc("get_study_set_questions_page", params);
+  const { data, error } = await rpc("get_study_set_questions_page_v2", {
+    ...params,
+    p_media_filter: params.p_media_filter ?? "all",
+  });
+  if (
+    error &&
+    isMissingRpcError(error) &&
+    (!params.p_media_filter || params.p_media_filter === "all")
+  ) {
+    const { p_media_filter: _ignored, ...legacyParams } = params;
+    void _ignored;
+    const legacy = await rpc("get_study_set_questions_page", legacyParams);
+    return {
+      data:
+        legacy.data && typeof legacy.data === "object"
+          ? (legacy.data as { items: Array<Record<string, unknown>>; total: number })
+          : null,
+      error: legacy.error,
+    };
+  }
   return {
     data:
       data && typeof data === "object"

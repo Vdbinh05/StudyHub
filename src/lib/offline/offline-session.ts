@@ -14,11 +14,14 @@
  * Always grades choice questions by stable option UUID, never by display index or letter.
  */
 
+import { canonicalizeMediaUrlKey } from "@/lib/media/question-media";
+import { resolveSafeMediaUrl, type MediaDisplayItem } from "@/lib/media/urls";
 import type { Question } from "@/types/domain";
 import type {
   DiagramHotspot,
   HotspotGeometry,
   NormalizedPoint,
+  QuestionMediaAttachment,
   RichTextDoc,
   SharedPassage,
   StructuredAnswerResponse,
@@ -102,6 +105,16 @@ export type OfflineModesAvailabilityMap = Record<
 function hasSpellableTarget(q: OfflineQuestionRecord): boolean {
   if (q.audio_url) return true;
   if (q.type_payload?.type === "listening" && q.type_payload.audio_url) return true;
+  if (
+    (q.media_attachments ?? []).some(
+      (att) =>
+        att.role === "audio" ||
+        att.media?.kind === "audio" ||
+        Boolean(att.mime_type?.toLowerCase().startsWith("audio/")),
+    )
+  ) {
+    return true;
+  }
   if (q.back_text && q.back_text.trim().length > 0) return true;
   if ((q.accepted_answers ?? []).some((a) => a.answer_text.trim().length > 0)) return true;
   if ((q.options ?? []).some((o) => o.is_correct && o.content.trim().length > 0)) return true;
@@ -229,15 +242,20 @@ export async function loadOfflineStudyBundle(
     url: string | null | undefined,
   ): Promise<string | null> => {
     if (!url) return null;
-    const cachedObjUrl = createdUrls.get(url);
+    const trimmed = url.trim();
+    if (!trimmed) return null;
+    const canonical = resolveSafeMediaUrl({ url: trimmed }) ?? trimmed;
+    const cachedObjUrl = createdUrls.get(canonical);
     if (cachedObjUrl) return cachedObjUrl;
 
-    const blobRecord = await getMediaBlob(userId, url);
+    const blobRecord =
+      (await getMediaBlob(userId, canonical)) ??
+      (canonical !== trimmed ? await getMediaBlob(userId, trimmed) : null);
     if (!blobRecord || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
       return null;
     }
     const objUrl = URL.createObjectURL(blobRecord.blob);
-    createdUrls.set(url, objUrl);
+    createdUrls.set(canonical, objUrl);
     return objUrl;
   };
 
@@ -265,6 +283,180 @@ export async function loadOfflineStudyBundle(
     resolveMediaUrl,
     revokeAllMediaUrls,
   };
+}
+
+// ============================================================================
+// Multi-Image Offline Media Resolution Helpers (V32-053)
+// ============================================================================
+
+/**
+ * Resolve the canonical safe URL for a `QuestionMediaAttachment` so download
+ * caching and offline IndexedDB lookup always share the exact same key.
+ */
+export function resolveOfflineAttachmentUrl(
+  att: Partial<QuestionMediaAttachment> | null | undefined,
+): string | null {
+  if (!att) return null;
+  return resolveSafeMediaUrl({
+    url: att.url,
+    proxy_url: att.proxy_url ?? att.media?.proxy_url,
+    storage_path: att.storage_path ?? att.media?.storage_path,
+  });
+}
+
+/**
+ * Collect every unique safe media URL referenced by an offline question across
+ * legacy fields, `question.media_attachments` (prompt/back/explanation/hint/audio),
+ * `option.image_url` + `option.media_attachments`, and V3 `type_payload` fields.
+ */
+export function collectOfflineQuestionMediaUrls(
+  question: OfflineQuestionRecord,
+): string[] {
+  const urls = new Set<string>();
+  const addRaw = (raw: string | null | undefined): void => {
+    if (!raw) return;
+    const safe = resolveSafeMediaUrl({ url: raw });
+    if (safe) {
+      urls.add(safe);
+    }
+  };
+  const addAttachment = (att: QuestionMediaAttachment): void => {
+    const safe = resolveOfflineAttachmentUrl(att);
+    if (safe) {
+      urls.add(safe);
+    }
+  };
+
+  addRaw(question.prompt_image_url);
+  addRaw(question.back_image_url);
+  addRaw(question.audio_url);
+
+  for (const att of question.media_attachments ?? []) {
+    addAttachment(att);
+  }
+
+  for (const opt of question.options ?? []) {
+    addRaw(opt.image_url);
+    for (const att of opt.media_attachments ?? []) {
+      addAttachment(att);
+    }
+  }
+
+  const payload = question.type_payload;
+  if (payload) {
+    if (payload.type === "listening") {
+      addRaw(payload.audio_url);
+    } else if (payload.type === "image_hotspot") {
+      addRaw(payload.image_url);
+    } else if (payload.type === "ordering") {
+      for (const item of payload.items) {
+        addRaw(item.image_url);
+      }
+    } else if (payload.type === "matching") {
+      for (const pair of payload.pairs) {
+        addRaw(pair.left_image_url);
+        addRaw(pair.right_image_url);
+      }
+      for (const dist of payload.distractors ?? []) {
+        addRaw(dist.right_image_url);
+      }
+    }
+  }
+
+  return Array.from(urls);
+}
+
+/**
+ * Resolve all media URLs for an offline question into `{ [canonicalUrl]: blobUrl }`.
+ * Every created object URL is tracked inside `bundle` and released by `bundle.revokeAllMediaUrls()`.
+ */
+export async function resolveOfflineQuestionMediaMap(
+  bundle: Pick<OfflineStudyBundle, "resolveMediaUrl">,
+  question: OfflineQuestionRecord,
+): Promise<Record<string, string>> {
+  const urls = collectOfflineQuestionMediaUrls(question);
+  const resolvedEntries = await Promise.all(
+    urls.map(async (url) => {
+      const blobUrl = await bundle.resolveMediaUrl(url);
+      return [url, blobUrl] as const;
+    }),
+  );
+
+  const map: Record<string, string> = {};
+  for (const [rawUrl, blobUrl] of resolvedEntries) {
+    if (blobUrl) {
+      map[rawUrl] = blobUrl;
+    }
+  }
+  return map;
+}
+
+export interface MappedOfflineMediaResult {
+  items: MediaDisplayItem[];
+  missingOfflineCount: number;
+}
+
+/**
+ * Map normalized `QuestionMediaAttachment[]` onto `MediaDisplayItem[]` backed by
+ * cached offline `blob:` URLs (or original URL when online). Uncached attachments
+ * while offline are counted in `missingOfflineCount` rather than rendering broken images.
+ */
+export function mapOfflineMediaAttachments(
+  attachments: readonly QuestionMediaAttachment[],
+  mediaSrcMap: Readonly<Record<string, string>>,
+  options: { isOnline?: boolean; fallbackAlt?: string } = {},
+): MappedOfflineMediaResult {
+  const isOnline = options.isOnline ?? false;
+  const seenCanonical = new Set<string>();
+  const canonicalSrcMap = new Map<string, string>();
+  for (const [rawKey, blobUrl] of Object.entries(mediaSrcMap)) {
+    const canonKey = canonicalizeMediaUrlKey(rawKey);
+    if (canonKey && !canonicalSrcMap.has(canonKey)) {
+      canonicalSrcMap.set(canonKey, blobUrl);
+    }
+  }
+
+  const items: MediaDisplayItem[] = [];
+  let missingOfflineCount = 0;
+
+  attachments.forEach((att, idx) => {
+    const rawUrl = resolveOfflineAttachmentUrl(att);
+    if (!rawUrl) return;
+    const canonKey = canonicalizeMediaUrlKey(rawUrl) || rawUrl;
+    if (seenCanonical.has(canonKey)) return;
+    seenCanonical.add(canonKey);
+
+    const cachedBlobUrl =
+      mediaSrcMap[rawUrl] ?? canonicalSrcMap.get(canonKey) ?? null;
+    const renderUrl = cachedBlobUrl ?? (isOnline ? rawUrl : null);
+    if (!renderUrl) {
+      missingOfflineCount += 1;
+      return;
+    }
+
+    const isAudio =
+      att.role === "audio" ||
+      att.media?.kind === "audio" ||
+      Boolean(att.mime_type?.toLowerCase().startsWith("audio/"));
+
+    items.push({
+      id: att.id || att.media_id || `${att.role}-${att.sort_order}-${idx}`,
+      media_id: att.media_id || null,
+      kind: isAudio ? "audio" : "image",
+      url: renderUrl,
+      storage_path: att.storage_path ?? att.media?.storage_path ?? null,
+      mime_type: att.mime_type ?? att.media?.mime_type ?? null,
+      file_name: att.media?.file_name ?? null,
+      alt_text: att.alt_text ?? att.media?.alt_text ?? options.fallbackAlt ?? "",
+      caption: att.caption ?? att.media?.caption ?? null,
+      width: att.width ?? att.media?.width ?? null,
+      height: att.height ?? att.media?.height ?? null,
+      duration_ms: att.media?.duration_ms ?? null,
+      sort_order: att.sort_order,
+    });
+  });
+
+  return { items, missingOfflineCount };
 }
 
 // ============================================================================
@@ -529,11 +721,20 @@ export async function resolveOfflineSpellAudio(
   question: OfflineQuestionRecord,
   resolveMediaUrl?: (url: string | null | undefined) => Promise<string | null>,
 ): Promise<OfflineSpellAudioResolution> {
+  const audioAttachmentUrl = resolveOfflineAttachmentUrl(
+    question.media_attachments?.find(
+      (att) =>
+        att.role === "audio" ||
+        att.media?.kind === "audio" ||
+        Boolean(att.mime_type?.toLowerCase().startsWith("audio/")),
+    ),
+  );
   const audioUrl =
     question.audio_url ??
     (question.type_payload?.type === "listening"
       ? question.type_payload.audio_url
-      : null);
+      : null) ??
+    audioAttachmentUrl;
   const lang =
     (question.type_payload?.type === "listening"
       ? question.type_payload.language

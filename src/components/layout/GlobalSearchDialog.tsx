@@ -58,6 +58,7 @@ export interface GlobalSearchResultItem {
   folder_id?: string | null;
   chapter?: string | null;
   href?: string | null;
+  can_edit?: boolean | null;
 }
 
 interface GlobalSearchDialogProps {
@@ -144,6 +145,18 @@ function normalizeEntityType(
   return "question";
 }
 
+function extractQuestionIdFromHref(href?: string | null): string | null {
+  if (!href || !href.includes("?")) return null;
+  try {
+    const parsed = new URL(href, "https://studyhub.local");
+    const qid =
+      parsed.searchParams.get("questionId") ?? parsed.searchParams.get("q");
+    return qid && qid.trim().length > 0 ? qid.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveResultHref(item: GlobalSearchResultItem): string {
   switch (item.entity_type) {
     case "folder":
@@ -171,7 +184,19 @@ export function resolveResultHref(item: GlobalSearchResultItem): string {
     case "option":
     case "note":
       if (item.study_set_id) {
-        const targetQuestionId = item.question_id ?? item.id;
+        const parsedHrefQuestionId = extractQuestionIdFromHref(item.href);
+        const targetQuestionId =
+          item.question_id ?? parsedHrefQuestionId ?? item.id;
+        const isEditableHit =
+          item.can_edit === true ||
+          (item.can_edit !== false &&
+            typeof item.href === "string" &&
+            /^\/sets\/[^/]+\/edit\?(?:.*&)?(?:q|questionId)=/.test(item.href));
+        if (isEditableHit) {
+          return `/sets/${encodeURIComponent(item.study_set_id)}/edit?questionId=${encodeURIComponent(
+            targetQuestionId,
+          )}`;
+        }
         return `/sets/${encodeURIComponent(item.study_set_id)}?q=${encodeURIComponent(
           targetQuestionId,
         )}`;
@@ -239,6 +264,7 @@ export function normalizeSearchPayload(raw: unknown): GlobalSearchResultItem[] {
       folder_id: typeof rec.folder_id === "string" ? rec.folder_id : null,
       chapter: typeof rec.chapter === "string" ? rec.chapter : null,
       href: typeof rec.href === "string" ? rec.href : null,
+      can_edit: typeof rec.can_edit === "boolean" ? rec.can_edit : null,
     };
   };
 

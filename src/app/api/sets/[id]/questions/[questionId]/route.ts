@@ -7,7 +7,10 @@ import {
   parseJsonBody,
 } from "@/lib/security/errors";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
-import { fetchQuestionRelationsChunked } from "@/lib/supabase/query-helpers";
+import {
+  fetchQuestionRelationsChunked,
+  verifyEditableMediaOwnership,
+} from "@/lib/supabase/query-helpers";
 import {
   isMissingRpcError,
   rpcBumpStudySetContentVersion,
@@ -56,6 +59,7 @@ export async function GET(
 
     return apiSuccess({
       ...question,
+      media_attachments: relations.questionMediaByQ.get(qId) ?? [],
       options: relations.optionsByQ.get(qId) ?? [],
       accepted_answers: relations.answersByQ.get(qId) ?? [],
       tags: relations.tagsByQ.get(qId) ?? [],
@@ -161,16 +165,57 @@ export async function PATCH(
       }
     }
 
+    // V32-053: Verify caller has edit ownership/access on EVERY referenced media_id before any mutation
+    const referencedMediaIds: string[] = [];
+    if (input.audio_media_id) referencedMediaIds.push(input.audio_media_id);
+    for (const att of input.media_attachments ?? []) {
+      referencedMediaIds.push(att.media_id);
+    }
+    for (const opt of input.options ?? []) {
+      if (opt.media_id) referencedMediaIds.push(opt.media_id);
+      for (const att of opt.media_attachments ?? []) {
+        referencedMediaIds.push(att.media_id);
+      }
+    }
+    const verifiedMedia = await verifyEditableMediaOwnership(
+      supabase,
+      user.id,
+      setId,
+      referencedMediaIds,
+    );
+
+    const sortedQuestionMedia =
+      input.media_attachments !== undefined
+        ? [...input.media_attachments].sort((a, b) => a.sort_order - b.sort_order)
+        : undefined;
+
+    const primaryPromptAtt = sortedQuestionMedia?.find((a) => a.role === "prompt");
+    const primaryBackAtt = sortedQuestionMedia?.find((a) => a.role === "back");
+
     const updatePayload: TablesUpdate<"questions"> = {};
     if (input.question_type !== undefined) updatePayload.question_type = input.question_type;
     if (input.position !== undefined) updatePayload.position = input.position;
     if (input.chapter !== undefined) updatePayload.chapter = input.chapter;
     if (input.prompt !== undefined) updatePayload.prompt = input.prompt;
     if (input.prompt_rich !== undefined) updatePayload.prompt_rich = (input.prompt_rich ?? null) as Json | null;
-    if (input.prompt_image_url !== undefined) updatePayload.prompt_image_url = input.prompt_image_url;
+    if (input.prompt_image_url !== undefined) {
+      updatePayload.prompt_image_url = input.prompt_image_url;
+    } else if (primaryPromptAtt) {
+      updatePayload.prompt_image_url =
+        verifiedMedia.get(primaryPromptAtt.media_id)?.proxy_url ??
+        primaryPromptAtt.url ??
+        null;
+    }
     if (input.back_text !== undefined) updatePayload.back_text = input.back_text;
     if (input.back_rich !== undefined) updatePayload.back_rich = (input.back_rich ?? null) as Json | null;
-    if (input.back_image_url !== undefined) updatePayload.back_image_url = input.back_image_url;
+    if (input.back_image_url !== undefined) {
+      updatePayload.back_image_url = input.back_image_url;
+    } else if (primaryBackAtt) {
+      updatePayload.back_image_url =
+        verifiedMedia.get(primaryBackAtt.media_id)?.proxy_url ??
+        primaryBackAtt.url ??
+        null;
+    }
     if (input.explanation !== undefined) updatePayload.explanation = input.explanation;
     if (input.explanation_rich !== undefined) updatePayload.explanation_rich = (input.explanation_rich ?? null) as Json | null;
     if (input.hint !== undefined) updatePayload.hint = input.hint;
@@ -193,7 +238,7 @@ export async function PATCH(
       if (updErr) throw updErr;
     }
 
-    // Update options in batched operations while preserving stable option UUIDs
+    // Update options in batched operations while preserving stable option UUIDs & syncing multi-image option attachments
     if (input.options !== undefined) {
       const { data: existingOpts, error: exOptErr } = await supabase
         .from("question_options")
@@ -214,22 +259,50 @@ export async function PATCH(
         media_id: string | null;
         image_alt: string | null;
         is_correct: boolean;
+        media_attachments?: NonNullable<(typeof input.options)[number]["media_attachments"]>;
       }> = [];
       const toInsert: Array<{
-        question_id: string;
-        study_set_id: string;
-        position: number;
-        label: string;
-        content: string;
-        content_rich: Json | null;
-        image_url: string | null;
-        media_id: string | null;
-        image_alt: string | null;
-        is_correct: boolean;
+        row: {
+          question_id: string;
+          study_set_id: string;
+          position: number;
+          label: string;
+          content: string;
+          content_rich: Json | null;
+          image_url: string | null;
+          media_id: string | null;
+          image_alt: string | null;
+          is_correct: boolean;
+        };
+        media_attachments?: NonNullable<(typeof input.options)[number]["media_attachments"]>;
       }> = [];
 
       for (let idx = 0; idx < input.options.length; idx += 1) {
         const opt = input.options[idx];
+        const sortedOptAtts =
+          opt.media_attachments !== undefined
+            ? [...opt.media_attachments].sort((a, b) => a.sort_order - b.sort_order)
+            : undefined;
+        const primaryOptAtt = sortedOptAtts?.[0];
+        const primaryAsset = primaryOptAtt
+          ? verifiedMedia.get(primaryOptAtt.media_id)
+          : opt.media_id
+            ? verifiedMedia.get(opt.media_id)
+            : undefined;
+
+        const resolvedMediaId =
+          sortedOptAtts !== undefined
+            ? (primaryOptAtt?.media_id ?? null)
+            : (opt.media_id ?? null);
+        const resolvedImageUrl =
+          sortedOptAtts !== undefined
+            ? (primaryAsset?.proxy_url ?? primaryOptAtt?.url ?? (sortedOptAtts.length === 0 ? null : opt.image_url ?? null))
+            : (opt.image_url ?? primaryAsset?.proxy_url ?? null);
+        const resolvedImageAlt =
+          sortedOptAtts !== undefined
+            ? (primaryOptAtt?.alt_text ?? primaryAsset?.alt_text ?? opt.image_alt ?? null)
+            : (opt.image_alt ?? primaryAsset?.alt_text ?? null);
+
         if (opt.id && existingIds.has(opt.id)) {
           keptIds.add(opt.id);
           toUpdate.push({
@@ -238,28 +311,33 @@ export async function PATCH(
             label: opt.label,
             content: opt.content,
             content_rich: (opt.content_rich ?? null) as Json | null,
-            image_url: opt.image_url ?? null,
-            media_id: opt.media_id ?? null,
-            image_alt: opt.image_alt ?? null,
+            image_url: resolvedImageUrl,
+            media_id: resolvedMediaId,
+            image_alt: resolvedImageAlt,
             is_correct: opt.is_correct,
+            media_attachments: sortedOptAtts,
           });
         } else {
           toInsert.push({
-            question_id: qId,
-            study_set_id: setId,
-            position: opt.position ?? idx,
-            label: opt.label,
-            content: opt.content,
-            content_rich: (opt.content_rich ?? null) as Json | null,
-            image_url: opt.image_url ?? null,
-            media_id: opt.media_id ?? null,
-            image_alt: opt.image_alt ?? null,
-            is_correct: opt.is_correct,
+            row: {
+              question_id: qId,
+              study_set_id: setId,
+              position: opt.position ?? idx,
+              label: opt.label,
+              content: opt.content,
+              content_rich: (opt.content_rich ?? null) as Json | null,
+              image_url: resolvedImageUrl,
+              media_id: resolvedMediaId,
+              image_alt: resolvedImageAlt,
+              is_correct: opt.is_correct,
+            },
+            media_attachments: sortedOptAtts,
           });
         }
       }
 
       const toDelete = Array.from(existingIds).filter((oid) => !keptIds.has(oid));
+      let insertedRows: Array<{ id: string }> = [];
 
       await Promise.all([
         ...toUpdate.map(async (u) => {
@@ -283,9 +361,11 @@ export async function PATCH(
         toInsert.length > 0
           ? supabase
               .from("question_options")
-              .insert(toInsert)
-              .then(({ error: insErr }) => {
+              .insert(toInsert.map((item) => item.row))
+              .select("id")
+              .then(({ data: insData, error: insErr }) => {
                 if (insErr) throw insErr;
+                insertedRows = (insData ?? []) as Array<{ id: string }>;
               })
           : Promise.resolve(),
         toDelete.length > 0
@@ -300,6 +380,82 @@ export async function PATCH(
               })
           : Promise.resolve(),
       ]);
+
+      // Sync multi-image content_media_relations for every option that explicitly provided `media_attachments`
+      // (or newly inserted options with a single `media_id`)
+      const optionIdsToReset: string[] = [];
+      const optionRelationsToUpsert: Array<{
+        media_id: string;
+        entity_type: "question_option";
+        entity_id: string;
+        role: "option";
+        sort_order: number;
+        alt_text: string | null;
+        caption: string | null;
+      }> = [];
+
+      for (const u of toUpdate) {
+        if (u.media_attachments !== undefined) {
+          optionIdsToReset.push(u.id);
+          u.media_attachments.forEach((att, idx) => {
+            optionRelationsToUpsert.push({
+              media_id: att.media_id,
+              entity_type: "question_option",
+              entity_id: u.id,
+              role: "option",
+              sort_order: att.sort_order ?? idx,
+              alt_text: att.alt_text ?? null,
+              caption: att.caption ?? null,
+            });
+          });
+        }
+      }
+
+      insertedRows.forEach((insRow, i) => {
+        const spec = toInsert[i];
+        if (!spec) return;
+        if (spec.media_attachments && spec.media_attachments.length > 0) {
+          spec.media_attachments.forEach((att, idx) => {
+            optionRelationsToUpsert.push({
+              media_id: att.media_id,
+              entity_type: "question_option",
+              entity_id: insRow.id,
+              role: "option",
+              sort_order: att.sort_order ?? idx,
+              alt_text: att.alt_text ?? null,
+              caption: att.caption ?? null,
+            });
+          });
+        } else if (spec.row.media_id) {
+          optionRelationsToUpsert.push({
+            media_id: spec.row.media_id,
+            entity_type: "question_option",
+            entity_id: insRow.id,
+            role: "option",
+            sort_order: 0,
+            alt_text: spec.row.image_alt,
+            caption: null,
+          });
+        }
+      });
+
+      if (optionIdsToReset.length > 0) {
+        const { error: delOptMedErr } = await supabase
+          .from("content_media_relations")
+          .delete()
+          .eq("entity_type", "question_option")
+          .in("entity_id", optionIdsToReset);
+        if (delOptMedErr) throw delOptMedErr;
+      }
+
+      if (optionRelationsToUpsert.length > 0) {
+        const { error: insOptMedErr } = await supabase
+          .from("content_media_relations")
+          .upsert(optionRelationsToUpsert, {
+            onConflict: "media_id,entity_type,entity_id,role",
+          });
+        if (insOptMedErr) throw insOptMedErr;
+      }
     }
 
     if (input.accepted_answers !== undefined) {
@@ -419,6 +575,7 @@ export async function PATCH(
 
     return apiSuccess({
       ...updated,
+      media_attachments: relations.questionMediaByQ.get(qId) ?? [],
       options: relations.optionsByQ.get(qId) ?? [],
       accepted_answers: relations.answersByQ.get(qId) ?? [],
       tags: relations.tagsByQ.get(qId) ?? [],

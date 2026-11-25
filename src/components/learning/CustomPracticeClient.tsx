@@ -26,11 +26,10 @@ import {
   X,
   XCircle,
   Zap,
-  ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AudioPlayer } from "@/components/audio/AudioPlayer";
-import { ImageLightbox } from "@/components/media/ImageLightbox";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -66,13 +65,18 @@ import {
   fetchExamEligiblePool,
   fetchPracticeQuestionPool,
   isInteractiveControlTarget,
-  isSafeDisplayImageUrl,
   recordStudySessionAnswer,
   toggleStarQuestion,
   unstarQuestion,
   updateStudySession,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  getOptionDisplayItems,
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+  hasRenderableText,
+} from "@/lib/learning/media-helpers";
 import {
   formatCorrectAnswerDisplay,
   isMultiSelectChoiceQuestion,
@@ -104,9 +108,11 @@ import type {
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
+import { useEditableSetIds } from "./useStudySetBundle";
 import {
   QuestionContextMedia,
   V3StructuredPracticeControls,
@@ -294,10 +300,11 @@ export function CustomPracticeClient() {
   const [phase, setPhase] = React.useState<"setup" | "active" | "complete">(
     "setup",
   );
-  const [optionLightbox, setOptionLightbox] = React.useState<{
-    src: string;
-    alt: string;
+  const [editingQuestion, setEditingQuestion] = React.useState<{
+    studySetId: string;
+    questionId: string;
   } | null>(null);
+  const { canEditSet } = useEditableSetIds(phase === "active");
 
   // Source selection state
   const [selectedSetIds, setSelectedSetIds] = React.useState<string[]>(() => {
@@ -1019,7 +1026,7 @@ export function CustomPracticeClient() {
 
   // Keyboard shortcuts during active practice (strictly guarded against inputs/modals/sheets — V32-023)
   React.useEffect(() => {
-    if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
+    if (phase !== "active" || !currentItem || navSheetOpen || editingQuestion) {
       return;
     }
 
@@ -1103,7 +1110,7 @@ export function CustomPracticeClient() {
     handleToggleStar,
     items.length,
     navSheetOpen,
-    optionLightbox,
+    editingQuestion,
     phase,
     shortcutsEnabled,
     submitCurrentAnswer,
@@ -2029,9 +2036,17 @@ export function CustomPracticeClient() {
   const liveWrong = submittedValues.length - liveCorrect;
   const isStarred = starredIds.has(q.id);
   const formattedCorrectAnswer = formatCorrectAnswerDisplay(q, locale);
+  const promptMediaItems = getQuestionPromptDisplayItems(
+    q,
+    lText(locale, "Hình ảnh câu hỏi", "Question illustration"),
+  );
+  const explanationMediaItems = getQuestionExplanationDisplayItems(
+    q,
+    lText(locale, "Hình ảnh giải thích", "Explanation image"),
+  );
   const shouldDisplayExplanation =
     showExplanation &&
-    Boolean(q.explanation || q.explanation_rich) &&
+    Boolean(q.explanation || q.explanation_rich || explanationMediaItems.length > 0) &&
     (!currentAnswer.isCorrect ||
       (mcPrefs?.show_explanation_on_correct ?? true));
 
@@ -2176,15 +2191,9 @@ export function CustomPracticeClient() {
                         fallbackText={q.prompt}
                       />
                     </div>
-                    {q.prompt_image_url ? (
-                      <ZoomableImage
-                        src={q.prompt_image_url}
-                        alt={lText(
-                          locale,
-                          "Hình ảnh câu hỏi",
-                          "Question illustration",
-                        )}
-                      />
+                    {q.question_type !== "image_hotspot" &&
+                    promptMediaItems.length > 0 ? (
+                      <MediaGallery items={promptMediaItems} />
                     ) : null}
                     {q.audio_url &&
                     !(
@@ -2316,12 +2325,12 @@ export function CustomPracticeClient() {
                             currentAnswer.selectedOptionIds.includes(opt.id);
                           const isCorrectOpt = opt.is_correct;
                           const revealed = currentAnswer.isSubmitted;
-                          const hasOptImage = isSafeDisplayImageUrl(
-                            opt.image_url,
+                          const optMediaItems = getOptionDisplayItems(opt);
+                          const hasOptImage = optMediaItems.length > 0;
+                          const hasOptText = hasRenderableText(
+                            opt.content,
+                            opt.content_rich,
                           );
-                          const hasOptText =
-                            opt.content.trim().length > 0 ||
-                            Boolean(opt.content_rich);
 
                           let toneClass =
                             "border-border bg-card hover:bg-muted/60";
@@ -2342,120 +2351,84 @@ export function CustomPracticeClient() {
                           }
 
                           return (
-                            <div key={opt.id} className="relative">
-                              <button
-                                type="button"
-                                role={isMultiCurrent ? "checkbox" : "radio"}
-                                aria-checked={isSelected}
-                                disabled={revealed}
-                                onClick={() => handleToggleOption(opt.id)}
-                                className={cn(
-                                  "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                                  toneClass,
-                                )}
-                              >
-                                <div className="flex w-full items-start gap-3">
-                                  <span
-                                    className={cn(
-                                      "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-bold",
-                                      revealed && isCorrectOpt
-                                        ? "border-success bg-success text-success-foreground"
-                                        : revealed &&
-                                            isSelected &&
-                                            !isCorrectOpt
-                                          ? "border-destructive bg-destructive text-destructive-foreground"
-                                          : isSelected
-                                            ? "border-primary bg-primary text-primary-foreground"
-                                            : "border-border bg-muted text-muted-foreground",
-                                    )}
-                                  >
-                                    {opt.displayLabel}
-                                  </span>
-                                  <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
-                                    {hasOptText ? (
-                                      <SafeRichText
-                                        rich={opt.content_rich}
-                                        fallbackText={opt.content}
-                                        inline
-                                      />
-                                    ) : hasOptImage ? (
-                                      <span className="text-xs text-muted-foreground">
-                                        {lText(
-                                          locale,
-                                          `Hình phương án ${opt.displayLabel}`,
-                                          `Option ${opt.displayLabel} image`,
-                                        )}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                  {revealed && isCorrectOpt ? (
-                                    <CheckCircle2
-                                      className="mt-0.5 size-5 shrink-0 text-success"
-                                      aria-hidden="true"
+                            <div
+                              key={opt.id}
+                              role={isMultiCurrent ? "checkbox" : "radio"}
+                              aria-checked={isSelected}
+                              aria-disabled={revealed}
+                              tabIndex={revealed ? -1 : 0}
+                              onClick={() => {
+                                if (!revealed) handleToggleOption(opt.id);
+                              }}
+                              onKeyDown={(e) => {
+                                if (revealed) return;
+                                if (e.target !== e.currentTarget) return;
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  handleToggleOption(opt.id);
+                                }
+                              }}
+                              className={cn(
+                                "flex min-h-12 w-full flex-col items-stretch gap-2 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                revealed ? "cursor-default" : "cursor-pointer",
+                                toneClass,
+                              )}
+                            >
+                              <div className="flex w-full items-start gap-3">
+                                <span
+                                  className={cn(
+                                    "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-bold",
+                                    revealed && isCorrectOpt
+                                      ? "border-success bg-success text-success-foreground"
+                                      : revealed &&
+                                          isSelected &&
+                                          !isCorrectOpt
+                                        ? "border-destructive bg-destructive text-destructive-foreground"
+                                        : isSelected
+                                          ? "border-primary bg-primary text-primary-foreground"
+                                          : "border-border bg-muted text-muted-foreground",
+                                  )}
+                                >
+                                  {opt.displayLabel}
+                                </span>
+                                <div className="min-w-0 flex-1 text-sm leading-relaxed sm:text-base">
+                                  {hasOptText ? (
+                                    <SafeRichText
+                                      rich={opt.content_rich}
+                                      fallbackText={opt.content}
+                                      inline
                                     />
-                                  ) : revealed &&
-                                    isSelected &&
-                                    !isCorrectOpt ? (
-                                    <XCircle
-                                      className="mt-0.5 size-5 shrink-0 text-destructive"
-                                      aria-hidden="true"
-                                    />
+                                  ) : hasOptImage ? (
+                                    <span className="text-xs text-muted-foreground">
+                                      {lText(
+                                        locale,
+                                        `Hình phương án ${opt.displayLabel}`,
+                                        `Option ${opt.displayLabel} image`,
+                                      )}
+                                    </span>
                                   ) : null}
                                 </div>
-
-                                {hasOptImage ? (
-                                  <div className="w-full pt-1">
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img
-                                      src={opt.image_url ?? ""}
-                                      alt={
-                                        opt.image_alt ||
-                                        opt.content ||
-                                        lText(
-                                          locale,
-                                          `Hình phương án ${opt.displayLabel}`,
-                                          `Option ${opt.displayLabel} image`,
-                                        )
-                                      }
-                                      loading="lazy"
-                                      decoding="async"
-                                      className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
-                                    />
-                                  </div>
-                                ) : null}
-                              </button>
-
-                              {hasOptImage ? (
-                                <Button
-                                  type="button"
-                                  size="icon"
-                                  variant="secondary"
-                                  className="absolute right-2 bottom-2 size-8 opacity-90 shadow-xs"
-                                  aria-label={lText(
-                                    locale,
-                                    `Phóng to hình phương án ${opt.displayLabel}`,
-                                    `Zoom option ${opt.displayLabel} image`,
-                                  )}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setOptionLightbox({
-                                      src: opt.image_url!,
-                                      alt:
-                                        opt.image_alt ||
-                                        opt.content ||
-                                        lText(
-                                          locale,
-                                          `Hình phương án ${opt.displayLabel}`,
-                                          `Option ${opt.displayLabel} image`,
-                                        ),
-                                    });
-                                  }}
-                                >
-                                  <ZoomIn
-                                    className="size-3.5"
+                                {revealed && isCorrectOpt ? (
+                                  <CheckCircle2
+                                    className="mt-0.5 size-5 shrink-0 text-success"
                                     aria-hidden="true"
                                   />
-                                </Button>
+                                ) : revealed &&
+                                  isSelected &&
+                                  !isCorrectOpt ? (
+                                  <XCircle
+                                    className="mt-0.5 size-5 shrink-0 text-destructive"
+                                    aria-hidden="true"
+                                  />
+                                ) : null}
+                              </div>
+
+                              {hasOptImage ? (
+                                <MediaGallery
+                                  items={optMediaItems}
+                                  variant="option"
+                                  className="pt-1"
+                                />
                               ) : null}
                             </div>
                           );
@@ -2525,21 +2498,35 @@ export function CustomPracticeClient() {
                       ) : null}
 
                       {shouldDisplayExplanation ? (
-                        <div className="border-t border-border/50 pt-2 text-xs leading-relaxed text-foreground/90">
-                          <span className="font-semibold">
-                            {lText(locale, "Giải thích: ", "Explanation: ")}
-                          </span>
-                          <SafeRichText
-                            rich={q.explanation_rich}
-                            fallbackText={q.explanation}
-                            inline
-                          />
+                        <div className="space-y-2 border-t border-border/50 pt-2 text-xs leading-relaxed text-foreground/90">
+                          {q.explanation || q.explanation_rich ? (
+                            <div>
+                              <span className="font-semibold">
+                                {lText(locale, "Giải thích: ", "Explanation: ")}
+                              </span>
+                              <SafeRichText
+                                rich={q.explanation_rich}
+                                fallbackText={q.explanation}
+                                inline
+                              />
+                            </div>
+                          ) : (
+                            <span className="block font-semibold">
+                              {lText(locale, "Giải thích:", "Explanation:")}
+                            </span>
+                          )}
+                          {explanationMediaItems.length > 0 ? (
+                            <MediaGallery
+                              items={explanationMediaItems}
+                              variant="compact"
+                            />
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
                   ) : null}
 
-                  {/* Personal Notes & Question Error Report Bar */}
+                  {/* Personal Notes, Report & Contextual Edit Bar */}
                   <div className="border-t border-border/60 pt-3">
                     <QuestionNotesAndReportBar
                       key={q.id}
@@ -2547,6 +2534,14 @@ export function CustomPracticeClient() {
                       questionId={q.id}
                       showReportButton
                       compact
+                      canEdit={canEditSet(q.study_set_id)}
+                      onEditQuestion={() => {
+                        clearAutoNextTimer();
+                        setEditingQuestion({
+                          studySetId: q.study_set_id,
+                          questionId: q.id,
+                        });
+                      }}
                     />
                   </div>
                 </CardContent>
@@ -2618,13 +2613,45 @@ export function CustomPracticeClient() {
         ) : null}
       </div>
 
-      <ImageLightbox
-        open={Boolean(optionLightbox)}
+      <ContextualQuestionEditorModal
+        open={Boolean(editingQuestion) && canEditSet(editingQuestion?.studySetId)}
         onOpenChange={(open) => {
-          if (!open) setOptionLightbox(null);
+          if (!open) setEditingQuestion(null);
         }}
-        src={optionLightbox?.src}
-        alt={optionLightbox?.alt}
+        studySetId={editingQuestion?.studySetId ?? ""}
+        questionId={editingQuestion?.questionId ?? null}
+        initialQuestion={
+          editingQuestion
+            ? (items.find((it) => it.question.id === editingQuestion.questionId)
+                ?.question ?? null)
+            : null
+        }
+        onSaved={(saved) => {
+          setItems((prev) =>
+            prev.map((item) => {
+              if (item.question.id !== saved.id) return item;
+              const existingOrder = new Map(
+                item.displayedOptions.map((o, idx) => [o.id, idx]),
+              );
+              const orderedOpts = [...(saved.options ?? [])].sort((a, b) => {
+                const ra = existingOrder.get(a.id);
+                const rb = existingOrder.get(b.id);
+                if (ra !== undefined && rb !== undefined) return ra - rb;
+                if (ra !== undefined) return -1;
+                if (rb !== undefined) return 1;
+                return a.position - b.position;
+              });
+              return {
+                question: {
+                  ...item.question,
+                  ...saved,
+                  source_subject_title: item.question.source_subject_title,
+                },
+                displayedOptions: withOptionDisplayLabels(orderedOpts),
+              };
+            }),
+          );
+        }}
       />
     </div>
   );

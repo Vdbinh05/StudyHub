@@ -12,6 +12,13 @@ import {
   sanitizeFileName,
 } from "@/lib/import/text-utils";
 import { inspectRasterImageBytes } from "@/lib/import/zip-guard";
+import {
+  canonicalizeMediaUrlKey,
+  getOptionMedia,
+  getQuestionExplanationMedia,
+  getQuestionPromptMedia,
+} from "@/lib/media/question-media";
+import { buildSignedProxyUrl } from "@/lib/media/urls";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiError, handleApiError, parseJsonBody } from "@/lib/security/errors";
 import {
@@ -271,13 +278,34 @@ export async function POST(request: Request) {
         ? stripPreSubmitQuestions(attemptDetail.questions ?? [])
         : [...(attemptDetail.questions ?? [])].sort((a, b) => a.position - b.position);
 
-      // Bound-parallel preload of all unique Storage images referenced by attempt snapshots (DB-10)
+      const includeExplanationImages = !isUnsubmitted && body.mode !== "question_paper";
+
+      const collectUniqueUrls = (urls: readonly (string | null | undefined)[]): string[] => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const u of urls) {
+          if (!u?.trim()) continue;
+          const key = canonicalizeMediaUrlKey(u);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          out.push(u.trim());
+        }
+        return out;
+      };
+
+      const resolveCachedImages = (urls: readonly string[]): PdfEmbeddedImage[] =>
+        urls
+          .map((u) => getCachedEmbeddedImage(u))
+          .filter((img): img is PdfEmbeddedImage => img !== null);
+
+      // Bound-parallel preload of all unique Storage images referenced by attempt snapshots (DB-10 / V32-053)
       const attemptImageUrls: Array<string | null | undefined> = [];
       for (const row of snapshotQuestions) {
         const typePayload = (row.type_payload_snapshot as QuestionTypePayload | null) ?? null;
-        attemptImageUrls.push(row.prompt_image_url_snapshot);
+        const promptMedia = getQuestionPromptMedia(row);
+        for (const m of promptMedia) attemptImageUrls.push(m.url);
         if (
-          !row.prompt_image_url_snapshot &&
+          promptMedia.length === 0 &&
           typePayload?.type === "image_hotspot" &&
           typePayload.image_url
         ) {
@@ -285,7 +313,14 @@ export async function POST(request: Request) {
         }
         const rawOpts = Array.isArray(row.options_snapshot) ? row.options_snapshot : [];
         for (const opt of rawOpts) {
-          attemptImageUrls.push(opt.image_url);
+          for (const m of getOptionMedia(opt)) {
+            attemptImageUrls.push(m.url);
+          }
+        }
+        if (includeExplanationImages) {
+          for (const m of getQuestionExplanationMedia(row)) {
+            attemptImageUrls.push(m.url);
+          }
         }
       }
       await preloadStorageImages(attemptImageUrls);
@@ -295,20 +330,35 @@ export async function POST(request: Request) {
         const correctIdSet = new Set(
           isUnsubmitted ? [] : (row.correct_option_ids ?? []),
         );
-        const mappedOptions: PdfExportOption[] = rawOpts.map((opt, i) => ({
-          id: opt.id,
-          label: opt.label || String.fromCharCode(65 + i),
-          content: opt.content ?? "",
-          contentRich: (opt.content_rich as RichTextDoc | null | undefined) ?? null,
-          isCorrect: isUnsubmitted ? false : correctIdSet.has(opt.id),
-          image: getCachedEmbeddedImage(opt.image_url),
-        }));
+        const mappedOptions: PdfExportOption[] = rawOpts.map((opt, i) => {
+          const optUrls = collectUniqueUrls(getOptionMedia(opt).map((m) => m.url));
+          const optImages = resolveCachedImages(optUrls);
+          return {
+            id: opt.id,
+            label: opt.label || String.fromCharCode(65 + i),
+            content: opt.content ?? "",
+            contentRich: (opt.content_rich as RichTextDoc | null | undefined) ?? null,
+            isCorrect: isUnsubmitted ? false : correctIdSet.has(opt.id),
+            image: optImages[0] ?? null,
+            images: optImages,
+          };
+        });
 
         const typePayload = (row.type_payload_snapshot as QuestionTypePayload | null) ?? null;
-        const primaryImageUrl =
-          row.prompt_image_url_snapshot ||
-          (typePayload?.type === "image_hotspot" ? typePayload.image_url : null);
-        const promptImg = getCachedEmbeddedImage(primaryImageUrl);
+        const promptMediaUrls = collectUniqueUrls([
+          ...getQuestionPromptMedia(row).map((m) => m.url),
+          ...(getQuestionPromptMedia(row).length === 0 &&
+          typePayload?.type === "image_hotspot" &&
+          typePayload.image_url
+            ? [typePayload.image_url]
+            : []),
+        ]);
+        const promptImages = resolveCachedImages(promptMediaUrls);
+        const explanationImages = includeExplanationImages
+          ? resolveCachedImages(
+              collectUniqueUrls(getQuestionExplanationMedia(row).map((m) => m.url)),
+            )
+          : [];
         const accepted =
           !isUnsubmitted && Array.isArray(row.accepted_answers_snapshot)
             ? row.accepted_answers_snapshot
@@ -346,13 +396,14 @@ export async function POST(request: Request) {
           explanationRich: isUnsubmitted
             ? null
             : ((row.explanation_rich_snapshot as RichTextDoc | null) ?? null),
+          explanationImages,
           passageId: passageObj?.id ?? null,
           passageTitle: passageObj?.title ?? null,
           passageContent: passageObj?.content_text ?? null,
           typePayload,
           options: mappedOptions,
           acceptedAnswers: accepted,
-          promptImages: promptImg ? [promptImg] : [],
+          promptImages,
           userResponseText: isUnsubmitted
             ? null
             : selectedLabels || userAnswer?.typed_answer?.trim() || structuredText || null,
@@ -502,39 +553,179 @@ export async function POST(request: Request) {
         }
       }
 
-      // Collect all unique Storage image URLs in document order and preload with concurrency = 6 (DB-10)
+      const includeExplanationImages = body.mode !== "question_paper";
+
+      type RawMediaRelationRow = {
+        entity_type: string;
+        entity_id: string;
+        role: string;
+        sort_order: number;
+        media:
+          | { storage_path: string | null; kind: string | null; mime_type: string | null }
+          | Array<{ storage_path: string | null; kind: string | null; mime_type: string | null }>
+          | null;
+      };
+
+      const allOptionIds: string[] = [];
+      for (const optRows of optionChunks) {
+        for (const opt of optRows) {
+          allOptionIds.push(opt.id);
+        }
+      }
+
+      const [questionMediaRelChunks, optionMediaRelChunks] = body.includeImages
+        ? await Promise.all([
+            mapWithConcurrency(qIdChunks, PDF_CONCURRENCY_LIMIT, async (idChunk) => {
+              const { data: relRows, error: relErr } = await supabase
+                .from("content_media_relations")
+                .select(
+                  "entity_type, entity_id, role, sort_order, media:media_assets(storage_path, kind, mime_type)",
+                )
+                .eq("entity_type", "question")
+                .in("entity_id", idChunk)
+                .order("sort_order", { ascending: true });
+              if (relErr) throw relErr;
+              return (relRows ?? []) as RawMediaRelationRow[];
+            }),
+            mapWithConcurrency(
+              chunkArray(allOptionIds, IN_QUERY_CHUNK_SIZE),
+              PDF_CONCURRENCY_LIMIT,
+              async (optChunk) => {
+                const { data: relRows, error: relErr } = await supabase
+                  .from("content_media_relations")
+                  .select(
+                    "entity_type, entity_id, role, sort_order, media:media_assets(storage_path, kind, mime_type)",
+                  )
+                  .eq("entity_type", "question_option")
+                  .eq("role", "option")
+                  .in("entity_id", optChunk)
+                  .order("sort_order", { ascending: true });
+                if (relErr) throw relErr;
+                return (relRows ?? []) as RawMediaRelationRow[];
+              },
+            ),
+          ])
+        : [[], []];
+
+      const extractRelImageUrl = (rel: RawMediaRelationRow): string | null => {
+        const asset = Array.isArray(rel.media) ? rel.media[0] : rel.media;
+        if (!asset?.storage_path) return null;
+        if (asset.kind === "audio" || (asset.mime_type ?? "").toLowerCase().startsWith("audio/")) {
+          return null;
+        }
+        return buildSignedProxyUrl(asset.storage_path);
+      };
+
+      const promptUrlsByQ = new Map<string, string[]>();
+      const expUrlsByQ = new Map<string, string[]>();
+      for (const chunkRows of questionMediaRelChunks) {
+        for (const rel of chunkRows) {
+          const url = extractRelImageUrl(rel);
+          if (!url) continue;
+          if (
+            rel.role === "prompt" ||
+            rel.role === "diagram_base" ||
+            rel.role === "passage"
+          ) {
+            const list = promptUrlsByQ.get(rel.entity_id) ?? [];
+            list.push(url);
+            promptUrlsByQ.set(rel.entity_id, list);
+          } else if (rel.role === "explanation" && includeExplanationImages) {
+            const list = expUrlsByQ.get(rel.entity_id) ?? [];
+            list.push(url);
+            expUrlsByQ.set(rel.entity_id, list);
+          }
+        }
+      }
+
+      const optionUrlsByOpt = new Map<string, string[]>();
+      for (const chunkRows of optionMediaRelChunks) {
+        for (const rel of chunkRows) {
+          const url = extractRelImageUrl(rel);
+          if (!url) continue;
+          const list = optionUrlsByOpt.get(rel.entity_id) ?? [];
+          list.push(url);
+          optionUrlsByOpt.set(rel.entity_id, list);
+        }
+      }
+
+      const dedupeUrls = (urls: readonly (string | null | undefined)[]): string[] => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const u of urls) {
+          if (!u?.trim()) continue;
+          const key = canonicalizeMediaUrlKey(u);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          out.push(u.trim());
+        }
+        return out;
+      };
+
+      const resolvedPromptUrlsByQ = new Map<string, string[]>();
+      const resolvedExpUrlsByQ = new Map<string, string[]>();
+      const resolvedOptUrlsByOpt = new Map<string, string[]>();
+
+      // Collect all unique Storage image URLs in document order and preload with concurrency = 6 (DB-10 / V32-053)
       const setImageUrls: Array<string | null | undefined> = [];
       for (const q of filteredQuestions) {
         const typePayload = (q.type_payload as QuestionTypePayload | null) ?? null;
-        setImageUrls.push(q.prompt_image_url);
-        if (
+        const relPromptUrls = promptUrlsByQ.get(q.id) ?? [];
+        const qPromptUrls = dedupeUrls([
+          ...relPromptUrls,
+          q.prompt_image_url,
+          ...(relPromptUrls.length === 0 &&
           !q.prompt_image_url &&
           typePayload?.type === "image_hotspot" &&
           typePayload.image_url
-        ) {
-          setImageUrls.push(typePayload.image_url);
-        }
+            ? [typePayload.image_url]
+            : []),
+        ]);
+        resolvedPromptUrlsByQ.set(q.id, qPromptUrls);
+        setImageUrls.push(...qPromptUrls);
+
         for (const opt of rawOptionsByQ.get(q.id) ?? []) {
-          setImageUrls.push(opt.image_url);
+          const optUrls = dedupeUrls([
+            ...(optionUrlsByOpt.get(opt.id) ?? []),
+            opt.image_url,
+          ]);
+          resolvedOptUrlsByOpt.set(opt.id, optUrls);
+          setImageUrls.push(...optUrls);
+        }
+
+        if (includeExplanationImages) {
+          const expUrls = dedupeUrls(expUrlsByQ.get(q.id) ?? []);
+          resolvedExpUrlsByQ.set(q.id, expUrls);
+          setImageUrls.push(...expUrls);
         }
       }
       await preloadStorageImages(setImageUrls);
 
       for (const q of filteredQuestions) {
         const typePayload = (q.type_payload as QuestionTypePayload | null) ?? null;
-        const primaryImageUrl =
-          q.prompt_image_url ||
-          (typePayload?.type === "image_hotspot" ? typePayload.image_url : null);
-        const promptImg = getCachedEmbeddedImage(primaryImageUrl);
+        const promptImages = (resolvedPromptUrlsByQ.get(q.id) ?? [])
+          .map((u) => getCachedEmbeddedImage(u))
+          .filter((img): img is PdfEmbeddedImage => img !== null);
+        const explanationImages = includeExplanationImages
+          ? (resolvedExpUrlsByQ.get(q.id) ?? [])
+              .map((u) => getCachedEmbeddedImage(u))
+              .filter((img): img is PdfEmbeddedImage => img !== null)
+          : [];
         const passage = q.passage_id ? passagesById.get(q.passage_id) : undefined;
-        const mappedOptions: PdfExportOption[] = (rawOptionsByQ.get(q.id) ?? []).map((opt) => ({
-          id: opt.id,
-          label: opt.label,
-          content: opt.content,
-          contentRich: (opt.content_rich as RichTextDoc | null) ?? null,
-          isCorrect: opt.is_correct,
-          image: getCachedEmbeddedImage(opt.image_url),
-        }));
+        const mappedOptions: PdfExportOption[] = (rawOptionsByQ.get(q.id) ?? []).map((opt) => {
+          const optImages = (resolvedOptUrlsByOpt.get(opt.id) ?? [])
+            .map((u) => getCachedEmbeddedImage(u))
+            .filter((img): img is PdfEmbeddedImage => img !== null);
+          return {
+            id: opt.id,
+            label: opt.label,
+            content: opt.content,
+            contentRich: (opt.content_rich as RichTextDoc | null) ?? null,
+            isCorrect: opt.is_correct,
+            image: optImages[0] ?? null,
+            images: optImages,
+          };
+        });
 
         exportQuestions.push({
           id: q.id,
@@ -546,6 +737,7 @@ export async function POST(request: Request) {
           backRich: (q.back_rich as RichTextDoc | null) ?? null,
           explanation: q.explanation,
           explanationRich: (q.explanation_rich as RichTextDoc | null) ?? null,
+          explanationImages,
           hint: q.hint,
           passageId: q.passage_id,
           passageTitle: passage?.title ?? null,
@@ -554,7 +746,7 @@ export async function POST(request: Request) {
           typePayload,
           options: mappedOptions,
           acceptedAnswers: acceptedByQ.get(q.id) ?? [],
-          promptImages: promptImg ? [promptImg] : [],
+          promptImages,
         });
       }
     }

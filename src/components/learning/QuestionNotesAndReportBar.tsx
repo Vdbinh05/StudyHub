@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Flag, Loader2, Save, StickyNote, Trash2 } from "lucide-react";
+import { Flag, Loader2, Pencil, Save, StickyNote, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,6 +59,10 @@ export interface QuestionNotesAndReportBarProps {
   initialNote?: UserQuestionNote | null;
   showReportButton?: boolean;
   compact?: boolean;
+  /** Strictly gated by owner/editor RBAC — never enable for viewers or active live exams! */
+  canEdit?: boolean;
+  onEditQuestion?: () => void;
+  editLabel?: string;
 }
 
 export function QuestionNotesAndReportBar({
@@ -67,6 +71,9 @@ export function QuestionNotesAndReportBar({
   initialNote = null,
   showReportButton = true,
   compact = false,
+  canEdit = false,
+  onEditQuestion,
+  editLabel,
 }: QuestionNotesAndReportBarProps) {
   const { locale } = useI18n();
   const [noteOpen, setNoteOpen] = React.useState(Boolean(initialNote?.content_text));
@@ -251,6 +258,23 @@ export function QuestionNotesAndReportBar({
           >
             <Flag className="size-3.5" aria-hidden="true" />
             {lText(locale, "Báo lỗi câu hỏi", "Report Issue")}
+          </Button>
+        ) : null}
+
+        {canEdit && onEditQuestion ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className={
+              compact
+                ? "min-h-11 sm:min-h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+                : "min-h-11 sm:min-h-9 text-xs text-muted-foreground hover:text-foreground"
+            }
+            onClick={onEditQuestion}
+          >
+            <Pencil className="size-3.5" aria-hidden="true" />
+            {editLabel ?? lText(locale, "Chỉnh sửa câu hỏi", "Edit Question")}
           </Button>
         ) : null}
       </div>

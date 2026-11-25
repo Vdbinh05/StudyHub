@@ -1,4 +1,8 @@
-import type { Question } from "@/types/domain";
+import type { Question, QuestionMediaAttachment } from "@/types/domain";
+import {
+  getQuestionExplanationAttachments,
+  getQuestionPromptAttachments,
+} from "./media-helpers";
 
 function stripVietnameseDiacritics(input: string): string {
   return input
@@ -64,6 +68,10 @@ export interface SpellTargetDescriptor {
   uploadedAudioUrl: string | null;
   chapter: string | null;
   explanation: string | null;
+  /** Prompt-side visual cues (multi-image attachments + legacy prompt_image_url). */
+  promptImages?: QuestionMediaAttachment[];
+  /** Post-check explanation images (NEVER rendered before submitting). */
+  explanationImages?: QuestionMediaAttachment[];
   /** True if the question has at least one spellable textual target. */
   isSpellable: boolean;
 }
@@ -359,7 +367,9 @@ export function extractSpellTarget(question: Question): SpellTargetDescriptor {
       : null;
   const relationAudio =
     question.media_attachments?.find((m) => m.role === "audio")?.media
-      ?.proxy_url ?? null;
+      ?.proxy_url ??
+    question.media_attachments?.find((m) => m.role === "audio")?.url ??
+    null;
   const uploadedAudioUrl =
     question.audio_url ?? listeningAudio ?? relationAudio ?? null;
 
@@ -421,7 +431,7 @@ export function extractSpellTarget(question: Question): SpellTargetDescriptor {
     question.question_type === "true_false"
   ) {
     const correctOpts = (question.options ?? []).filter(
-      (o) => o.is_correct && o.content.trim().length > 0 && !o.image_url,
+      (o) => o.is_correct && o.content.trim().length > 0,
     );
     if (correctOpts.length === 1 && correctOpts[0].content.trim().length <= 120) {
       pushUnique(correctOpts[0].content);
@@ -430,6 +440,8 @@ export function extractSpellTarget(question: Question): SpellTargetDescriptor {
   }
 
   const speakText = accepted[0] ?? "";
+  const promptImages = getQuestionPromptAttachments(question);
+  const explanationImages = getQuestionExplanationAttachments(question);
 
   return {
     questionId: question.id,
@@ -440,6 +452,8 @@ export function extractSpellTarget(question: Question): SpellTargetDescriptor {
     uploadedAudioUrl,
     chapter: question.chapter,
     explanation: question.explanation,
+    promptImages,
+    explanationImages,
     isSpellable: accepted.length > 0,
   };
 }

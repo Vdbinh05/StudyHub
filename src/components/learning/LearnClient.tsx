@@ -14,6 +14,7 @@ import {
   Clock,
   Crosshair,
   Layers,
+  Pencil,
   RotateCcw,
   Settings2,
   SkipForward,
@@ -22,6 +23,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -98,6 +100,13 @@ import {
 import { applyConfidenceToSm2 } from "@/lib/learning/confidence";
 import { projectQuestionToFlashcard } from "@/lib/learning/flashcard-projection";
 import {
+  attachmentToDisplayItem,
+  getOptionDisplayItems,
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+  hasRenderableText,
+} from "@/lib/learning/media-helpers";
+import {
   createSeededRng,
   gradeChoiceSelection,
   shuffleOptions,
@@ -124,12 +133,13 @@ import type {
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
 import { ResetProgressDialog } from "./ResetProgressDialog";
 import { ResumeSessionBanner } from "./ResumeSessionBanner";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -181,8 +191,10 @@ export function LearnClient({ setId }: LearnClientProps) {
     isError,
     error,
     refetch,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
   } = useStudySetBundle(setId);
 
   // Clean simple default mode + full session configuration hydrated from mode_preferences.learn (V32-025)
@@ -248,6 +260,9 @@ export function LearnClient({ setId }: LearnClientProps) {
     React.useState<AdaptiveLearnState | null>(null);
   const [feedback, setFeedback] = React.useState<LearnFeedbackState | null>(null);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
 
   const requestObjectiveChange = React.useCallback(
     (nextObj: LearnObjective) => {
@@ -1134,7 +1149,7 @@ export function LearnClient({ setId }: LearnClientProps) {
   // Keyboard shortcuts (strictly guarded against inputs, IME, dialogs & user shortcut toggle — V32-023)
   React.useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!currentCard || !currentQuestion) return;
+      if (!currentCard || !currentQuestion || editingQuestionId) return;
       if (shouldIgnoreShortcutEvent(e, { shortcutsEnabled })) return;
 
       if (feedback && !feedback.isForcedCorrectionPrompt) {
@@ -1174,6 +1189,7 @@ export function LearnClient({ setId }: LearnClientProps) {
     currentCard,
     currentQuestion,
     displayedOptions,
+    editingQuestionId,
     feedback,
     handleContinueAfterFeedback,
     handleSubmitCurrentActivity,
@@ -1702,24 +1718,42 @@ export function LearnClient({ setId }: LearnClientProps) {
                       ) : null}
                     </div>
 
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label={lText(locale, "Gắn sao câu này", "Toggle star")}
-                      aria-pressed={isStarred}
-                      onClick={() => void toggleStar(currentQuestion.id)}
-                    >
-                      <Star
-                        className={cn(
-                          "size-4",
-                          isStarred
-                            ? "fill-warning text-warning"
-                            : "text-muted-foreground",
-                        )}
-                        aria-hidden="true"
-                      />
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      {canEdit ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 text-muted-foreground hover:text-foreground"
+                          aria-label={lText(
+                            locale,
+                            "Chỉnh sửa câu hỏi",
+                            "Edit question",
+                          )}
+                          onClick={() => setEditingQuestionId(currentQuestion.id)}
+                        >
+                          <Pencil className="size-4" aria-hidden="true" />
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={lText(locale, "Gắn sao câu này", "Toggle star")}
+                        aria-pressed={isStarred}
+                        onClick={() => void toggleStar(currentQuestion.id)}
+                      >
+                        <Star
+                          className={cn(
+                            "size-4",
+                            isStarred
+                              ? "fill-warning text-warning"
+                              : "text-muted-foreground",
+                          )}
+                          aria-hidden="true"
+                        />
+                      </Button>
+                    </div>
                   </div>
 
                   {/* Reading Passage Context if present */}
@@ -1775,10 +1809,15 @@ export function LearnClient({ setId }: LearnClientProps) {
                       fallbackText={currentQuestion.prompt}
                       className="text-base font-medium leading-relaxed sm:text-lg"
                     />
-                    <ZoomableImage
-                      src={currentQuestion.prompt_image_url}
-                      alt={lText(locale, "Hình ảnh câu hỏi", "Question image")}
-                    />
+                    {currentCard.activity !== "hotspot" &&
+                    currentCard.activity !== "diagram_identify" ? (
+                      <MediaGallery
+                        items={getQuestionPromptDisplayItems(
+                          currentQuestion,
+                          lText(locale, "Hình ảnh câu hỏi", "Question image"),
+                        )}
+                      />
+                    ) : null}
                   </div>
 
                   {/* Pre-Reveal Confidence Selector (Steps 2–4 only) */}
@@ -1854,43 +1893,91 @@ export function LearnClient({ setId }: LearnClientProps) {
                       </div>
                     </div>
                   ) : currentCard.activity === "flashcard" && projectedFlashcard ? (
-                    <div className="space-y-4 rounded-xl border border-primary/25 bg-accent/25 p-4">
-                      <div className="space-y-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-primary">
-                          {lText(locale, "Đáp án / Kiến thức cần nhớ", "Key Answer")}
-                        </p>
-                        <SafeRichText
-                          rich={projectedFlashcard.backRich}
-                          fallbackText={projectedFlashcard.backText}
-                          className="text-base font-medium text-foreground"
-                        />
-                        <ZoomableImage
-                          src={projectedFlashcard.backImageUrl}
-                          alt={lText(locale, "Hình ảnh đáp án", "Answer image")}
-                        />
-                        {projectedFlashcard.explanation ||
-                        projectedFlashcard.explanationRich ? (
-                          <div className="rounded-lg bg-background/80 p-3 text-xs text-muted-foreground">
+                    (() => {
+                      const backGalleryItems = (projectedFlashcard.backMedia ?? [])
+                        .map((att, idx) =>
+                          attachmentToDisplayItem(
+                            att,
+                            lText(locale, "Hình ảnh đáp án", "Answer image"),
+                            idx,
+                          ),
+                        )
+                        .filter((item): item is NonNullable<typeof item> => item !== null);
+                      const expGalleryItems = (
+                        projectedFlashcard.explanationMedia ?? []
+                      )
+                        .map((att, idx) =>
+                          attachmentToDisplayItem(
+                            att,
+                            lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                            idx,
+                          ),
+                        )
+                        .filter((item): item is NonNullable<typeof item> => item !== null);
+
+                      return (
+                        <div className="space-y-4 rounded-xl border border-primary/25 bg-accent/25 p-4">
+                          <div className="space-y-2">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-primary">
+                              {lText(locale, "Đáp án / Kiến thức cần nhớ", "Key Answer")}
+                            </p>
                             <SafeRichText
-                              rich={projectedFlashcard.explanationRich}
-                              fallbackText={projectedFlashcard.explanation}
+                              rich={projectedFlashcard.backRich}
+                              fallbackText={projectedFlashcard.backText}
+                              className="text-base font-medium text-foreground"
                             />
+                            {backGalleryItems.length > 0 ||
+                            projectedFlashcard.backImageUrl ? (
+                              <MediaGallery
+                                items={backGalleryItems}
+                                fallbackImageUrl={
+                                  backGalleryItems.length === 0
+                                    ? projectedFlashcard.backImageUrl
+                                    : null
+                                }
+                                fallbackAlt={lText(
+                                  locale,
+                                  "Hình ảnh đáp án",
+                                  "Answer image",
+                                )}
+                                variant="compact"
+                              />
+                            ) : null}
+                            {projectedFlashcard.explanation ||
+                            projectedFlashcard.explanationRich ||
+                            expGalleryItems.length > 0 ? (
+                              <div className="space-y-2 rounded-lg bg-background/80 p-3 text-xs text-muted-foreground">
+                                {projectedFlashcard.explanation ||
+                                projectedFlashcard.explanationRich ? (
+                                  <SafeRichText
+                                    rich={projectedFlashcard.explanationRich}
+                                    fallbackText={projectedFlashcard.explanation}
+                                  />
+                                ) : null}
+                                {expGalleryItems.length > 0 ? (
+                                  <MediaGallery
+                                    items={expGalleryItems}
+                                    variant="compact"
+                                  />
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
-                        ) : null}
-                      </div>
-                      <Button
-                        type="button"
-                        className="min-h-11 w-full sm:w-auto"
-                        onClick={() => handleSubmitCurrentActivity()}
-                      >
-                        <CheckCircle2 className="size-4" aria-hidden="true" />
-                        {lText(
-                          locale,
-                          "Đã ghi nhớ sơ bộ — chuyển sang Bước 2",
-                          "Got it — Advance to Stage 2",
-                        )}
-                      </Button>
-                    </div>
+                          <Button
+                            type="button"
+                            className="min-h-11 w-full sm:w-auto"
+                            onClick={() => handleSubmitCurrentActivity()}
+                          >
+                            <CheckCircle2 className="size-4" aria-hidden="true" />
+                            {lText(
+                              locale,
+                              "Đã ghi nhớ sơ bộ — chuyển sang Bước 2",
+                              "Got it — Advance to Stage 2",
+                            )}
+                          </Button>
+                        </div>
+                      );
+                    })()
                   ) : currentCard.activity === "multiple_choice" ||
                     currentCard.activity === "reading_mc" ||
                     currentCard.activity === "listening_mc" ? (
@@ -1905,6 +1992,12 @@ export function LearnClient({ setId }: LearnClientProps) {
                         {displayedOptions.map((opt) => {
                           const isSelected = selectedOptionIds.includes(opt.id);
                           const revealed = Boolean(feedback);
+                          const optMediaItems = getOptionDisplayItems(opt);
+                          const hasOptImage = optMediaItems.length > 0;
+                          const hasOptText = hasRenderableText(
+                            opt.content,
+                            opt.content_rich,
+                          );
                           const tone = revealed
                             ? opt.is_correct
                               ? "border-success bg-success-subtle/70"
@@ -1915,26 +2008,39 @@ export function LearnClient({ setId }: LearnClientProps) {
                               ? "border-primary bg-primary/10 ring-1 ring-primary/30"
                               : "border-border bg-card hover:bg-muted/60";
 
+                          const handleActivateOption = () => {
+                            if (revealed) return;
+                            if (isCurrentMultiChoice) {
+                              setSelectedOptionIds((prev) =>
+                                prev.includes(opt.id)
+                                  ? prev.filter((id) => id !== opt.id)
+                                  : [...prev, opt.id],
+                              );
+                            } else {
+                              setSelectedOptionIds([opt.id]);
+                              handleSubmitCurrentActivity([opt.id]);
+                            }
+                          };
+
                           return (
-                            <button
+                            <div
                               key={opt.id}
-                              type="button"
-                              disabled={revealed}
-                              aria-pressed={isSelected}
-                              onClick={() => {
-                                if (isCurrentMultiChoice) {
-                                  setSelectedOptionIds((prev) =>
-                                    prev.includes(opt.id)
-                                      ? prev.filter((id) => id !== opt.id)
-                                      : [...prev, opt.id],
-                                  );
-                                } else {
-                                  setSelectedOptionIds([opt.id]);
-                                  handleSubmitCurrentActivity([opt.id]);
+                              role={isCurrentMultiChoice ? "checkbox" : "radio"}
+                              aria-checked={isSelected}
+                              aria-disabled={revealed}
+                              tabIndex={revealed ? -1 : 0}
+                              onClick={handleActivateOption}
+                              onKeyDown={(e) => {
+                                if (revealed) return;
+                                if (e.target !== e.currentTarget) return;
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  handleActivateOption();
                                 }
                               }}
                               className={cn(
-                                "flex min-h-12 w-full flex-col gap-2 rounded-xl border p-3.5 text-left transition-colors",
+                                "flex min-h-12 w-full flex-col gap-2 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                revealed ? "cursor-default" : "cursor-pointer",
                                 tone,
                               )}
                             >
@@ -1943,27 +2049,30 @@ export function LearnClient({ setId }: LearnClientProps) {
                                   {opt.displayLabel}
                                 </span>
                                 <div className="flex-1 text-sm">
-                                  {opt.content || opt.content_rich ? (
+                                  {hasOptText ? (
                                     <SafeRichText
                                       rich={opt.content_rich}
                                       fallbackText={opt.content}
                                     />
+                                  ) : hasOptImage ? (
+                                    <span className="text-xs text-muted-foreground">
+                                      {lText(
+                                        locale,
+                                        `Hình phương án ${opt.displayLabel}`,
+                                        `Option ${opt.displayLabel} image`,
+                                      )}
+                                    </span>
                                   ) : null}
                                 </div>
                               </div>
-                              {isSafeDisplayImageUrl(opt.image_url) ? (
-                                <div className="flex min-h-24 w-full items-center justify-center">
-                                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                                  <img
-                                    src={opt.image_url}
-                                    alt={opt.image_alt ?? opt.content ?? opt.displayLabel}
-                                    loading="lazy"
-                                    decoding="async"
-                                    className="max-h-40 rounded-md border border-border object-contain"
-                                  />
-                                </div>
+                              {hasOptImage ? (
+                                <MediaGallery
+                                  items={optMediaItems}
+                                  variant="option"
+                                  className="pt-1"
+                                />
                               ) : null}
-                            </button>
+                            </div>
                           );
                         })}
                       </div>
@@ -2473,23 +2582,54 @@ export function LearnClient({ setId }: LearnClientProps) {
                         </p>
                       ) : null}
 
-                      {feedback.explanation || feedback.explanationRich ? (
-                        <div className="border-t border-border/50 pt-2 text-xs text-muted-foreground">
-                          <span className="font-semibold text-foreground">
-                            {t("study.explanation")}:{" "}
-                          </span>
-                          <SafeRichText
-                            rich={feedback.explanationRich}
-                            fallbackText={feedback.explanation}
-                          />
-                        </div>
-                      ) : null}
+                      {(() => {
+                        const feedbackExpMedia = getQuestionExplanationDisplayItems(
+                          currentQuestion,
+                          lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                        );
+                        if (
+                          !feedback.explanation &&
+                          !feedback.explanationRich &&
+                          feedbackExpMedia.length === 0
+                        ) {
+                          return null;
+                        }
+                        return (
+                          <div className="space-y-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+                            {feedback.explanation || feedback.explanationRich ? (
+                              <div>
+                                <span className="font-semibold text-foreground">
+                                  {t("study.explanation")}:{" "}
+                                </span>
+                                <SafeRichText
+                                  rich={feedback.explanationRich}
+                                  fallbackText={feedback.explanation}
+                                />
+                              </div>
+                            ) : (
+                              <span className="block font-semibold text-foreground">
+                                {t("study.explanation")}:
+                              </span>
+                            )}
+                            {feedbackExpMedia.length > 0 ? (
+                              <MediaGallery
+                                items={feedbackExpMedia}
+                                variant="compact"
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })()}
 
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                         <QuestionNotesAndReportBar
                           studySetId={setId}
                           questionId={currentQuestion.id}
                           compact
+                          canEdit={canEdit}
+                          onEditQuestion={() =>
+                            setEditingQuestionId(currentQuestion.id)
+                          }
                         />
                         <Button
                           type="button"
@@ -2562,6 +2702,32 @@ export function LearnClient({ setId }: LearnClientProps) {
         onResetComplete={() => {
           void refetch();
           setConfigNonce((n) => n + 1);
+        }}
+      />
+      <ContextualQuestionEditorModal
+        open={Boolean(editingQuestionId) && canEdit}
+        onOpenChange={(open) => {
+          if (!open) setEditingQuestionId(null);
+        }}
+        studySetId={setId}
+        questionId={editingQuestionId}
+        initialQuestion={
+          editingQuestionId ? (questionMap.get(editingQuestionId) ?? null) : null
+        }
+        chapters={bundle.chapters}
+        onSaved={(saved) => {
+          updateLocalQuestion(saved);
+          if (feedback && currentQuestion?.id === saved.id) {
+            setFeedback((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    explanation: saved.explanation,
+                    explanationRich: saved.explanation_rich,
+                  }
+                : prev,
+            );
+          }
         }}
       />
     </FocusModeShell>

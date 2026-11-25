@@ -19,6 +19,7 @@ import type {
   DiagramSet,
   MediaKind,
   OfflineSyncEventType,
+  QuestionMediaAttachment,
   QuestionTypePayload,
   RichTextDoc,
   SharedPassage,
@@ -135,6 +136,8 @@ export interface OfflineQuestionRecord {
   options?: OfflineQuestionOption[];
   accepted_answers?: QuestionAcceptedAnswer[];
   tags?: Tag[];
+  /** Multi-image/audio attachments hydrated from `content_media_relations` (prompt, back, explanation, hint, audio) */
+  media_attachments?: QuestionMediaAttachment[];
   is_starred?: boolean;
   local_progress?: OfflineQuestionProgressSnapshot | null;
   cached_at: string;
@@ -271,6 +274,8 @@ export interface OfflineMediaRequirement {
   reason:
     | "prompt_image"
     | "back_image"
+    | "explanation_image"
+    | "hint_image"
     | "option_image"
     | "listening_audio"
     | "passage_audio"

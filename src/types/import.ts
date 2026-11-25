@@ -155,6 +155,8 @@ export interface ParsedQuestion {
   backText?: string | null;
   backImageUrl?: string | null;
   explanation?: string | null;
+  /** V32-053 explanation multimedia attachments */
+  explanationMedia?: ParsedMediaAttachment[];
   hint?: string | null;
   difficulty: DifficultyLevel;
   tags: string[];

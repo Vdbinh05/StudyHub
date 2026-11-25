@@ -50,6 +50,16 @@ export function estimateQuestionPayloadBytes(q: ParsedQuestion): number {
       utf8ByteLength(m.alt);
   }
 
+  for (const m of q.explanationMedia ?? []) {
+    bytes +=
+      160 +
+      utf8ByteLength(m.fileName) +
+      utf8ByteLength(m.previewPath) +
+      utf8ByteLength(m.tempStoragePath) +
+      utf8ByteLength(m.dataUrl) +
+      utf8ByteLength(m.alt);
+  }
+
   for (const opt of q.options) {
     bytes += 120 + utf8ByteLength(opt.content) + utf8ByteLength(opt.imageUrl);
     for (const m of opt.media ?? []) {

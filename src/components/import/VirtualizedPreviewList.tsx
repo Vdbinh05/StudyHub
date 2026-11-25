@@ -15,12 +15,16 @@ import {
   Edit3,
   EyeOff,
   Image as ImageIcon,
+  ImagePlus,
+  Loader2,
   Plus,
   RotateCcw,
   Search,
   Trash2,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
+import { extractClipboardImageFiles } from "@/components/media/MediaAttachmentEditor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -29,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { stripLeadingOptionPrefix } from "@/lib/import/text-utils";
+import { optimizeImageForUpload, validateRasterImage } from "@/lib/media/validation";
 import { cn } from "@/lib/utils";
 import type { Locale } from "@/types/domain";
 import type {
@@ -620,13 +625,24 @@ export function VirtualizedPreviewList({
                           )
                         )}
 
-                        {q.explanation && (
-                          <p className="rounded-md bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
-                            <span className="font-medium text-foreground">
-                              {locale === "en" ? "Explanation: " : "Giải thích: "}
-                            </span>
-                            {q.explanation}
-                          </p>
+                        {(q.explanation || (q.explanationMedia && q.explanationMedia.length > 0)) && (
+                          <div className="space-y-1.5 rounded-md bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
+                            {q.explanation && (
+                              <p>
+                                <span className="font-medium text-foreground">
+                                  {locale === "en" ? "Explanation: " : "Giải thích: "}
+                                </span>
+                                {q.explanation}
+                              </p>
+                            )}
+                            {q.explanationMedia && q.explanationMedia.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {q.explanationMedia.map((m) => (
+                                  <PreviewOptionThumbnail key={m.id} media={m} />
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
                     )}
@@ -833,6 +849,221 @@ function MediaPreviewChip({
   );
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+async function fileToParsedMediaAttachment(
+  rawFile: File,
+): Promise<{ attachment?: ParsedMediaAttachment; error?: string }> {
+  const rawBytes = new Uint8Array(await rawFile.arrayBuffer());
+  const validation = validateRasterImage(rawBytes, rawFile.name, rawFile.type);
+  if (!validation.valid) {
+    return { error: validation.message };
+  }
+
+  let fileToEncode = rawFile;
+  let finalMime: string = validation.detectedMime;
+  try {
+    const optimized = await optimizeImageForUpload(rawFile, { preserveOriginal: false });
+    fileToEncode = optimized.file;
+    finalMime = optimized.file.type || validation.detectedMime;
+  } catch {
+    // Keep validated original if canvas APIs are unavailable (e.g., jsdom test env)
+  }
+
+  const encodedBytes = new Uint8Array(await fileToEncode.arrayBuffer());
+  const dataUrl = `data:${finalMime};base64,${bytesToBase64(encodedBytes)}`;
+  const ext =
+    finalMime === "image/jpeg"
+      ? "jpg"
+      : finalMime === "image/webp"
+        ? "webp"
+        : finalMime === "image/gif"
+          ? "gif"
+          : "png";
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? `manual-${crypto.randomUUID()}`
+      : `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  return {
+    attachment: {
+      id,
+      rId: id,
+      fileName: fileToEncode.name || `image.${ext}`,
+      mimeType: finalMime,
+      ext,
+      byteLength: encodedBytes.byteLength,
+      previewPath: `/manual-upload/${fileToEncode.name || `image.${ext}`}`,
+      dataUrl,
+      anchorType: "inline",
+      ambiguous: false,
+      alt: "",
+    },
+  };
+}
+
+function PreviewMediaSlotUploader({
+  locale,
+  items,
+  maxItems,
+  addLabel,
+  compact = false,
+  onChange,
+}: {
+  locale: Locale;
+  items: ParsedMediaAttachment[];
+  maxItems: number;
+  addLabel: string;
+  compact?: boolean;
+  onChange: (next: ParsedMediaAttachment[]) => void;
+}) {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const [isDragOver, setIsDragOver] = React.useState(false);
+  const [isProcessing, setIsProcessing] = React.useState(false);
+
+  const addFiles = React.useCallback(
+    async (files: FileList | File[]) => {
+      const list = Array.from(files);
+      if (list.length === 0) return;
+      const remaining = Math.max(0, maxItems - items.length);
+      if (remaining === 0) {
+        toast.error(
+          locale === "en"
+            ? `Maximum of ${maxItems} image(s) allowed here.`
+            : `Chỉ có thể đính kèm tối đa ${maxItems} ảnh cho mục này.`,
+        );
+        return;
+      }
+
+      setIsProcessing(true);
+      try {
+        const added: ParsedMediaAttachment[] = [];
+        for (const f of list.slice(0, remaining)) {
+          const res = await fileToParsedMediaAttachment(f);
+          if (res.error) {
+            toast.error(res.error);
+          } else if (res.attachment) {
+            added.push(res.attachment);
+          }
+        }
+        if (added.length > 0) {
+          onChange([...items, ...added]);
+        }
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [items, locale, maxItems, onChange],
+  );
+
+  const reorder = (idx: number, delta: -1 | 1) => {
+    const target = idx + delta;
+    if (target < 0 || target >= items.length) return;
+    const next = items.slice();
+    [next[idx], next[target]] = [next[target], next[idx]];
+    onChange(next);
+  };
+
+  const removeAt = (idx: number) => {
+    onChange(items.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragOver(true);
+      }}
+      onDragLeave={() => setIsDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(false);
+        if (e.dataTransfer.files?.length) {
+          void addFiles(e.dataTransfer.files);
+        }
+      }}
+      onPaste={(e) => {
+        const imgs = extractClipboardImageFiles(e.clipboardData);
+        if (imgs.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          void addFiles(imgs);
+        }
+      }}
+      className={cn(
+        "space-y-1.5 rounded-md border border-dashed transition-colors",
+        isDragOver ? "border-primary bg-accent/50" : "border-border/80 bg-background/70",
+        compact ? "p-1.5" : "p-2",
+      )}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple={maxItems > 1}
+        disabled={isProcessing}
+        onChange={(e) => {
+          if (e.target.files) void addFiles(e.target.files);
+          e.target.value = "";
+        }}
+        className="sr-only"
+        aria-label={addLabel}
+      />
+
+      {items.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {items.map((media, idx) => (
+            <MediaPreviewChip
+              key={media.id}
+              locale={locale}
+              media={media}
+              canEdit
+              canMoveLeft={idx > 0}
+              canMoveRight={idx < items.length - 1}
+              onReorder={(delta) => reorder(idx, delta)}
+              onRemove={() => removeAt(idx)}
+            />
+          ))}
+        </div>
+      )}
+
+      {items.length < maxItems && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isProcessing}
+            onClick={() => inputRef.current?.click()}
+            className="h-8 gap-1.5 px-2.5 text-xs"
+          >
+            {isProcessing ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <ImagePlus className="size-3.5" aria-hidden="true" />
+            )}
+            <span>{addLabel}</span>
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            {locale === "en"
+              ? `Drop or Ctrl+V (${items.length}/${maxItems})`
+              : `Kéo thả hoặc dán Ctrl+V (${items.length}/${maxItems})`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InlineQuestionEditor({
   locale,
   question,
@@ -976,10 +1207,60 @@ function InlineQuestionEditor({
     }));
   };
 
+  const attachFilesToSlot = React.useCallback(
+    async (slot: "prompt" | "explanation" | string, files: File[]) => {
+      if (files.length === 0) return;
+      const added: ParsedMediaAttachment[] = [];
+      for (const f of files) {
+        const res = await fileToParsedMediaAttachment(f);
+        if (res.error) {
+          toast.error(res.error);
+        } else if (res.attachment) {
+          added.push(res.attachment);
+        }
+      }
+      if (added.length === 0) return;
+
+      onUpdateQuestion(question.tempId, (prev) => {
+        if (slot === "prompt") {
+          return {
+            ...prev,
+            promptMedia: [...(prev.promptMedia ?? []), ...added].slice(0, 10),
+          };
+        }
+        if (slot === "explanation") {
+          return {
+            ...prev,
+            explanationMedia: [...(prev.explanationMedia ?? []), ...added].slice(0, 6),
+          };
+        }
+        return {
+          ...prev,
+          options: prev.options.map((o) =>
+            o.id === slot
+              ? { ...o, media: [...(o.media ?? []), ...added].slice(0, 6) }
+              : o,
+          ),
+        };
+      });
+    },
+    [onUpdateQuestion, question.tempId],
+  );
+
   return (
     <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div className="space-y-1 sm:col-span-2">
+        <div
+          onPaste={(e) => {
+            const imgs = extractClipboardImageFiles(e.clipboardData);
+            if (imgs.length > 0) {
+              e.preventDefault();
+              e.stopPropagation();
+              void attachFilesToSlot("prompt", imgs);
+            }
+          }}
+          className="space-y-1.5 sm:col-span-2"
+        >
           <Label htmlFor={`edit-prompt-${question.tempId}`} className="text-xs">
             {locale === "en" ? "Question Prompt / Front" : "Nội dung câu hỏi / Mặt trước"}
           </Label>
@@ -992,6 +1273,18 @@ function InlineQuestionEditor({
               const value = e.target.value;
               updateDraft((prev) => ({ ...prev, prompt: value }));
             }}
+          />
+          <PreviewMediaSlotUploader
+            locale={locale}
+            items={question.promptMedia ?? []}
+            maxItems={10}
+            addLabel={locale === "en" ? "Add question image" : "Thêm ảnh câu hỏi"}
+            onChange={(nextMedia) =>
+              onUpdateQuestion(question.tempId, (prev) => ({
+                ...prev,
+                promptMedia: nextMedia.length > 0 ? nextMedia : undefined,
+              }))
+            }
           />
         </div>
 
@@ -1010,7 +1303,17 @@ function InlineQuestionEditor({
           />
         </div>
 
-        <div className="space-y-1">
+        <div
+          onPaste={(e) => {
+            const imgs = extractClipboardImageFiles(e.clipboardData);
+            if (imgs.length > 0) {
+              e.preventDefault();
+              e.stopPropagation();
+              void attachFilesToSlot("explanation", imgs);
+            }
+          }}
+          className="space-y-1.5"
+        >
           <Label htmlFor={`edit-explanation-${question.tempId}`} className="text-xs">
             {locale === "en" ? "Explanation" : "Giải thích"}
           </Label>
@@ -1023,18 +1326,34 @@ function InlineQuestionEditor({
               updateDraft((prev) => ({ ...prev, explanation: value }));
             }}
           />
+          <PreviewMediaSlotUploader
+            locale={locale}
+            compact
+            items={question.explanationMedia ?? []}
+            maxItems={6}
+            addLabel={
+              locale === "en" ? "Add explanation image" : "Thêm ảnh giải thích"
+            }
+            onChange={(nextMedia) =>
+              onUpdateQuestion(question.tempId, (prev) => ({
+                ...prev,
+                explanationMedia: nextMedia.length > 0 ? nextMedia : undefined,
+              }))
+            }
+          />
         </div>
       </div>
 
-      {/* Embedded Media Management (reassign between Prompt / Options / other Questions, or remove decorative images) */}
+      {/* Embedded Media Management (reassign between Prompt / Options / Explanation / other Questions, or remove decorative images) */}
       {((question.promptMedia && question.promptMedia.length > 0) ||
+        (question.explanationMedia && question.explanationMedia.length > 0) ||
         question.options.some((o) => o.media && o.media.length > 0)) && (
         <div className="space-y-2 rounded-lg border border-border bg-background p-2.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
             <ArrowLeftRight className="size-3.5 text-primary" aria-hidden="true" />
             {locale === "en"
-              ? "Extracted Images (Reassign or Remove)"
-              : "Hình ảnh trích xuất (Gán lại hoặc Xóa)"}
+              ? "Attached Images (Reassign Slot or Remove)"
+              : "Hình ảnh đính kèm (Gán lại vị trí hoặc Xóa)"}
           </div>
           <div className="space-y-1.5">
             {[
@@ -1050,6 +1369,11 @@ function InlineQuestionEditor({
                   slotLabel: `${locale === "en" ? "Option" : "Đáp án"} ${opt.label}`,
                 })),
               ),
+              ...(question.explanationMedia ?? []).map((m) => ({
+                media: m,
+                slot: "explanation" as const,
+                slotLabel: locale === "en" ? "Explanation" : "Giải thích",
+              })),
             ].map(({ media, slot, slotLabel }) => (
               <div
                 key={media.id}
@@ -1088,12 +1412,17 @@ function InlineQuestionEditor({
                       const nextPromptMedia = (prev.promptMedia ?? []).filter(
                         (m) => m.id !== media.id,
                       );
+                      const nextExplanationMedia = (prev.explanationMedia ?? []).filter(
+                        (m) => m.id !== media.id,
+                      );
                       const nextOptions = prev.options.map((o) => ({
                         ...o,
                         media: (o.media ?? []).filter((m) => m.id !== media.id),
                       }));
                       if (targetSlot === "prompt") {
                         nextPromptMedia.push(cleanMedia);
+                      } else if (targetSlot === "explanation") {
+                        nextExplanationMedia.push(cleanMedia);
                       } else {
                         const targetOpt = nextOptions.find((o) => o.id === targetSlot);
                         if (targetOpt) {
@@ -1102,6 +1431,7 @@ function InlineQuestionEditor({
                       }
                       const stillFloating =
                         nextPromptMedia.some((m) => m.ambiguous) ||
+                        nextExplanationMedia.some((m) => m.ambiguous) ||
                         nextOptions.some((o) =>
                           (o.media ?? []).some((m) => m.ambiguous),
                         );
@@ -1109,6 +1439,10 @@ function InlineQuestionEditor({
                         ...prev,
                         promptMedia:
                           nextPromptMedia.length > 0 ? nextPromptMedia : undefined,
+                        explanationMedia:
+                          nextExplanationMedia.length > 0
+                            ? nextExplanationMedia
+                            : undefined,
                         options: nextOptions.map((o) => ({
                           ...o,
                           media: o.media && o.media.length > 0 ? o.media : undefined,
@@ -1132,6 +1466,9 @@ function InlineQuestionEditor({
                       {locale === "en" ? `Option ${opt.label}` : `Đáp án ${opt.label}`}
                     </option>
                   ))}
+                  <option value="explanation">
+                    {locale === "en" ? "Explanation" : "Giải thích"}
+                  </option>
                 </select>
                 {onMoveMediaToQuestion && totalQuestions > 1 && (
                   <MoveMediaToQuestionControl
@@ -1153,12 +1490,16 @@ function InlineQuestionEditor({
                       const nextPromptMedia = (prev.promptMedia ?? []).filter(
                         (m) => m.id !== media.id,
                       );
+                      const nextExplanationMedia = (prev.explanationMedia ?? []).filter(
+                        (m) => m.id !== media.id,
+                      );
                       const nextOptions = prev.options.map((o) => {
                         const rem = (o.media ?? []).filter((m) => m.id !== media.id);
                         return { ...o, media: rem.length > 0 ? rem : undefined };
                       });
                       const stillFloating =
                         nextPromptMedia.some((m) => m.ambiguous) ||
+                        nextExplanationMedia.some((m) => m.ambiguous) ||
                         nextOptions.some((o) =>
                           (o.media ?? []).some((m) => m.ambiguous),
                         );
@@ -1166,6 +1507,10 @@ function InlineQuestionEditor({
                         ...prev,
                         promptMedia:
                           nextPromptMedia.length > 0 ? nextPromptMedia : undefined,
+                        explanationMedia:
+                          nextExplanationMedia.length > 0
+                            ? nextExplanationMedia
+                            : undefined,
                         options: nextOptions,
                         ambiguousMedia: stillFloating ? true : undefined,
                         issues: stillFloating
@@ -1207,8 +1552,8 @@ function InlineQuestionEditor({
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-foreground">
               {locale === "en"
-                ? "Options (check correct answer(s))"
-                : "Các phương án (tích chọn đáp án đúng)"}
+                ? "Options (check correct answer(s), drop or paste images)"
+                : "Các phương án (tích đáp án đúng, có thể thêm/dán ảnh cho từng phương án)"}
             </span>
             {question.options.length < 6 && (
               <Button type="button" variant="outline" size="sm" onClick={addOption}>
@@ -1218,42 +1563,83 @@ function InlineQuestionEditor({
             )}
           </div>
           {question.options.map((opt) => (
-            <div key={opt.id} className="flex items-center gap-2">
-              <Checkbox
-                id={`opt-check-${opt.id}`}
-                checked={opt.isCorrect}
-                onCheckedChange={() => {
-                  flushPending();
-                  onToggleOptionCorrect(question, opt.id);
-                }}
-                aria-label={`${locale === "en" ? "Mark correct" : "Đánh dấu đúng"} ${opt.label}`}
-              />
-              <span className="w-5 text-xs font-semibold text-muted-foreground">
-                {opt.label}.
-              </span>
-              <Input
-                value={draft.optionContents[opt.id] ?? opt.content}
-                onBlur={flushPending}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  updateDraft((prev) => ({
-                    ...prev,
-                    optionContents: { ...prev.optionContents, [opt.id]: value },
-                  }));
-                }}
-                className="flex-1"
-              />
-              {question.options.length > 2 && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={locale === "en" ? "Delete option" : "Xóa lựa chọn"}
-                  onClick={() => removeOption(opt.id)}
-                >
-                  <Trash2 className="size-4 text-muted-foreground" aria-hidden="true" />
-                </Button>
-              )}
+            <div
+              key={opt.id}
+              onPaste={(e) => {
+                const imgs = extractClipboardImageFiles(e.clipboardData);
+                if (imgs.length > 0) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void attachFilesToSlot(opt.id, imgs);
+                }
+              }}
+              className="space-y-1.5 rounded-md border border-border/70 bg-background/60 p-2"
+            >
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id={`opt-check-${opt.id}`}
+                  checked={opt.isCorrect}
+                  onCheckedChange={() => {
+                    flushPending();
+                    onToggleOptionCorrect(question, opt.id);
+                  }}
+                  aria-label={`${locale === "en" ? "Mark correct" : "Đánh dấu đúng"} ${opt.label}`}
+                />
+                <span className="w-5 text-xs font-semibold text-muted-foreground">
+                  {opt.label}.
+                </span>
+                <Input
+                  value={draft.optionContents[opt.id] ?? opt.content}
+                  onBlur={flushPending}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    updateDraft((prev) => ({
+                      ...prev,
+                      optionContents: { ...prev.optionContents, [opt.id]: value },
+                    }));
+                  }}
+                  placeholder={
+                    locale === "en"
+                      ? `Option ${opt.label} (text optional if image attached)`
+                      : `Phương án ${opt.label} (có thể để trống nếu đã có ảnh)`
+                  }
+                  className="flex-1"
+                />
+                {question.options.length > 2 && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={locale === "en" ? "Delete option" : "Xóa lựa chọn"}
+                    onClick={() => removeOption(opt.id)}
+                  >
+                    <Trash2 className="size-4 text-muted-foreground" aria-hidden="true" />
+                  </Button>
+                )}
+              </div>
+              <div className="pl-7">
+                <PreviewMediaSlotUploader
+                  locale={locale}
+                  compact
+                  items={opt.media ?? []}
+                  maxItems={6}
+                  addLabel={
+                    locale === "en"
+                      ? `Add image ${opt.label}`
+                      : `Thêm ảnh ${opt.label}`
+                  }
+                  onChange={(nextMedia) =>
+                    onUpdateQuestion(question.tempId, (prev) => ({
+                      ...prev,
+                      options: prev.options.map((o) =>
+                        o.id === opt.id
+                          ? { ...o, media: nextMedia.length > 0 ? nextMedia : undefined }
+                          : o,
+                      ),
+                    }))
+                  }
+                />
+              </div>
             </div>
           ))}
         </div>

@@ -15,6 +15,7 @@ export const V3_BACKUP_SCOPE = {
     "question_options",
     "question_accepted_answers",
     "question_tags",
+    "content_media_relations",
     "user_question_notes",
   ],
   export_only_entities: [

@@ -1,4 +1,9 @@
 import type { Question } from "@/types/domain";
+import {
+  getOptionAttachments,
+  getQuestionBackAttachments,
+  getQuestionPromptAttachments,
+} from "./media-helpers";
 import { fisherYatesShuffle, type RngFn } from "./shuffle";
 
 export interface MatchCandidate {
@@ -56,7 +61,8 @@ function normalizeForUniqueness(text: string): string {
 }
 
 /**
- * Project StudyHub questions into MatchCandidates (supports flashcards, short_answer, and MC questions).
+ * Project StudyHub questions into MatchCandidates (supports flashcards, short_answer,
+ * MC questions, and image-bearing / image-only prompts or answers).
  */
 export function questionsToMatchCandidates(
   questions: readonly Question[],
@@ -64,30 +70,45 @@ export function questionsToMatchCandidates(
   const result: MatchCandidate[] = [];
   for (const q of questions) {
     const prompt = q.prompt.trim();
-    if (!prompt) continue;
+    const promptImages = getQuestionPromptAttachments(q);
+    const promptImageUrl = promptImages[0]?.url ?? q.prompt_image_url ?? null;
+    if (!prompt && !promptImageUrl) continue;
 
     let answer = "";
-    let answerImageUrl: string | null = null;
+    const backImages = getQuestionBackAttachments(q);
+    let answerImageUrl: string | null = backImages[0]?.url ?? q.back_image_url ?? null;
 
     if (q.back_text && q.back_text.trim()) {
       answer = q.back_text.trim();
-      answerImageUrl = q.back_image_url ?? null;
     } else if (q.accepted_answers && q.accepted_answers.length > 0) {
       answer = q.accepted_answers[0].answer_text.trim();
     } else if (q.options && q.options.length > 0) {
       const correctOpts = q.options.filter((o) => o.is_correct);
       if (correctOpts.length > 0) {
-        answer = correctOpts.map((o) => o.content.trim()).join("; ");
-        answerImageUrl = correctOpts[0].image_url ?? null;
+        answer = correctOpts
+          .map((o) => o.content.trim())
+          .filter(Boolean)
+          .join("; ");
+        for (const opt of correctOpts) {
+          const optImgs = getOptionAttachments(opt);
+          if (optImgs[0]?.url) {
+            answerImageUrl = optImgs[0].url;
+            break;
+          }
+          if (opt.image_url) {
+            answerImageUrl = opt.image_url;
+            break;
+          }
+        }
       }
     }
 
-    if (!answer) continue;
+    if (!answer && !answerImageUrl) continue;
     result.push({
       questionId: q.id,
       prompt,
       answer,
-      promptImageUrl: q.prompt_image_url ?? null,
+      promptImageUrl,
       answerImageUrl,
     });
   }
@@ -96,7 +117,7 @@ export function questionsToMatchCandidates(
 
 /**
  * Generate a Match round of up to `pairCount` pairs.
- * Strictly guarantees NO two cards in the same round share identical normalized definition or prompt text.
+ * Strictly guarantees NO two cards in the same round share identical normalized definition or prompt text/image.
  */
 export function generateMatchRound(
   candidates: readonly MatchCandidate[],
@@ -113,8 +134,12 @@ export function generateMatchRound(
 
   for (const candidate of shuffledCandidates) {
     if (pairs.length >= pairCount) break;
-    const normPrompt = normalizeForUniqueness(candidate.prompt);
-    const normAnswer = normalizeForUniqueness(candidate.answer);
+    const normPrompt =
+      normalizeForUniqueness(candidate.prompt) ||
+      (candidate.promptImageUrl ? `img:${candidate.promptImageUrl}` : "");
+    const normAnswer =
+      normalizeForUniqueness(candidate.answer) ||
+      (candidate.answerImageUrl ? `img:${candidate.answerImageUrl}` : "");
 
     if (!normPrompt || !normAnswer) continue;
     if (seenPrompts.has(normPrompt) || seenAnswers.has(normAnswer)) {

@@ -24,6 +24,7 @@ import {
   Layers,
   MoreHorizontal,
   PenLine,
+  Pencil,
   Play,
   Repeat,
   RotateCcw,
@@ -43,7 +44,7 @@ import {
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { ResumeSessionBanner } from "@/components/learning/ResumeSessionBanner";
-import { ZoomableImage } from "@/components/media/ImageLightbox";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { useOptionalPwa } from "@/components/pwa/PwaProvider";
 import { RichContentRenderer } from "@/components/richtext/RichContentRenderer";
 import { Badge } from "@/components/ui/badge";
@@ -77,6 +78,15 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
 import { clearLocalCheckpoint } from "@/lib/learning/checkpoints";
+import {
+  getOptionMedia,
+  getQuestionBackMedia,
+  getQuestionExplanationMedia,
+  getQuestionPromptMedia,
+  questionMediaToDisplayItem,
+  type QuestionMediaAttachment,
+} from "@/lib/media/question-media";
+import type { MediaDisplayItem } from "@/lib/media/urls";
 import { invalidateLearningCaches } from "@/lib/query-keys";
 import {
   getCompatibleModesForQuestion,
@@ -89,6 +99,7 @@ import type {
   MemberRole,
   Question,
   QuestionType,
+  QuestionWithRelations,
   StudySet,
   V3StudyMode,
 } from "@/types/domain";
@@ -138,7 +149,38 @@ const ReportsInboxPanel = dynamic(
   },
 );
 
+const UnifiedQuestionEditorModal = dynamic(
+  () =>
+    import("@/components/editor/UnifiedQuestionEditorModal").then(
+      (m) => m.UnifiedQuestionEditorModal,
+    ),
+  { ssr: false },
+);
+
 const PAGE_SIZE = 20;
+
+type QuestionMediaFilter =
+  | "all"
+  | "has_images"
+  | "no_images"
+  | "missing_media"
+  | "needs_media_review";
+
+function attachmentsToGalleryItems(
+  attachments: readonly QuestionMediaAttachment[],
+  fallbackAlt: string,
+): MediaDisplayItem[] {
+  const out: MediaDisplayItem[] = [];
+  for (let i = 0; i < attachments.length; i += 1) {
+    const item = questionMediaToDisplayItem(attachments[i], i);
+    if (!item) continue;
+    out.push({
+      ...item,
+      alt_text: item.alt_text?.trim() ? item.alt_text : fallbackAlt,
+    });
+  }
+  return out;
+}
 
 const MATH_DELIMITER_RE =
   /\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]/;
@@ -262,6 +304,9 @@ function StudySetHubInner({ setId }: { setId: string }) {
   const [pdfExportOpen, setPdfExportOpen] = React.useState(false);
   const [resetOpen, setResetOpen] = React.useState(false);
   const [reportsOpen, setReportsOpen] = React.useState(false);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
 
   const [search, setSearch] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
@@ -278,6 +323,8 @@ function StudySetHubInner({ setId }: { setId: string }) {
     [urlChapter],
   );
   const [starredOnly, setStarredOnly] = React.useState(false);
+  const [mediaFilter, setMediaFilter] =
+    React.useState<QuestionMediaFilter>("all");
   const [showAnswers, setShowAnswers] = React.useState(true);
   const [page, setPage] = React.useState(1);
 
@@ -308,8 +355,9 @@ function StudySetHubInner({ setId }: { setId: string }) {
         debouncedSearch,
         chapterFilter,
         starredOnly,
+        mediaFilter,
       ] as const,
-    [setId, page, debouncedSearch, chapterFilter, starredOnly],
+    [setId, page, debouncedSearch, chapterFilter, starredOnly, mediaFilter],
   );
 
   const questionsQuery = useQuery<QuestionsPageData>({
@@ -323,6 +371,7 @@ function StudySetHubInner({ setId }: { setId: string }) {
       if (debouncedSearch) params.set("search", debouncedSearch);
       if (chapterFilter !== "all") params.set("chapter", chapterFilter);
       if (starredOnly) params.set("starredOnly", "true");
+      if (mediaFilter !== "all") params.set("mediaFilter", mediaFilter);
       const res = await apiFetch<HubQuestion[]>(
         `/api/sets/${setId}/questions?${params.toString()}`,
       );
@@ -504,8 +553,83 @@ function StudySetHubInner({ setId }: { setId: string }) {
   }, [focusedQuestionId, questions]);
 
   const isFiltered =
-    Boolean(debouncedSearch) || chapterFilter !== "all" || starredOnly;
+    Boolean(debouncedSearch) ||
+    chapterFilter !== "all" ||
+    starredOnly ||
+    mediaFilter !== "all";
   const totalQuestionsMatched = questionsQuery.data?.total ?? 0;
+
+  const pageQuestionIds = React.useMemo(
+    () => questions.map((item) => item.id),
+    [questions],
+  );
+  const editingQuestionIndex = React.useMemo(
+    () => (editingQuestionId ? pageQuestionIds.indexOf(editingQuestionId) : -1),
+    [editingQuestionId, pageQuestionIds],
+  );
+  const editingInitialQuestion = React.useMemo<QuestionWithRelations | null>(() => {
+    if (!editingQuestionId) return null;
+    const found = questions.find((item) => item.id === editingQuestionId);
+    if (!found) return null;
+    return {
+      ...found,
+      options: found.options ?? [],
+    };
+  }, [editingQuestionId, questions]);
+
+  const handleModalQuestionSaved = React.useCallback(
+    (savedQuestion: QuestionWithRelations, action: "save" | "save_and_next") => {
+      // Patch the active page cache synchronously in-place (zero reload flicker, keeps search/filter/page/scroll)
+      queryClient.setQueryData<QuestionsPageData>(questionsQueryKey, (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          items: prev.items.map((item) =>
+            item.id === savedQuestion.id
+              ? {
+                  ...item,
+                  ...savedQuestion,
+                  is_starred: item.is_starred,
+                }
+              : item,
+          ),
+        };
+      });
+
+      // Mark sibling pages/filter views stale without disrupting current view scroll or pagination
+      void queryClient.invalidateQueries({
+        queryKey: ["set-questions", setId],
+        refetchType: "none",
+      });
+      void queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["study-set-bundle", setId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["editor-questions", setId],
+      });
+
+      if (action === "save_and_next") {
+        if (
+          editingQuestionIndex >= 0 &&
+          editingQuestionIndex + 1 < pageQuestionIds.length
+        ) {
+          setEditingQuestionId(pageQuestionIds[editingQuestionIndex + 1] ?? null);
+        } else {
+          setEditingQuestionId(null);
+        }
+      } else {
+        setEditingQuestionId(null);
+      }
+    },
+    [
+      editingQuestionIndex,
+      pageQuestionIds,
+      queryClient,
+      questionsQueryKey,
+      setId,
+    ],
+  );
 
   const rawChapters = setQuery.data?.chapters;
   const chapters = React.useMemo(() => {
@@ -544,6 +668,10 @@ function StudySetHubInner({ setId }: { setId: string }) {
     let estimatedMediaCount = diagrams.length;
 
     for (const q of questions) {
+      const promptMedia = getQuestionPromptMedia(q);
+      const backMedia = getQuestionBackMedia(q);
+      const explanationMedia = getQuestionExplanationMedia(q);
+
       if (q.audio_url || q.audio_media_id || q.question_type === "listening") {
         hasAudioItems = true;
       }
@@ -551,16 +679,17 @@ function StudySetHubInner({ setId }: { setId: string }) {
         q.question_type === "image_choice" ||
         q.question_type === "image_hotspot" ||
         q.question_type === "listening" ||
-        (Boolean(q.prompt_image_url) && !q.prompt.trim())
+        (promptMedia.length > 0 && !q.prompt.trim())
       ) {
         hasRequiredMedia = true;
       }
-      if (q.prompt_image_url) estimatedMediaCount += 1;
-      if (q.back_image_url) estimatedMediaCount += 1;
+      estimatedMediaCount +=
+        promptMedia.length + backMedia.length + explanationMedia.length;
       if (q.audio_url) estimatedMediaCount += 1;
       for (const opt of q.options ?? []) {
-        if (opt.image_url) {
-          estimatedMediaCount += 1;
+        const optMedia = getOptionMedia(opt);
+        if (optMedia.length > 0) {
+          estimatedMediaCount += optMedia.length;
           if (!opt.content.trim()) hasRequiredMedia = true;
         }
       }
@@ -1353,7 +1482,7 @@ function StudySetHubInner({ setId }: { setId: string }) {
           </h2>
 
           <div className="flex flex-wrap items-center gap-2">
-            <search className="relative w-full sm:w-56">
+            <search className="relative w-full sm:w-64">
               <Search
                 className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
                 aria-hidden="true"
@@ -1362,8 +1491,8 @@ function StudySetHubInner({ setId }: { setId: string }) {
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder={vi ? "Tìm trong câu hỏi..." : "Search questions..."}
-                aria-label={vi ? "Tìm trong câu hỏi" : "Search questions"}
+                placeholder={t("questionEditor.searchNumberPlaceholder")}
+                aria-label={t("questionEditor.searchNumberPlaceholder")}
                 className="min-h-11 pl-9 sm:h-9 sm:min-h-9"
               />
             </search>
@@ -1440,6 +1569,59 @@ function StudySetHubInner({ setId }: { setId: string }) {
           </div>
         </div>
 
+        {/* Media Review Filter Pills (V32-053) */}
+        {hasQuestions && (
+          <div
+            role="group"
+            aria-label={vi ? "Lọc theo trạng thái hình ảnh" : "Filter by image status"}
+            className="flex flex-wrap items-center gap-1.5"
+          >
+            {(
+              [
+                { value: "all", label: t("questionEditor.mediaFilterAll") },
+                {
+                  value: "has_images",
+                  label: t("questionEditor.mediaFilterHasImages"),
+                },
+                {
+                  value: "no_images",
+                  label: t("questionEditor.mediaFilterNoImages"),
+                },
+                {
+                  value: "missing_media",
+                  label: t("questionEditor.mediaFilterMissing"),
+                },
+                {
+                  value: "needs_media_review",
+                  label: t("questionEditor.mediaFilterNeedsReview"),
+                },
+              ] as const
+            ).map((pill) => {
+              const active = mediaFilter === pill.value;
+              return (
+                <button
+                  key={pill.value}
+                  type="button"
+                  aria-pressed={active}
+                  data-testid={`hub-media-filter-${pill.value}`}
+                  onClick={() => {
+                    setMediaFilter(pill.value);
+                    setPage(1);
+                  }}
+                  className={cn(
+                    "inline-flex min-h-11 items-center rounded-full border px-3 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-8",
+                    active
+                      ? "border-primary bg-primary-subtle text-primary"
+                      : "border-border bg-card text-muted-foreground hover:bg-secondary hover:text-foreground",
+                  )}
+                >
+                  {pill.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className={cn(hasQuestions && "min-h-[28rem]")}>
           {questionsQuery.isLoading ? (
             <div className="space-y-3" aria-busy="true">
@@ -1480,7 +1662,22 @@ function StudySetHubInner({ setId }: { setId: string }) {
                   : "Bulk import questions from DOCX, PDF, XLSX, CSV, or TXT, or add them manually."
             }
             action={
-              canEdit && !isFiltered ? (
+              isFiltered ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setSearch("");
+                    setDebouncedSearch("");
+                    setChapterFilter("all");
+                    setStarredOnly(false);
+                    setMediaFilter("all");
+                    setPage(1);
+                  }}
+                >
+                  {vi ? "Xóa bộ lọc" : "Clear filters"}
+                </Button>
+              ) : canEdit ? (
                 <Button asChild>
                   <Link href={`/sets/${setId}/import`} prefetch={false}>
                     <Upload className="size-4" aria-hidden="true" />
@@ -1510,8 +1707,32 @@ function StudySetHubInner({ setId }: { setId: string }) {
                 {questions.map((q, index) => {
                   const isStarred = Boolean(q.is_starred);
                   const globalIdx = (page - 1) * PAGE_SIZE + index + 1;
+                  const displayNumber =
+                    typeof q.position === "number" && q.position >= 0
+                      ? q.position + 1
+                      : globalIdx;
                   const isFocused = Boolean(
                     focusedQuestionId && q.id === focusedQuestionId,
+                  );
+
+                  const promptMediaItems = attachmentsToGalleryItems(
+                    getQuestionPromptMedia(q),
+                    q.prompt?.trim().slice(0, 120) ||
+                      (vi
+                        ? `Hình minh họa câu hỏi #${displayNumber}`
+                        : `Question #${displayNumber} image`),
+                  );
+                  const backMediaItems = attachmentsToGalleryItems(
+                    getQuestionBackMedia(q),
+                    vi
+                      ? `Ảnh mặt sau câu #${displayNumber}`
+                      : `Back image for card #${displayNumber}`,
+                  );
+                  const explanationMediaItems = attachmentsToGalleryItems(
+                    getQuestionExplanationMedia(q),
+                    vi
+                      ? `Ảnh giải thích câu #${displayNumber}`
+                      : `Explanation image for question #${displayNumber}`,
                   );
 
                   return (
@@ -1531,11 +1752,11 @@ function StudySetHubInner({ setId }: { setId: string }) {
                         isFocused && "border-primary ring-primary/25 ring-2",
                       )}
                     >
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start justify-between gap-2 sm:gap-3">
                         <div className="min-w-0 flex-1 space-y-1.5">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="bg-secondary text-foreground rounded px-1.5 py-0.5 font-mono text-xs font-semibold tabular-nums">
-                              #{globalIdx}
+                              #{displayNumber}
                             </span>
                             {q.chapter && (
                               <Badge variant="outline">{q.chapter}</Badge>
@@ -1555,16 +1776,10 @@ function StudySetHubInner({ setId }: { setId: string }) {
                               />
                             </div>
                           )}
-                          {q.prompt_image_url && (
-                            <ZoomableImage
-                              src={q.prompt_image_url}
-                              alt={
-                                q.prompt?.trim().slice(0, 120) ||
-                                (vi
-                                  ? `Hình minh họa câu hỏi #${globalIdx}`
-                                  : `Question #${globalIdx} image`)
-                              }
-                              aspectClassName="max-h-56"
+                          {promptMediaItems.length > 0 && (
+                            <MediaGallery
+                              items={promptMediaItems}
+                              variant="compact"
                               className="mt-2"
                             />
                           )}
@@ -1575,38 +1790,60 @@ function StudySetHubInner({ setId }: { setId: string }) {
                               src={q.audio_url}
                               aria-label={
                                 vi
-                                  ? `Âm thanh câu hỏi #${globalIdx}`
-                                  : `Audio for question #${globalIdx}`
+                                  ? `Âm thanh câu hỏi #${displayNumber}`
+                                  : `Audio for question #${displayNumber}`
                               }
                               className="mt-2 h-9 max-w-full"
                             />
                           )}
                         </div>
 
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
-                          aria-label={
-                            isStarred
-                              ? `${t("study.unstarQuestion")} #${globalIdx}`
-                              : `${t("study.starQuestion")} #${globalIdx}`
-                          }
-                          aria-pressed={isStarred}
-                          onClick={() =>
-                            starMutation.mutate({ questionId: q.id, isStarred })
-                          }
-                        >
-                          <Star
-                            className={cn(
-                              "size-4",
+                        <div className="flex shrink-0 items-center gap-1">
+                          {canEdit && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="min-h-11 min-w-11 gap-1.5 px-2.5 sm:min-h-8 sm:min-w-0 sm:px-2.5"
+                              aria-label={`${t("questionEditor.editQuestion")} #${displayNumber}`}
+                              data-testid={`hub-edit-question-${q.id}`}
+                              onClick={() => setEditingQuestionId(q.id)}
+                            >
+                              <Pencil
+                                className="size-3.5 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span className="hidden sm:inline">
+                                {t("common.edit")}
+                              </span>
+                            </Button>
+                          )}
+
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
+                            aria-label={
                               isStarred
-                                ? "fill-warning text-warning"
-                                : "text-muted-foreground",
-                            )}
-                            aria-hidden="true"
-                          />
-                        </Button>
+                                ? `${t("study.unstarQuestion")} #${displayNumber}`
+                                : `${t("study.starQuestion")} #${displayNumber}`
+                            }
+                            aria-pressed={isStarred}
+                            onClick={() =>
+                              starMutation.mutate({ questionId: q.id, isStarred })
+                            }
+                          >
+                            <Star
+                              className={cn(
+                                "size-4",
+                                isStarred
+                                  ? "fill-warning text-warning"
+                                  : "text-muted-foreground",
+                              )}
+                              aria-hidden="true"
+                            />
+                          </Button>
+                        </div>
                       </div>
 
                       {/* Options or Flashcard Back */}
@@ -1615,6 +1852,13 @@ function StudySetHubInner({ setId }: { setId: string }) {
                           {q.options.map((opt, idx) => {
                             const letter = String.fromCharCode(65 + idx);
                             const highlightCorrect = showAnswers && opt.is_correct;
+                            const optionMediaItems = attachmentsToGalleryItems(
+                              getOptionMedia(opt),
+                              opt.content?.trim().slice(0, 80) ||
+                                (vi
+                                  ? `Ảnh phương án ${letter}`
+                                  : `Option ${letter} image`),
+                            );
                             return (
                               <li
                                 key={opt.id}
@@ -1636,17 +1880,11 @@ function StudySetHubInner({ setId }: { setId: string }) {
                                       inline
                                     />
                                   )}
-                                  {opt.image_url && (
-                                    <ZoomableImage
-                                      src={opt.image_url}
-                                      alt={
-                                        opt.content?.trim().slice(0, 80) ||
-                                        (vi
-                                          ? `Ảnh phương án ${letter}`
-                                          : `Option ${letter} image`)
-                                      }
-                                      aspectClassName="max-h-28"
-                                      className="block"
+                                  {optionMediaItems.length > 0 && (
+                                    <MediaGallery
+                                      items={optionMediaItems}
+                                      variant="option"
+                                      className="mt-1"
                                     />
                                   )}
                                 </span>
@@ -1660,7 +1898,7 @@ function StudySetHubInner({ setId }: { setId: string }) {
                             );
                           })}
                         </ul>
-                      ) : (q.back_text || q.back_rich || q.back_image_url) &&
+                      ) : (q.back_text || q.back_rich || backMediaItems.length > 0) &&
                         showAnswers ? (
                         <div className="border-success/30 bg-success-subtle text-success-subtle-foreground mt-3 space-y-2 rounded-lg border px-3 py-2 text-xs leading-relaxed">
                           {(q.back_text || q.back_rich) && (
@@ -1669,32 +1907,40 @@ function StudySetHubInner({ setId }: { setId: string }) {
                               plainText={q.back_text ?? ""}
                             />
                           )}
-                          {q.back_image_url && (
-                            <ZoomableImage
-                              src={q.back_image_url}
-                              alt={
-                                vi
-                                  ? `Ảnh mặt sau câu #${globalIdx}`
-                                  : `Back image for card #${globalIdx}`
-                              }
-                              aspectClassName="max-h-44"
+                          {backMediaItems.length > 0 && (
+                            <MediaGallery
+                              items={backMediaItems}
+                              variant="compact"
                             />
                           )}
                         </div>
                       ) : null}
 
-                      {showAnswers && (q.explanation || q.explanation_rich) && (
-                        <div className="text-muted-foreground mt-2.5 text-xs leading-relaxed">
-                          <span className="text-foreground font-semibold">
-                            {t("study.explanation")}:{" "}
-                          </span>
-                          <CompactPreviewContent
-                            richDoc={q.explanation_rich}
-                            plainText={q.explanation ?? ""}
-                            inline
-                          />
-                        </div>
-                      )}
+                      {showAnswers &&
+                        (q.explanation ||
+                          q.explanation_rich ||
+                          explanationMediaItems.length > 0) && (
+                          <div className="text-muted-foreground mt-2.5 space-y-2 text-xs leading-relaxed">
+                            <div>
+                              <span className="text-foreground font-semibold">
+                                {t("study.explanation")}:{" "}
+                              </span>
+                              {(q.explanation || q.explanation_rich) && (
+                                <CompactPreviewContent
+                                  richDoc={q.explanation_rich}
+                                  plainText={q.explanation ?? ""}
+                                  inline
+                                />
+                              )}
+                            </div>
+                            {explanationMediaItems.length > 0 && (
+                              <MediaGallery
+                                items={explanationMediaItems}
+                                variant="compact"
+                              />
+                            )}
+                          </div>
+                        )}
                     </li>
                   );
                 })}
@@ -1793,13 +2039,40 @@ function StudySetHubInner({ setId }: { setId: string }) {
             <ReportsInboxPanel
               studySetId={setId}
               locale={locale}
-              onEditQuestion={() => {
+              onEditQuestion={(reportedQuestionId) => {
                 setReportsOpen(false);
-                router.push(`/sets/${setId}/edit`);
+                if (reportedQuestionId) {
+                  setEditingQuestionId(reportedQuestionId);
+                } else {
+                  router.push(`/sets/${setId}/edit`);
+                }
               }}
             />
           </DialogContent>
         </Dialog>
+      )}
+
+      {canEdit && editingQuestionId !== null && (
+        <UnifiedQuestionEditorModal
+          open={Boolean(editingQuestionId)}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              setEditingQuestionId(null);
+            }
+          }}
+          studySetId={setId}
+          questionId={editingQuestionId}
+          initialQuestion={editingInitialQuestion}
+          questionIds={pageQuestionIds}
+          currentIndex={
+            editingQuestionIndex >= 0 ? editingQuestionIndex : undefined
+          }
+          onNavigateQuestion={(nextQuestionId) => {
+            setEditingQuestionId(nextQuestionId);
+          }}
+          onSaved={handleModalQuestionSaved}
+          chapters={chapters}
+        />
       )}
     </div>
   );

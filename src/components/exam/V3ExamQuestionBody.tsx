@@ -10,10 +10,9 @@ import {
   GripVertical,
   Headphones,
   RotateCcw,
-  ZoomIn,
 } from "lucide-react";
 import { AudioPlayer } from "@/components/audio/AudioPlayer";
-import { ImageLightbox } from "@/components/media/ImageLightbox";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { lText } from "@/components/learning/learning-copy";
 import { SafeRichText, ZoomableImage } from "@/components/learning/SafeRichText";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +29,11 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
 import { isSafeDisplayImageUrl } from "@/lib/learning/api-client";
-import { dedupeQuestionMediaImages } from "@/lib/learning/answer-display";
+import {
+  getExamSnapshotPromptDisplayItems,
+  getOptionDisplayItems,
+  hasRenderableText,
+} from "@/lib/learning/media-helpers";
 import { normalizeMatchingExamPayload } from "@/lib/learning/exam-scoring";
 import { indexToOptionLabel } from "@/lib/learning/shuffle";
 import type {
@@ -102,10 +105,6 @@ function V3ExamQuestionBodyInner({
   onChangeStructured,
 }: V3ExamQuestionBodyProps) {
   const { locale, t } = useI18n();
-  const [optionLightbox, setOptionLightbox] = React.useState<{
-    src: string;
-    alt: string;
-  } | null>(null);
   const [dragIndex, setDragIndex] = React.useState<number | null>(null);
   const [kbPoint, setKbPoint] = React.useState<NormalizedPoint>({
     x: 0.5,
@@ -114,24 +113,16 @@ function V3ExamQuestionBodyInner({
 
   const payload = question.type_payload_snapshot ?? null;
 
-  // Prompt media images deduplicated against `prompt_image_url_snapshot` (fixes RU-08!)
-  const { promptImageUrl: dedupedPromptImageUrl, attachments: promptMediaImages } =
-    React.useMemo(() => {
-      const rawPromptImages = (question.media_snapshot ?? []).filter(
-        (m) =>
-          (m.role === "prompt" ||
-            m.role === "passage" ||
-            m.role === "diagram_base") &&
-          m.mime_type.startsWith("image/") &&
-          isSafeDisplayImageUrl(m.proxy_url),
-      );
-      return dedupeQuestionMediaImages(
-        isSafeDisplayImageUrl(question.prompt_image_url_snapshot)
-          ? question.prompt_image_url_snapshot
-          : null,
-        rawPromptImages,
-      );
-    }, [question.media_snapshot, question.prompt_image_url_snapshot]);
+  // Safe prompt-side images ONLY (prompt / passage / diagram_base + legacy prompt_image_url_snapshot).
+  // SECURITY: Strictly NEVER renders explanation, hint, or back media pre-submit! (V32-053 / RU-08)
+  const promptMediaItems = React.useMemo(
+    () =>
+      getExamSnapshotPromptDisplayItems(
+        question,
+        lText(locale, "Hình ảnh câu hỏi", "Question illustration"),
+      ),
+    [locale, question],
+  );
 
   // Resolve Fill-in-the-Blank specs for BOTH `fill_in_blank` AND `listening` + `fill_in_blank` (fixes FUNC-10!)
   const fillInBlankView = React.useMemo((): {
@@ -256,102 +247,72 @@ function V3ExamQuestionBodyInner({
       {question.options_snapshot.map((opt, optIdx) => {
         const isSelected = record.selectedOptionIds.includes(opt.id);
         const displayLetter = indexToOptionLabel(optIdx);
-        const hasOptImage = isSafeDisplayImageUrl(opt.image_url);
+        const optMediaItems = getOptionDisplayItems(opt);
+        const hasOptImage = optMediaItems.length > 0;
+        const hasOptText = hasRenderableText(opt.content, opt.content_rich);
 
         return (
           <div
             key={opt.id}
+            role={isMultipleChoice ? "checkbox" : "radio"}
+            aria-checked={isSelected}
+            tabIndex={0}
+            onClick={() => onSelectOption(opt.id)}
+            onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelectOption(opt.id);
+              }
+            }}
             className={cn(
-              "relative flex flex-col rounded-lg border transition-colors",
+              "flex min-h-[52px] w-full cursor-pointer flex-col gap-2 rounded-lg border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
               isSelected
                 ? "border-2 border-primary bg-accent text-accent-foreground"
                 : "border-input bg-card text-foreground hover:bg-secondary/60",
             )}
           >
-            <button
-              type="button"
-              role={isMultipleChoice ? "checkbox" : "radio"}
-              aria-checked={isSelected}
-              onClick={() => onSelectOption(opt.id)}
-              className="flex min-h-[52px] w-full flex-col gap-2 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-lg"
-            >
-              <div className="flex w-full items-start gap-3">
-                <span
-                  className={cn(
-                    "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-semibold",
-                    isSelected
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border bg-secondary text-secondary-foreground",
-                  )}
-                >
-                  {displayLetter}
-                </span>
-                <div className="flex-1 text-sm sm:text-base leading-relaxed">
-                  {opt.content || opt.content_rich ? (
-                    <SafeRichText
-                      rich={opt.content_rich}
-                      fallbackText={opt.content}
-                    />
-                  ) : hasOptImage ? (
-                    <span className="text-xs text-muted-foreground">
-                      {lText(
-                        locale,
-                        `Hình phương án ${displayLetter}`,
-                        `Option ${displayLetter} image`,
-                      )}
-                    </span>
-                  ) : null}
-                </div>
-                {isSelected ? (
-                  <Check
-                    className="mt-1 size-4 shrink-0 text-primary"
-                    aria-hidden="true"
+            <div className="flex w-full items-start gap-3">
+              <span
+                className={cn(
+                  "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border text-xs font-semibold",
+                  isSelected
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-secondary text-secondary-foreground",
+                )}
+              >
+                {displayLetter}
+              </span>
+              <div className="flex-1 text-sm sm:text-base leading-relaxed">
+                {hasOptText ? (
+                  <SafeRichText
+                    rich={opt.content_rich}
+                    fallbackText={opt.content}
                   />
+                ) : hasOptImage ? (
+                  <span className="text-xs text-muted-foreground">
+                    {lText(
+                      locale,
+                      `Hình phương án ${displayLetter}`,
+                      `Option ${displayLetter} image`,
+                    )}
+                  </span>
                 ) : null}
               </div>
-
-              {hasOptImage ? (
-                <div className="flex min-h-24 w-full items-center justify-center pt-1">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={opt.image_url ?? ""}
-                    alt={
-                      opt.image_alt ||
-                      opt.content ||
-                      `Option ${displayLetter}`
-                    }
-                    loading="lazy"
-                    decoding="async"
-                    className="mx-auto max-h-44 w-auto rounded-md border border-border object-contain"
-                  />
-                </div>
+              {isSelected ? (
+                <Check
+                  className="mt-1 size-4 shrink-0 text-primary"
+                  aria-hidden="true"
+                />
               ) : null}
-            </button>
+            </div>
 
             {hasOptImage ? (
-              <Button
-                type="button"
-                size="icon"
-                variant="secondary"
-                className="absolute right-2 bottom-2 size-8 opacity-90 shadow-xs"
-                aria-label={lText(
-                  locale,
-                  `Phóng to hình phương án ${displayLetter}`,
-                  `Zoom option ${displayLetter} image`,
-                )}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOptionLightbox({
-                    src: opt.image_url!,
-                    alt:
-                      opt.image_alt ||
-                      opt.content ||
-                      `Option ${displayLetter}`,
-                  });
-                }}
-              >
-                <ZoomIn className="size-3.5" aria-hidden="true" />
-              </Button>
+              <MediaGallery
+                items={optMediaItems}
+                variant="option"
+                className="pt-1"
+              />
             ) : null}
           </div>
         );
@@ -410,24 +371,9 @@ function V3ExamQuestionBodyInner({
           />
         </div>
 
-        {dedupedPromptImageUrl || promptMediaImages.length > 0 ? (
-          <div className="flex flex-wrap gap-3">
-            {dedupedPromptImageUrl ? (
-              <ZoomableImage
-                src={dedupedPromptImageUrl}
-                alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
-              />
-            ) : null}
-            {promptMediaImages.map((m) => (
-              <ZoomableImage
-                key={m.media_id}
-                src={m.proxy_url}
-                alt={m.alt_text ?? ""}
-                caption={m.caption}
-                className="max-h-56"
-              />
-            ))}
-          </div>
+        {question.question_type !== "image_hotspot" &&
+        promptMediaItems.length > 0 ? (
+          <MediaGallery items={promptMediaItems} />
         ) : null}
       </div>
 
@@ -891,18 +837,6 @@ function V3ExamQuestionBodyInner({
       ) : (
         renderChoiceOptions(false)
       )}
-
-      {/* Lightbox for option images */}
-      {optionLightbox ? (
-        <ImageLightbox
-          open={Boolean(optionLightbox)}
-          onOpenChange={(open) => {
-            if (!open) setOptionLightbox(null);
-          }}
-          src={optionLightbox.src}
-          alt={optionLightbox.alt}
-        />
-      ) : null}
     </div>
   );
 }

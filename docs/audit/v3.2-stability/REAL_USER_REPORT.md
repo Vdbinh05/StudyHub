@@ -120,3 +120,39 @@
   - Leftover `v32-w5-user-*` accounts: **`0`** | Leftover storage objects: **`0`**.
   - **Pre-existing real user data 100% untouched:** `realAuthUsers: 2`, `realStudySets: 3`, `realQuestions: 599`, `realExamAttempts: 2` (`realDataUntouched: true`).
 - **After Screenshots:** `32` PNGs saved in `docs/audit/v3.2-stability/screenshots/real-user-after/`, plus 3 key full-window highlights copied to the conversation brain directory.
+
+---
+
+## 7. Addendum `V32-053` Phase 3 — Post-Import Question Editing & Unified Multimedia Editor (Before vs After)
+
+- **Target:** Local compiled production server on `http://127.0.0.1:3063` (`npx next start -p 3063`, zero rebuilds) connected to Live Supabase Cloud (`0020` schema).
+- **Test Data:** Disposable `v32-add-ru-920522@studyhub.test` importing a synthetic 6-question text-only `.docx` bank (`v32-addendum-text-only-6q.docx`) + synthetic colored PNG fixtures (zero `sample-data/` text quoted).
+- **Viewports Tested:** Desktop `1440×900`, Mobile `390×844`, and narrow Mobile `360×800`.
+- **Addendum `V32-053` Verdict:** **`APPROVED / PASS` (`9.5 / 10`, up from `3.0 / 10` in Phase 1 Baseline — `0` console/page/HTTP `>=400` errors, `0 P0/P1/P2` open; 1 tiny non-blocking P3 polish note).**
+
+### 7.1 Before vs After — Owner Workflow & Tap Count Matrix
+
+| Workflow Step / Capability | Phase 1 Baseline (`addendum-before`) | Phase 3 Re-Test (`addendum-after`, `:3063`) | Verdict |
+| --- | --- | --- | :---: |
+| **1. Import Preview image upload & `Ctrl+V` paste (pre-commit)** | **Blocked:** `0` image inputs, `0` paste support; text-only edits only. | **6 multi-file dropzones** (Prompt, Explanation, A/B/C/D) + `Kéo thả hoặc dán Ctrl+V`; file upload **and** `Ctrl+V` paste (`imgs: 2 → 4`) both persisted to Q1 on commit (`01-import-preview-with-image.png`). | **PASS** |
+| **2. Post-Import Success CTA to review/edit questions** | **Missing:** `0` edit CTA (only `Học ngay`, `Flashcards`, `Thi thử`, `Xem học phần`). | Prominent **`[✎ Xem và chỉnh sửa câu hỏi]`** CTA directly beside `Học ngay` linking straight to `/sets/[id]/edit` (`02-post-import-success-cta.png`). | **PASS** |
+| **3. Edit specific question from `/sets/[id]` (Desktop `1440×900`)** | **3+ taps + route jump + manual re-scroll** (`0` per-card Edit buttons). | **1 tap!** `6/6` Question Bank cards expose `[✎ Chỉnh sửa]` (`aria-label="Chỉnh sửa câu hỏi #1..#6"`) opening the Unified Editor Modal in place (`1,093 ms` cold open; `03-set-detail-desktop-card-edit.png`). | **PASS** |
+| **4. Edit specific question from `/sets/[id]` (Mobile `390×844` & `360×800`)** | **Dead end once scrolled past top hero** (`0` per-card Edit buttons). | **1 tap anywhere!** `6/6` cards render a crisp **`44×44px`** `[✎]` button beside the Star icon; **`0px`** horizontal overflow on both `390×844` and `360×800` (`04`, `04b`). | **PASS** |
+| **5. Multi-image Prompt + `Ctrl+V` paste in Modal (Q3)** | **1 image max**, no `Ctrl+V`, no crop/rotate/reorder. | **2 prompt images** added via file upload (`0→1`) + `Ctrl+V` paste (`1→2`, `clipboardPasteAddedImage: true`), up to `8` prompt images with crop/rotate/alt/delete & lossless toggle (`05`, `07`). | **PASS** |
+| **6. Multi-image Options A/B/C/D + Image-Only Option (Q3)** | **1 image max per option**, text required. | Option A holds **2 images** (`2/6`) with `← →` reorder arrows; clearing Option B text auto-activates **`Đáp án chỉ dùng hình ảnh`** badge (`1/6`); C & D images uploaded (`05-unified-editor-q3-multimedia.png`). | **PASS** |
+| **7. Explanation Image + Live Preview (Q3)** | **Not supported** (`0` explanation image input, `0` Live Preview). | Expanded `Thêm ảnh giải thích` uploaded cleanly (`explanationImgAdded: true`); **`Xem trước`** rendered all **`8/8`** images (2 prompt + 2 Opt A + Opt B image-only + Opt C + Opt D + 1 explanation) (`06-unified-editor-live-preview.png`). | **PASS** |
+| **8. `Save & Next` (`→ Lưu & Câu tiếp`)** | **Missing** (had to save, close modal, locate & click next row). | Persisted all 8 images on Q3 (live-updated on background card) and advanced immediately inside the modal to **`#4 / 6`** (`07-unified-editor-after-save-and-next-q4.png`). | **PASS** |
+| **9. `#3` Search & Media Review Filters (`/sets/[id]` & `/sets/[id]/edit`)** | `#3` returned **0 matches**; **`0`** media filter chips. | `#3` isolates Q3 cleanly on both `/sets/[id]` and `/sets/[id]/edit`; all 5 filter chips (`Tất cả`, `Có ảnh`, `Chưa có ảnh`, `Thiếu/lỗi ảnh`, `Cần rà soát ảnh`) filter accurately (`Có ảnh`: `2` rows Q1+Q3; `Chưa có ảnh`: `4` rows; `08`). | **PASS*** |
+| **10. Mobile Unified Editor Modal (`390×844`)** | Cramped form, no sticky save/next workflow. | `374×776px` dialog, **`0px`** horizontal overflow, all `8` images intact, sticky `Hủy \| Lưu thay đổi \| → Lưu & Câu tiếp` footer (`09-unified-editor-mobile-390.png`). | **PASS** |
+| **11. Contextual Edit in Practice (`/sets/[id]/practice`)** | **0 edit buttons**; fixing a typo required leaving Practice and losing place. | Q3 rendered **`7/7`** prompt+option images crisply (`naturalWidth` 220–320px, `0` broken, `Hình phương án B` fallback label; `10`). Contextual Edit saved prompt update and stayed right at **`Câu 3 / 6`** with **`Đã làm: 2`** preserved and new text immediately visible! | **PASS** |
+| **12. Contextual Edit in Review Mistakes (`/review`) & Exam Results** | **0 edit buttons** on both Review Mistakes and Exam Results. | Contextual Edit present on `/review` and `/exams/[id]/results` (`11`). Exam Results Edit modal displays the explicit historical-integrity banner (*"Chỉnh sửa này chỉ cập nhật câu hỏi trong học phần gốc... và KHÔNG làm thay đổi bài thi lịch sử hoặc điểm số này."*, `12`), and saving kept historical exam score strictly unchanged (`0.00%`, `0 / 6`). | **PASS** |
+
+*\*Non-blocking P3 UX polish note (`V32-053-P3`):* On `/sets/[id]/edit`, when a media filter such as `Chưa có ảnh` is active (`08-editor-media-filters-and-search.png`), list rows display relative filtered indices (`#1..#4`) rather than their original bank positions (`#2, #4, #5, #6`), although `#3` search accurately finds original Q3. Minor display polish only — zero functional impact.
+
+### 7.2 Addendum `V32-053` Artifacts, Server Teardown & Cleanup Attestation
+
+- **After Screenshots (`13` PNGs):** Saved in `docs/audit/v3.2-stability/screenshots/addendum-after/` (`01`–`12` incl. `04b`), plus 2 full-window highlights (`v32-addendum-after-set-card-edit.png`, `v32-addendum-after-unified-editor.png`) copied to the conversation brain directory.
+- **Local Server Teardown:** `:3063` stopped cleanly (`PORT_3063_LISTEN_COUNT=0`).
+- **Disposable Account & Storage Cleanup Verified (`2026-11-26`):** Deleted `v32-add-ru-920522@studyhub.test` (`setsDeleted: 1`, `mediaRowsDeleted: 6`, `storageRemoved: 6`, `leftoverAddRuUsers: 0`).
+- **Pre-Existing Real Owner Data 100% Untouched:** `realCountsPre === realCountsPost` (`users: 2`, `sets: 4`, `questions: 599`, `exams: 2`, `realDataUntouched: true`).
+- **Zero Production Code Edits:** Confirmed via `git status --short`.

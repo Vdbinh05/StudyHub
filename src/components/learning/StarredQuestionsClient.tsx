@@ -9,12 +9,14 @@ import {
   ChevronDown,
   ClipboardList,
   Filter,
+  Pencil,
   Play,
   RefreshCw,
   Search,
   Star,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,9 +37,17 @@ import {
   unstarQuestion,
 } from "@/lib/learning/api-client";
 import { formatCorrectAnswerDisplay } from "@/lib/learning/answer-display";
+import {
+  getOptionDisplayItems,
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+} from "@/lib/learning/media-helpers";
 import { invalidateLearningCaches } from "@/lib/query-keys";
+import type { Question } from "@/types/domain";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { lText } from "./learning-copy";
-import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import { SafeRichText } from "./SafeRichText";
+import { useEditableSetIds } from "./useStudySetBundle";
 
 export function StarredQuestionsClient() {
   const { locale, t } = useI18n();
@@ -46,6 +56,12 @@ export function StarredQuestionsClient() {
   const [selectedSetId, setSelectedSetId] = React.useState<string>("all");
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
   const [searchTerm, setSearchTerm] = React.useState<string>("");
+  const [editingQuestion, setEditingQuestion] = React.useState<{
+    studySetId: string;
+    questionId: string;
+    initialQuestion?: Question | null;
+  } | null>(null);
+  const { canEditSet } = useEditableSetIds(true);
 
   const setsQuery = useQuery({
     queryKey: ["accessible-sets"],
@@ -369,15 +385,37 @@ export function StarredQuestionsClient() {
                       ) : null}
                     </div>
 
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="min-h-11 text-warning-subtle-foreground sm:min-h-9"
-                      onClick={() => void handleUnstar(item.question_id)}
-                    >
-                      <Star className="size-4 fill-warning text-warning" aria-hidden="true" />
-                      {t("study.unstarQuestion")}
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      {canEditSet(item.study_set_id) ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="min-h-11 text-muted-foreground hover:text-foreground sm:min-h-9"
+                          onClick={() =>
+                            setEditingQuestion({
+                              studySetId: item.study_set_id,
+                              questionId: item.question_id,
+                              initialQuestion: q ?? null,
+                            })
+                          }
+                        >
+                          <Pencil className="size-3.5" aria-hidden="true" />
+                          <span className="hidden sm:inline">
+                            {lText(locale, "Chỉnh sửa", "Edit")}
+                          </span>
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-11 text-warning-subtle-foreground sm:min-h-9"
+                        onClick={() => void handleUnstar(item.question_id)}
+                      >
+                        <Star className="size-4 fill-warning text-warning" aria-hidden="true" />
+                        {t("study.unstarQuestion")}
+                      </Button>
+                    </div>
                   </div>
 
                   <div className="space-y-2.5">
@@ -387,36 +425,110 @@ export function StarredQuestionsClient() {
                         fallbackText={q?.prompt ?? item.question_id}
                       />
                     </div>
-                    {q?.prompt_image_url ? (
-                      <ZoomableImage
-                        src={q.prompt_image_url}
-                        alt={lText(
-                          locale,
-                          "Hình ảnh câu hỏi",
-                          "Question illustration",
+                    {q ? (
+                      <MediaGallery
+                        items={getQuestionPromptDisplayItems(
+                          q,
+                          lText(
+                            locale,
+                            "Hình ảnh câu hỏi",
+                            "Question illustration",
+                          ),
                         )}
-                        lazy
+                        variant="compact"
                       />
                     ) : null}
                   </div>
 
-                  {correctDisplay ? (
-                    <div className="rounded-lg border border-success/30 bg-success-subtle/50 p-3 text-xs sm:text-sm">
-                      <div className="flex items-center gap-1.5 font-semibold text-success-subtle-foreground">
-                        <CheckCircle2 className="size-3.5" aria-hidden="true" />
-                        <span>{t("study.correctAnswer")}</span>
+                  {(() => {
+                    const correctOptMedia = q
+                      ? (q.options ?? [])
+                          .filter((o) => o.is_correct)
+                          .flatMap((o) => getOptionDisplayItems(o))
+                      : [];
+                    if (!correctDisplay && correctOptMedia.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <div className="space-y-2 rounded-lg border border-success/30 bg-success-subtle/50 p-3 text-xs sm:text-sm">
+                        <div className="flex items-center gap-1.5 font-semibold text-success-subtle-foreground">
+                          <CheckCircle2 className="size-3.5" aria-hidden="true" />
+                          <span>{t("study.correctAnswer")}</span>
+                        </div>
+                        {correctDisplay ? (
+                          <p className="whitespace-pre-wrap text-foreground">
+                            {correctDisplay}
+                          </p>
+                        ) : null}
+                        {correctOptMedia.length > 0 ? (
+                          <MediaGallery
+                            items={correctOptMedia}
+                            variant="option"
+                          />
+                        ) : null}
                       </div>
-                      <p className="mt-1 whitespace-pre-wrap text-foreground">
-                        {correctDisplay}
-                      </p>
-                    </div>
-                  ) : null}
+                    );
+                  })()}
+
+                  {(() => {
+                    if (!q) return null;
+                    const expMedia = getQuestionExplanationDisplayItems(
+                      q,
+                      lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                    );
+                    if (
+                      !q.explanation &&
+                      !q.explanation_rich &&
+                      expMedia.length === 0
+                    ) {
+                      return null;
+                    }
+                    return (
+                      <div className="space-y-2 rounded-lg bg-secondary/50 p-3 text-xs text-muted-foreground">
+                        {q.explanation || q.explanation_rich ? (
+                          <div>
+                            <strong className="text-foreground">
+                              {t("study.explanation")}:{" "}
+                            </strong>
+                            <SafeRichText
+                              rich={q.explanation_rich}
+                              fallbackText={q.explanation}
+                            />
+                          </div>
+                        ) : (
+                          <strong className="block text-foreground">
+                            {t("study.explanation")}:
+                          </strong>
+                        )}
+                        {expMedia.length > 0 ? (
+                          <MediaGallery items={expMedia} variant="compact" />
+                        ) : null}
+                      </div>
+                    );
+                  })()}
                 </CardContent>
               </Card>
             );
           })}
         </div>
       )}
+
+      <ContextualQuestionEditorModal
+        open={
+          Boolean(editingQuestion) && canEditSet(editingQuestion?.studySetId)
+        }
+        onOpenChange={(open) => {
+          if (!open) setEditingQuestion(null);
+        }}
+        studySetId={editingQuestion?.studySetId ?? ""}
+        questionId={editingQuestion?.questionId ?? null}
+        initialQuestion={editingQuestion?.initialQuestion ?? null}
+        onSaved={() => {
+          void queryClient.invalidateQueries({
+            queryKey: ["starred-questions"],
+          });
+        }}
+      />
     </div>
   );
 }

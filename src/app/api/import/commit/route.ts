@@ -127,6 +127,7 @@ const CommitQuestionSchema = z.object({
   backText: z.string().max(8000).nullable().optional(),
   backImageUrl: z.string().max(2048).nullable().optional(),
   explanation: z.string().max(8000).nullable().optional(),
+  explanationMedia: z.array(CommitMediaAttachmentSchema).max(6).optional(),
   hint: z.string().max(2000).nullable().optional(),
   difficulty: z.enum(["easy", "medium", "hard"]).default("medium"),
   tags: z.array(z.string().max(60)).max(20).default([]),
@@ -327,6 +328,20 @@ export async function POST(request: Request) {
           backText: q.backText?.trim() || null,
           backImageUrl: safeUrlOrNull(q.backImageUrl),
           explanation: q.explanation?.trim() || null,
+          explanationMedia: q.explanationMedia?.map((m) => ({
+            id: m.id ?? crypto.randomUUID(),
+            rId: m.rId ?? "import",
+            fileName: sanitizeFileName(m.fileName),
+            mimeType: m.mimeType ?? "image/png",
+            ext: m.ext ?? "png",
+            byteLength: m.byteLength ?? 0,
+            previewPath: m.previewPath ?? `/docx-media/${sanitizeFileName(m.fileName)}`,
+            dataUrl: m.dataUrl,
+            tempStoragePath: m.tempStoragePath,
+            anchorType: m.anchorType,
+            ambiguous: m.ambiguous,
+            alt: m.alt,
+          })),
           hint: q.hint?.trim() || null,
           difficulty: q.difficulty,
           tags: Array.from(
@@ -447,6 +462,11 @@ export async function POST(request: Request) {
       if (body.isFinalChunk) {
         for (const q of body.questions) {
           for (const m of q.promptMedia ?? []) {
+            if (m.tempStoragePath && isOwnedTempStoragePath(m.tempStoragePath, user.id, "import-media")) {
+              tempMediaPathsToCleanup.add(m.tempStoragePath.trim());
+            }
+          }
+          for (const m of q.explanationMedia ?? []) {
             if (m.tempStoragePath && isOwnedTempStoragePath(m.tempStoragePath, user.id, "import-media")) {
               tempMediaPathsToCleanup.add(m.tempStoragePath.trim());
             }
@@ -611,6 +631,7 @@ export async function POST(request: Request) {
     const allAttachments: RawImportAttachment[] = [];
     for (const q of questionsToInsert) {
       for (const att of q.promptMedia ?? []) allAttachments.push(att);
+      for (const att of q.explanationMedia ?? []) allAttachments.push(att);
       for (const opt of q.options) {
         for (const att of opt.media ?? []) allAttachments.push(att);
       }
@@ -915,6 +936,24 @@ export async function POST(request: Request) {
           }
         });
 
+        const uploadedExplanationMedia: UploadedImportMedia[] = [];
+        for (const att of q.explanationMedia ?? []) {
+          const uploaded = resolveUploadedAttachment(att);
+          if (uploaded) uploadedExplanationMedia.push(uploaded);
+        }
+        uploadedExplanationMedia.forEach((m, sortOrder) => {
+          if (m.mediaId) {
+            mediaRelationRows.push({
+              media_id: m.mediaId,
+              entity_type: "question",
+              entity_id: questionId,
+              role: "explanation",
+              sort_order: sortOrder,
+              alt_text: m.alt ?? null,
+            });
+          }
+        });
+
         questionRows.push({
           id: questionId,
           study_set_id: body.studySetId,
@@ -1045,7 +1084,9 @@ export async function POST(request: Request) {
           if (mediaRelationRows.length === 0) return;
           try {
             for (const mrChunk of chunkArray(mediaRelationRows, 500)) {
-              await supabase.from("content_media_relations").insert(mrChunk);
+              await supabase.from("content_media_relations").upsert(mrChunk, {
+                onConflict: "media_id,entity_type,entity_id,role",
+              });
             }
           } catch {
             // Graceful fallback if content_media_relations is unavailable

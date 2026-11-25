@@ -22,6 +22,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MediaGallery } from "@/components/media/MediaGallery";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,6 +72,10 @@ import {
 } from "@/lib/learning/checkpoints";
 import { applyConfidenceToSm2 } from "@/lib/learning/confidence";
 import {
+  getQuestionExplanationDisplayItems,
+  getQuestionPromptDisplayItems,
+} from "@/lib/learning/media-helpers";
+import {
   createSpellQueueState,
   extractSpellTarget,
   generateSpellHint,
@@ -90,11 +95,13 @@ import type {
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
+import { ContextualQuestionEditorModal } from "./ContextualQuestionEditorModal";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
 import { ResetProgressDialog } from "./ResetProgressDialog";
 import { ResumeSessionBanner } from "./ResumeSessionBanner";
+import { SafeRichText } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
@@ -168,9 +175,14 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     isError,
     error,
     refetch,
+    canEdit,
     toggleStar,
     updateLocalProgress,
+    updateLocalQuestion,
   } = useStudySetBundle(setId);
+  const [editingQuestionId, setEditingQuestionId] = React.useState<string | null>(
+    null,
+  );
 
   // Filters & sensitivity controls hydrated from mode_preferences.spell (V32-025 / RU-05)
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
@@ -1345,6 +1357,21 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
                     ) : null}
                   </div>
 
+                  {/* Prompt visual cues (images attached to the prompt) */}
+                  {(() => {
+                    const spellPromptImages = getQuestionPromptDisplayItems(
+                      currentEntry.question,
+                      lText(locale, "Hình ảnh minh họa", "Visual clue"),
+                    );
+                    if (spellPromptImages.length === 0) return null;
+                    return (
+                      <MediaGallery
+                        items={spellPromptImages}
+                        variant="compact"
+                      />
+                    );
+                  })()}
+
                   {/* 5-Level Hint Ladder (NEVER leaks full spelling upfront!) */}
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -1604,11 +1631,56 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
                         </p>
                       ) : null}
 
+                      {(() => {
+                        const spellExpImages = getQuestionExplanationDisplayItems(
+                          currentEntry.question,
+                          lText(locale, "Hình ảnh giải thích", "Explanation image"),
+                        );
+                        if (
+                          !currentEntry.question.explanation &&
+                          !currentEntry.question.explanation_rich &&
+                          spellExpImages.length === 0
+                        ) {
+                          return null;
+                        }
+                        return (
+                          <div className="space-y-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+                            {currentEntry.question.explanation ||
+                            currentEntry.question.explanation_rich ? (
+                              <div>
+                                <span className="font-semibold text-foreground">
+                                  {lText(locale, "Giải thích: ", "Explanation: ")}
+                                </span>
+                                <SafeRichText
+                                  rich={currentEntry.question.explanation_rich}
+                                  fallbackText={currentEntry.question.explanation}
+                                  inline
+                                />
+                              </div>
+                            ) : (
+                              <span className="block font-semibold text-foreground">
+                                {lText(locale, "Giải thích:", "Explanation:")}
+                              </span>
+                            )}
+                            {spellExpImages.length > 0 ? (
+                              <MediaGallery
+                                items={spellExpImages}
+                                variant="compact"
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })()}
+
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                         <QuestionNotesAndReportBar
                           studySetId={setId}
                           questionId={currentEntry.question.id}
                           compact
+                          canEdit={canEdit}
+                          onEditQuestion={() =>
+                            setEditingQuestionId(currentEntry.question.id)
+                          }
                         />
                         <Button
                           type="button"
@@ -1627,6 +1699,22 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
           </AnimatePresence>
         ) : null}
       </div>
+
+      <ContextualQuestionEditorModal
+        open={Boolean(editingQuestionId) && canEdit}
+        onOpenChange={(open) => {
+          if (!open) setEditingQuestionId(null);
+        }}
+        studySetId={setId}
+        questionId={editingQuestionId}
+        initialQuestion={
+          editingQuestionId
+            ? (bundle.questions.find((q) => q.id === editingQuestionId) ?? null)
+            : null
+        }
+        chapters={chapters}
+        onSaved={(saved) => updateLocalQuestion(saved)}
+      />
 
       <ResetProgressDialog
         open={resetDialogOpen}

@@ -257,31 +257,61 @@ export async function GET(request?: NextRequest): Promise<Response> {
 
     const diagramIds = diagramSets.map((d) => d.id);
     const presetIds = presets.map((p) => p.id);
-    const [diagramHotspots, presetSources] = await Promise.all([
-      diagramIds.length > 0
-        ? fetchInChunks(
-            diagramIds,
-            async (chunk) =>
-              supabase
-                .from("diagram_hotspots")
-                .select("*")
-                .in("diagram_id", chunk)
-                .order("sort_order", { ascending: true }),
-            SAFE_IN_CHUNK_SIZE,
-          )
-        : Promise.resolve([]),
-      presetIds.length > 0
-        ? fetchInChunks(
-            presetIds,
-            async (chunk) =>
-              supabase
-                .from("exam_preset_sources")
-                .select("*")
-                .in("preset_id", chunk),
-            SAFE_IN_CHUNK_SIZE,
-          )
-        : Promise.resolve([]),
-    ]);
+    const optionIds = options.map((o) => o.id);
+    const [diagramHotspots, presetSources, questionMediaRels, optionMediaRels] =
+      await Promise.all([
+        diagramIds.length > 0
+          ? fetchInChunks(
+              diagramIds,
+              async (chunk) =>
+                supabase
+                  .from("diagram_hotspots")
+                  .select("*")
+                  .in("diagram_id", chunk)
+                  .order("sort_order", { ascending: true }),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+        presetIds.length > 0
+          ? fetchInChunks(
+              presetIds,
+              async (chunk) =>
+                supabase
+                  .from("exam_preset_sources")
+                  .select("*")
+                  .in("preset_id", chunk),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+        questionIds.length > 0
+          ? fetchInChunks(
+              questionIds,
+              async (chunk) =>
+                supabase
+                  .from("content_media_relations")
+                  .select("*")
+                  .eq("entity_type", "question")
+                  .in("entity_id", chunk)
+                  .order("sort_order", { ascending: true }),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+        optionIds.length > 0
+          ? fetchInChunks(
+              optionIds,
+              async (chunk) =>
+                supabase
+                  .from("content_media_relations")
+                  .select("*")
+                  .eq("entity_type", "question_option")
+                  .in("entity_id", chunk)
+                  .order("sort_order", { ascending: true }),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+      ]);
+
+    const contentMediaRelations = [...questionMediaRels, ...optionMediaRels];
 
     const exportPayload = {
       exported_at: new Date().toISOString(),
@@ -299,6 +329,7 @@ export async function GET(request?: NextRequest): Promise<Response> {
       question_accepted_answers: accepted,
       tags,
       question_tags: questionTags,
+      content_media_relations: contentMediaRelations,
       user_question_notes: userNotes,
       media_assets: mediaAssets,
       learning_session_checkpoints: checkpoints,

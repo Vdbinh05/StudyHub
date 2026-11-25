@@ -28,6 +28,13 @@ import {
   type QuestionGradeResult,
 } from "./scoring";
 
+export interface QuestionOptionLike extends GradeOptionLike {
+  media_attachments?: ReadonlyArray<{
+    media_id?: string | null;
+    url?: string | null;
+  }>;
+}
+
 export interface QuestionLike {
   id?: string;
   question_type: QuestionType;
@@ -36,6 +43,7 @@ export interface QuestionLike {
   prompt_image_url?: string | null;
   back_text?: string | null;
   back_rich?: RichTextDoc | null;
+  back_image_url?: string | null;
   explanation?: string | null;
   hint?: string | null;
   audio_url?: string | null;
@@ -44,7 +52,12 @@ export interface QuestionLike {
   passage_id?: string | null;
   diagram_id?: string | null;
   type_payload?: QuestionTypePayload | null;
-  options?: readonly GradeOptionLike[];
+  media_attachments?: ReadonlyArray<{
+    media_id?: string | null;
+    url?: string | null;
+    role?: string | null;
+  }>;
+  options?: readonly QuestionOptionLike[];
   accepted_answers?: readonly GradeAcceptedAnswerLike[];
 }
 
@@ -129,20 +142,57 @@ function defaultExtractPlainText(question: QuestionLike): string {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
+function hasPromptVisualOrAudio(question: QuestionLike): boolean {
+  if (
+    question.prompt_image_url?.trim() ||
+    question.audio_url?.trim() ||
+    question.audio_media_id ||
+    question.diagram_id
+  ) {
+    return true;
+  }
+  return Boolean(
+    question.media_attachments?.some(
+      (m) =>
+        (!m.role ||
+          m.role === "prompt" ||
+          m.role === "diagram_base" ||
+          m.role === "passage" ||
+          m.role === "audio") &&
+        Boolean(m.url?.trim() || m.media_id),
+    ),
+  );
+}
+
+function hasBackVisual(question: QuestionLike): boolean {
+  if (question.back_image_url?.trim()) return true;
+  return Boolean(
+    question.media_attachments?.some(
+      (m) => m.role === "back" && Boolean(m.url?.trim() || m.media_id),
+    ),
+  );
+}
+
 function validateChoiceOptions(
   question: QuestionLike,
   opts: { allowImageOnly?: boolean; exactTwo?: boolean } = {},
 ): QuestionValidationResult {
+  const allowImageOnly = opts.allowImageOnly ?? true;
   const errors: string[] = [];
   const warnings: string[] = [];
-  if (!question.prompt?.trim() && !question.prompt_image_url) {
+  if (!question.prompt?.trim() && !hasPromptVisualOrAudio(question)) {
     errors.push("Question prompt cannot be empty.");
   }
   const items = question.options ?? [];
   const validItems = items.filter((o) => {
     const hasText = Boolean(o.content && o.content.trim().length > 0);
-    const hasImage = Boolean(o.image_url || o.media_id);
-    return opts.allowImageOnly ? hasText || hasImage : hasText;
+    const hasImage = Boolean(
+      o.image_url?.trim() ||
+        o.media_id ||
+        (o.media_attachments &&
+          o.media_attachments.some((m) => Boolean(m.url?.trim() || m.media_id))),
+    );
+    return allowImageOnly ? hasText || hasImage : hasText;
   });
 
   if (opts.exactTwo) {
@@ -262,7 +312,7 @@ export const QUESTION_TYPE_REGISTRY: Record<QuestionType, QuestionTypeDescriptor
     compatibleModes: ["flashcards", "learn", "practice", "review", "custom_practice"],
     supportsOffline: true,
     supportsPdfPaper: true,
-    validateQuestion: (q) => validateChoiceOptions(q),
+    validateQuestion: (q) => validateChoiceOptions(q, { allowImageOnly: true }),
     validateResponse: (_q, r) => validateOptionsResponse(r),
     gradeResponse: (q, r) =>
       r.kind === "options"
@@ -284,7 +334,7 @@ export const QUESTION_TYPE_REGISTRY: Record<QuestionType, QuestionTypeDescriptor
     compatibleModes: ["flashcards", "learn", "practice", "review", "custom_practice"],
     supportsOffline: true,
     supportsPdfPaper: true,
-    validateQuestion: (q) => validateChoiceOptions(q),
+    validateQuestion: (q) => validateChoiceOptions(q, { allowImageOnly: true }),
     validateResponse: (_q, r) => validateOptionsResponse(r),
     gradeResponse: (q, r, opts) =>
       r.kind === "options"
@@ -308,7 +358,8 @@ export const QUESTION_TYPE_REGISTRY: Record<QuestionType, QuestionTypeDescriptor
     compatibleModes: ["flashcards", "learn", "practice", "review", "custom_practice"],
     supportsOffline: true,
     supportsPdfPaper: true,
-    validateQuestion: (q) => validateChoiceOptions(q, { exactTwo: true }),
+    validateQuestion: (q) =>
+      validateChoiceOptions(q, { allowImageOnly: true, exactTwo: true }),
     validateResponse: (_q, r) => validateOptionsResponse(r),
     gradeResponse: (q, r) =>
       r.kind === "options"
@@ -332,10 +383,10 @@ export const QUESTION_TYPE_REGISTRY: Record<QuestionType, QuestionTypeDescriptor
     supportsPdfPaper: true,
     validateQuestion: (q) => {
       const errors: string[] = [];
-      if (!q.prompt?.trim() && !q.prompt_image_url) {
+      if (!q.prompt?.trim() && !hasPromptVisualOrAudio(q)) {
         errors.push("Flashcard front cannot be empty.");
       }
-      if (!q.back_text?.trim()) {
+      if (!q.back_text?.trim() && !hasBackVisual(q)) {
         errors.push("Flashcard back/definition cannot be empty.");
       }
       return { valid: errors.length === 0, errors, warnings: [] };
@@ -379,7 +430,7 @@ export const QUESTION_TYPE_REGISTRY: Record<QuestionType, QuestionTypeDescriptor
     supportsPdfPaper: true,
     validateQuestion: (q) => {
       const errors: string[] = [];
-      if (!q.prompt?.trim() && !q.prompt_image_url) {
+      if (!q.prompt?.trim() && !hasPromptVisualOrAudio(q)) {
         errors.push("Question prompt cannot be empty.");
       }
       const hasAccepted =
