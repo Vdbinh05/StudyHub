@@ -324,12 +324,15 @@ export async function POST(request: Request) {
                 .map((o) => o.label)
                 .join(", ")
             : null;
-        const structuredText = formatStructuredExamResponseForPdf(
-          (userAnswer?.structured_response as StructuredAnswerResponse | null | undefined) ?? null,
-          typePayload,
-          mappedOptions,
-          body.locale === "vi",
-        );
+        const structuredText = isUnsubmitted
+          ? null
+          : formatStructuredExamResponseForPdf(
+              (userAnswer?.structured_response as StructuredAnswerResponse | null | undefined) ??
+                null,
+              typePayload,
+              mappedOptions,
+              body.locale === "vi",
+            );
 
         const passageObj = row.passage_snapshot ?? null;
 

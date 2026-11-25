@@ -468,9 +468,16 @@ export function WriteClient({ setId }: WriteClientProps) {
       headerRight={
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="min-h-11 sm:min-h-9">
-              <Settings2 className="size-4" aria-hidden="true" />
-              <span>{lText(locale, "Quy tắc chấm", "Grading")}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="size-11 shrink-0 p-0 sm:h-9 sm:w-auto sm:min-h-9 sm:px-2.5"
+              aria-label={lText(locale, "Quy tắc chấm", "Grading rules")}
+            >
+              <Settings2 className="size-4 shrink-0" aria-hidden="true" />
+              <span className="hidden sm:inline">
+                {lText(locale, "Quy tắc chấm", "Grading")}
+              </span>
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72 space-y-3 text-sm">

@@ -1440,12 +1440,12 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       progressTotal={phase === "active" ? displayedTotal : undefined}
       headerRight={
         phase === "active" ? (
-          <div className="flex items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-0 gap-1 px-2 text-xs sm:px-2.5 sm:text-sm"
+              className="size-11 shrink-0 p-0 text-xs sm:h-9 sm:w-auto sm:min-h-9 sm:gap-1 sm:px-2.5 sm:text-sm"
               aria-label={lText(locale, "Tùy chỉnh phiên luyện tập", "Customize practice")}
               onClick={() => {
                 // Cancel pending auto-advance when entering settings (`FUNC-28(2)`)
@@ -1466,10 +1466,13 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="min-h-11 sm:min-h-9 lg:hidden"
+                  className="size-11 shrink-0 p-0 sm:h-9 sm:w-auto sm:min-h-9 sm:px-2.5 lg:hidden"
+                  aria-label={lText(locale, "Danh sách câu hỏi", "Question navigator")}
                 >
-                  <Grid2X2 className="size-4" aria-hidden="true" />
-                  <span>{lText(locale, "Câu hỏi", "Questions")}</span>
+                  <Grid2X2 className="size-4 shrink-0" aria-hidden="true" />
+                  <span className="hidden sm:inline">
+                    {lText(locale, "Câu hỏi", "Questions")}
+                  </span>
                 </Button>
               </SheetTrigger>
               <SheetContent side="right" className="w-80 overflow-y-auto">
@@ -1484,10 +1487,15 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             <Button
               variant="outline"
               size="sm"
-              className="min-h-11 sm:min-h-9"
+              className="min-h-11 shrink-0 whitespace-nowrap px-2.5 text-xs sm:min-h-9 sm:px-3 sm:text-sm"
               onClick={() => finishPractice(answers)}
             >
-              {t("common.finish")}
+              <span className="min-[380px]:hidden">
+                {lText(locale, "Xong", "Done")}
+              </span>
+              <span className="hidden min-[380px]:inline">
+                {t("common.finish")}
+              </span>
             </Button>
           </div>
         ) : phase === "config" && items.length > 0 ? (
@@ -1495,7 +1503,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             type="button"
             variant="outline"
             size="sm"
-            className="min-h-11 sm:min-h-9"
+            className="min-h-11 shrink-0 whitespace-nowrap px-2.5 text-xs sm:min-h-9 sm:px-3 sm:text-sm"
             onClick={() => setPhase("active")}
           >
             {lText(locale, "Quay lại bài làm", "Resume Session")}

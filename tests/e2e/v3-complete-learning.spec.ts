@@ -1545,14 +1545,21 @@ test.describe("StudyHub V3.0 Complete Learning Edition — Live E2E Verification
 
     const dlDialog = page.locator('[role="dialog"]');
     await expect(dlDialog).toBeVisible({ timeout: 10_000 });
-    await dlDialog
-      .getByRole("button", { name: /tải về học ngoại tuyến|download offline/i })
-      .click();
+    // In V3.2, simple sets auto-start download on 1-click trigger; click explicit CTA only if shown
+    const manualDownloadBtn = dlDialog.getByRole("button", {
+      name: /tải về học ngoại tuyến|download offline/i,
+    });
+    if (await manualDownloadBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      await manualDownloadBtn.click();
+    }
 
     // Wait for completion indicator inside dialog or button state
-    await expect(dlDialog).toContainText(/đã tải|downloaded|cập nhật bản tải|update download/i, {
-      timeout: 25_000,
-    });
+    await expect(dlDialog).toContainText(
+      /đã tải đầy đủ|ready offline|cập nhật bản tải|update download/i,
+      {
+        timeout: 25_000,
+      },
+    );
     await page.keyboard.press("Escape");
 
     // 2. Verify downloaded set appears in `/offline` and SW is active BEFORE going offline
@@ -1595,8 +1602,18 @@ test.describe("StudyHub V3.0 Complete Learning Edition — Live E2E Verification
     }
 
     // Perform a real F5 refresh WHILE STILL OFFLINE (`context.setOffline(true)`)!
+    // V3.2 (`RU-19` / `RU-07`): offline F5 resumes the active study runner directly
+    // and keeps the contradictory fallback hero hidden until exiting back to the hub.
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.locator("h1")).toBeVisible({ timeout: 15_000 });
+    const resumedRunner = page.getByTestId("offline-study-runner");
+    await expect(resumedRunner).toBeVisible({ timeout: 15_000 });
+    await expect(resumedRunner).toContainText(uniqueTitle, { timeout: 15_000 });
+    await expect(page.getByTestId("offline-fallback-hero")).toBeHidden();
+
+    // Exit back to the offline hub and confirm the downloaded set remains listed
+    await resumedRunner
+      .getByRole("button", { name: /^quay lại$|^back$/i })
+      .click();
     await expect(page.getByTestId("offline-manager-panel")).toContainText(uniqueTitle, {
       timeout: 15_000,
     });

@@ -45,9 +45,13 @@ const STACKED_SIZE_CLASSES: Record<BrandLogoSize, string> = {
 const emptySubscribe = () => () => {};
 
 /**
- * Renders a single theme-aware brand image so browsers ONLY download the active
- * theme's logo (zero simultaneous light+dark high-priority PNG downloads, zero
- * hydration mismatch, zero CLS, exact `39952bd` StudyHub branding preserved).
+ * Renders a single theme-aware brand image using native `<picture>` before
+ * hydration (and under `theme === "system"`), so the HTML preload scanner
+ * fetches ONLY the single active-theme PNG immediately in BOTH Light Mode AND
+ * System Dark Mode (zero double-download, zero `dark:opacity-0` LCP delay,
+ * zero hydration mismatch, zero CLS, exact `39952bd` StudyHub branding).
+ * When the user explicitly overrides to `"light"` or `"dark"`, switches the
+ * active `<img>` directly regardless of OS color scheme.
  */
 function ThemedBrandImage({
   lightSrc,
@@ -74,23 +78,38 @@ function ThemedBrandImage({
     () => true,
     () => false,
   );
-  const { resolvedTheme } = useTheme();
-  const isDark = mounted && resolvedTheme === "dark";
+  const { theme } = useTheme();
+  const hasExplicitOverride =
+    mounted && (theme === "light" || theme === "dark");
+
+  if (hasExplicitOverride) {
+    const activeSrc = theme === "dark" ? darkSrc : lightSrc;
+    return (
+      <picture className="inline-flex items-center justify-center">
+        <img
+          src={activeSrc}
+          alt={alt}
+          width={width}
+          height={height}
+          className={cn("object-contain", STACKED_SIZE_CLASSES[size])}
+          {...imgPriorityProps}
+        />
+      </picture>
+    );
+  }
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={isDark ? darkSrc : lightSrc}
-      alt={alt}
-      width={width}
-      height={height}
-      className={cn(
-        "object-contain",
-        !mounted && "dark:opacity-0",
-        STACKED_SIZE_CLASSES[size],
-      )}
-      {...imgPriorityProps}
-    />
+    <picture className="inline-flex items-center justify-center">
+      <source media="(prefers-color-scheme: dark)" srcSet={darkSrc} />
+      <img
+        src={lightSrc}
+        alt={alt}
+        width={width}
+        height={height}
+        className={cn("object-contain", STACKED_SIZE_CLASSES[size])}
+        {...imgPriorityProps}
+      />
+    </picture>
   );
 }
 

@@ -312,6 +312,7 @@ function AppShellInner({
       const response = await fetch("/auth/signout", {
         method: "POST",
         credentials: "same-origin",
+        headers: { Accept: "application/json" },
       });
       if (!response.ok) {
         toast.error(

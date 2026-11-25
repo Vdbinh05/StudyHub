@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
+import * as React from "react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  FocusModeShell,
+  type FocusModeShellProps,
+} from "@/components/learning/FocusModeShell";
+import { I18nProvider } from "@/lib/i18n";
 import {
   detectSpeechLanguage,
   TtsController,
@@ -695,6 +702,55 @@ describe("StudyHub V3.2 Learning & Exam Regressions", () => {
       expect(
         localizeAllocationError("vi", "EXCEEDS_AVAILABLE", undefined, 50),
       ).toContain("vượt quá");
+    });
+  });
+
+  describe("V32-035 / RU-12: FocusModeShell mobile top bar prevents wrapping & clipping", () => {
+    it("keeps counter pill whitespace-nowrap shrink-0 and renders >=44px compact mobile triggers", () => {
+      const Shell = FocusModeShell as React.ComponentType<
+        Omit<FocusModeShellProps, "children"> & { children?: React.ReactNode }
+      >;
+      const Provider = I18nProvider as React.ComponentType<{
+        children?: React.ReactNode;
+      }>;
+      render(
+        React.createElement(
+          Provider,
+          null,
+          React.createElement(
+            Shell,
+            {
+              backHref: "/sets/set-1",
+              studySetId: "set-1",
+              activeMode: "practice",
+              title: "Khí tượng hàng không 278 câu",
+              progressCurrent: 31,
+              progressTotal: 278,
+              headerRight: React.createElement(
+                "button",
+                { type: "button", className: "min-h-11 shrink-0 whitespace-nowrap" },
+                "Hoàn thành",
+              ),
+            },
+            React.createElement("div", null, "Body"),
+          ),
+        ),
+      );
+
+      const counter = screen.getByLabelText("Tiến độ 31 trên 278");
+      expect(counter.className).toContain("whitespace-nowrap");
+      expect(counter.className).toContain("shrink-0");
+      expect(counter.textContent).toContain("31/278");
+
+      const modeSwitcher = screen.getByRole("button", {
+        name: /Chuyển chế độ học.*Luyện tập/i,
+      });
+      expect(modeSwitcher.className).toContain("min-h-11");
+      expect(modeSwitcher.className).toContain("shrink-0");
+
+      const heading = screen.getByRole("heading", { level: 1 });
+      expect(heading.textContent).toBe("Khí tượng hàng không 278 câu");
+      expect(heading.className).toContain("truncate");
     });
   });
 });

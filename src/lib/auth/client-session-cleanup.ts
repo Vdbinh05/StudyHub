@@ -17,6 +17,7 @@ const USER_SCOPED_LOCAL_EXACT_KEYS = [
   "studyhub-user-preferences",
   "studyhub-shortcuts-enabled",
   "studyhub-sidebar-collapsed",
+  "studyhub-offline-known-users",
   ACTIVE_USER_POINTER_KEY,
 ] as const;
 

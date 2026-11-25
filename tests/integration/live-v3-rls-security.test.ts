@@ -1017,7 +1017,7 @@ runLive(
       }
     }, 30_000);
 
-    it("3. Checkpoints, Confidence & Offline Sync RLS: zero cross-user leak, event_id replay returns invalid, revoked share returns rejected_revoked, note_upsert rich text sanitized", async () => {
+    it("3. Checkpoints, Confidence & Offline Sync RLS: zero cross-user leak, event_id replay returns invalid, revoked share returns rejected_inaccessible, note_upsert rich text sanitized", async () => {
       const sessionKeyA = `learn:sec-a-${randomBytes(4).toString("hex")}`;
       const eventAId = randomUUID();
       const eventBRevocableOkId = randomUUID();
@@ -1220,7 +1220,7 @@ runLive(
       expect(JSON.stringify(replayB.data)).not.toContain(userAId);
       expect(JSON.stringify(replayB.data)).not.toContain("duplicate");
 
-      // Share revocation test: B syncs OK while shared -> A revokes share -> B syncs `rejected_revoked`!
+      // Share revocation test: B syncs OK while shared -> A revokes share -> B syncs opaque `rejected_inaccessible` (SEC-10)!
       const syncBPreRevoke = LIVE_API_BASE_URL
         ? ((await (
             await apiFetch(
@@ -1269,7 +1269,7 @@ runLive(
         .eq("user_id", userBId);
       expect(revokeRes.error).toBeNull();
 
-      // User B tries syncing queued offline event after revocation -> rejected_revoked!
+      // User B tries syncing queued offline event after revocation -> opaque rejected_inaccessible (SEC-10)!
       const syncBPostRevoke = LIVE_API_BASE_URL
         ? ((await (
             await apiFetch(
@@ -1308,7 +1308,15 @@ runLive(
             })
           ).data as { results: Array<{ status: string }> });
 
-      expect(syncBPostRevoke.results[0]?.status).toBe("rejected_revoked");
+      if (LIVE_API_BASE_URL) {
+        // API route always collapses rejected_revoked/rejected_deleted into opaque rejected_inaccessible (SEC-10)
+        expect(syncBPostRevoke.results[0]?.status).toBe("rejected_inaccessible");
+      } else {
+        // Direct RPC returns rejected_inaccessible once Migration 0019 Block (d) is applied (rejected_revoked pre-apply)
+        expect(["rejected_inaccessible", "rejected_revoked"]).toContain(
+          syncBPostRevoke.results[0]?.status,
+        );
+      }
 
       // V3-SEC-04: POST /api/sync/events must sanitize `note_upsert` payload.content_rich!
       if (LIVE_API_BASE_URL) {

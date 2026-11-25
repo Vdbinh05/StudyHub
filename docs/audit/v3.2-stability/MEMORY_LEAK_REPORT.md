@@ -81,6 +81,55 @@ Scanned all `350` TypeScript/TSX files in `src/` for `setInterval`, `addEventLis
 
 ---
 
-## 6. Wave 5 Post-Fix Re-Verification (Pending Waves 2–4)
+## 6. Wave 5 Post-Fix Re-Verification — Before (`39952bd`) vs After (`7dfabfd`)
 
-*To be appended in Wave 5 by `perf-auditor` after V3.2 fixes land, running the identical 240-transition + 20-dialog + 16-mode-switch local production build harness to compare Before vs After heap, DOM nodes (especially `T1_sethub_loaded`), `localStorage` pruning, and listener counts.*
+> **Executed By:** `perf-auditor` (Agent 8 — Independent Verifier)  
+> **Target:** Local compiled production build `7dfabfd` on `http://127.0.0.1:3044` (cleanly torn down via process-tree kill; `0` `v32-w5-perf-*` leftovers).  
+> **Protocol:** Exact parity with Wave 1 (`240` question transitions: `100` Practice + `120` 250Q Exam + `20` Flashcards; `20` dialog open/close cycles; `16` SPA mode switches across 2 full loops; forced double V8 GC before every snapshot), PLUS live browser verification of `MEM-02` `localStorage` draft cap & TTL eviction!
+
+### 6.1 Headline Memory & Leak Verdict (Wave 1 vs Wave 5)
+
+| Memory / Leak Signal | Wave 1 Baseline (`39952bd`, `:3032`) | Wave 5 AFTER (`7dfabfd`, `:3044`) | Measured Delta | Verdict |
+| --- | ---: | ---: | ---: | :---: |
+| **`T0` Dashboard Start (Post-GC Heap / CDP Nodes)** | `6.45 MB` / `494` nodes | **`4.99 MB` / `483` nodes** | **`-22.6%` heap / `-2.2%` nodes** | **PASS** |
+| **`T1` `/sets/[id]` CDP Nodes (`MEM-01`)** | `3,779` (`2,529` live, `1,250` gap) | **`1,588` (`1,080` live, `508` gap)** | **`-58.0%` CDP / `-57.3%` live / `-59.4%` gap** | **PASS (`MEM-01` CLOSED)** |
+| **`T1` `/sets/[id]` Heap (`MEM-01`)** | `8.80 MB` post-GC (`12.48 MB` pre-GC) | **`7.62 MB` post-GC (`8.71 MB` pre-GC)** | **`-13.4%` post-GC / `-30.2%` pre-GC** | **PASS (`MEM-01` CLOSED)** |
+| **Practice 100Q Slowdown Ratio (`Q1–20` vs `Q81–100`)** | `99.6 → 99.7 ms` (**`1.00×`**) | `100.8 → 101.2 ms` (**`1.00×`**) | Zero slowdown | **PASS** |
+| **Exam 250Q Slowdown Ratio (`100` seq steps)** | `83.5 → 83.5 ms` (**`1.00×`**) | `99.3 → 84.2 ms` (**`0.85×`**) | Faster over session | **PASS** |
+| **Exam 250Q 20 Rapid Jumps (`Q1↔Q200↔Q250`)** | `32.1 ms` med (`19.5 ms` last 5) | **`17.9 ms` med (`16.5 ms` last 5)** | **`-44.2%` faster!** | **PASS (`PERF-07`)** |
+| **Exam 250Q Listener Balance (`T4` → `T6`)** | `455 → 455` (`+0`) | **`460 → 460` (`+0`)** | Zero listener leak | **PASS** |
+| **Loop 1 → Loop 2 SPA Plateau (`T7` → `T8`)** | `9.41 → 9.48 MB` (`+0.07 MB`), `551→551` nodes, `602→602` listeners | **`8.91 → 9.35 MB` (`+0.44 MB`), `522→522` nodes (`+0`), `621→621` listeners (`+0`), `105→105` gap (`+0`)** | Zero DOM / listener / timer / blob leak | **PASS** |
+| **Active `setInterval` & `activeBlobUrls` at `T8`** | `0` intervals / `0` blobs | **`0` intervals / `0` blobs** | Zero leaked timers/blobs | **PASS** |
+| **`MEM-02` `localStorage` Exam Draft Cap & TTL Pruning** | Unbounded `studyhub-exam-draft-v2-*` | **Verified live:** `2` legacy v2 + `3` expired (>8d) + `24` fresh v3 drafts → **`0` legacy, `0` expired, `20` cap enforced (`cappedAtOrBelow20: true`)** | **100% Fixed** | **PASS (`MEM-02` CLOSED)** |
+
+### 6.2 Wave 5 Post-GC Snapshot Trajectory (`T0` → `T8`)
+
+| Snapshot | Route | Pre-GC Heap | **Post-GC Heap** | CDP Nodes | Live DOM | Detached Gap | `JSEventListeners` | `setInterval` | Blobs | `localStorage` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `T0_dashboard_start` | `/dashboard` | `10.38 MB` | **`4.99 MB`** | `483` | `377` | `106` | `390` | `0` | `0` | `1.44 KB` |
+| `T1_sethub_loaded` | `/sets/[id]` | `8.71 MB` | **`7.62 MB`** | **`1,588`** | **`1,080`** | **`508`** | `907` | `0` | `0` | `1.44 KB` |
+| `T2_practice_Q1` | `/sets/[id]/practice` | `9.91 MB` | `8.04 MB` | `516` | `373` | `143` | `650` | `0` | `0` | `1.44 KB` |
+| `T3_practice_Q25` | `/sets/[id]/practice` | `12.23 MB` | `9.67 MB` | `715` | `466` | `249` | `671` | `0` | `0` | `18.31 KB`\* |
+| `T3_practice_Q50` | `/sets/[id]/practice` | `18.63 MB` | `10.34 MB` | `1,842` | `604` | `1,238` | `754` | `0` | `0` | `25.07 KB`\* |
+| `T3_practice_Q75` | `/sets/[id]/practice` | `15.66 MB` | `10.92 MB` | `2,716` | `660` | `2,056` | `846` | `0` | `0` | `31.82 KB`\* |
+| `T3_practice_Q100` | `/sets/[id]/practice` | `17.70 MB` | **`10.89 MB`** | `1,213` | `700` | `513` | `728` | `0` | `0` | `38.58 KB`\* |
+| `T4_exam250Q_Q1` | `/exams/[id]` | `15.78 MB` | `6.09 MB` | `534` | `377` | `157` | `460` | `1` | `0` | `38.84 KB` |
+| `T5_exam250Q_Q40` | `/exams/[id]` | `12.81 MB` | `7.46 MB` | `649` | `479` | `170` | `470` | `1` | `0` | `50.16 KB` |
+| `T5_exam250Q_Q80` | `/exams/[id]` | `13.45 MB` | `7.78 MB` | `753` | `563` | `190` | `490` | `1` | `0` | `61.49 KB` |
+| `T5_exam250Q_Q100` | `/exams/[id]` | `17.06 MB` | `7.85 MB` | `773` | `575` | `198` | `490` | `1` | `0` | `67.17 KB` |
+| `T6_exam250Q_after_120_steps` | `/exams/[id]` | `12.51 MB` | `7.86 MB` | `696` | `509` | `187` | **`460`** | `1` | `0` | `67.17 KB` |
+| `T7_after_mode_loop_1` *(Phase D)* | `/dashboard` | `13.88 MB` | **`8.91 MB`** | **`522`** | **`417`** | **`105`** | **`621`** | **`0`** | **`0`** | `1.44 KB` |
+| `T8_after_mode_loop_2` *(Phase D)* | `/dashboard` | `11.94 MB` | **`9.35 MB`** | **`522`** | **`417`** | **`105`** | **`621`** | **`0`** | **`0`** | `1.44 KB` |
+
+*\*Note on Practice `localStorage` (`1.44 → 38.58 KB`):* Intentional durable Practice checkpoint persistence (`V32-007` / `RU-01`) storing answered state for Exit & Resume, bounded by `pruneLocalCheckpointsForUser()` (`src/lib/learning/checkpoints.ts:170-235`). Notice also that Practice `cdpNodes` spiked transiently at `Q75` (`2,716`) during rolling background page-load + dialog unmount and reclaimed cleanly down to `1,213` at `Q100` (`522` upon leaving Practice).
+
+### 6.3 Static & Runtime Closure Status for `MEM-01` .. `MEM-05`
+
+| ID | Status | Verification Evidence on `7dfabfd` |
+| --- | :---: | --- |
+| **`MEM-01`** | **PASS** | `study-set-hub.tsx:141` `PAGE_SIZE = 20` + stripped `*_rich` blobs cut `/sets/[id]` DOM `-58.0%` (`3,779 → 1,588` CDP nodes), live elements `-57.3%` (`2,529 → 1,080`), detached gap `-59.4%` (`1,250 → 508`), and live route heap `-47.5%` (`19.8–21.1 MB → 10.5–11.1 MB`). |
+| **`MEM-02`** | **PASS** | `src/lib/learning/exam-draft.ts:36-134` (`EXAM_DRAFT_TTL_MS = 7d`, `EXAM_DRAFT_MAX_ENTRIES = 20`) + `pruneLocalCheckpointsForUser` verified **live in Chromium**: `2` legacy `v2` + `3` expired (>8d) + `24` fresh `v3` drafts pruned immediately on Q1 save to `0` legacy, `0` expired, `20` max. |
+| **`MEM-03`** | **PASS** | `src/components/pwa/PwaProvider.tsx:419-495` stores `activeRegistration`, `handleUpdateFound`, and `installingCleanups` `Set`, removing both `updatefound` and `statechange` listeners on effect cleanup and on `installed`/`redundant` terminal states. |
+| **`MEM-04`** | **PASS** | `activeBlobUrls === 0` across all snapshots; `OfflineStudyRunner` enforces `revokeAllMediaUrls()` on unmount. |
+| **`MEM-05`** | **PASS** | `src/lib/audio/tts.ts:198-286` replaced chained `onvoiceschanged` closures with `legacyVoiceListeners` `Set`, cleanly restoring `legacyOriginalOnVoicesChanged` when listener count returns to `0`. |
+

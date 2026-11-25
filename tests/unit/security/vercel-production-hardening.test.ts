@@ -397,8 +397,8 @@ describe("Vercel Hobby Production Hardening: Route Config & Auth Cache-Control S
       "src/app/auth/signout/route.ts",
     ]) {
       const content = readFileSync(path.resolve(process.cwd(), relPath), "utf8");
-      expect(content, `${relPath} missing Cache-Control: no-store`).toContain(
-        '"Cache-Control", "no-store"',
+      expect(content, `${relPath} missing Cache-Control: no-store`).toMatch(
+        /["']Cache-Control["']\s*[,:]\s*["'](?:private,\s*)?no-store["']/,
       );
     }
   });

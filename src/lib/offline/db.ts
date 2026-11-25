@@ -27,6 +27,8 @@ export { OfflineStorageError };
 export const OFFLINE_DB_PREFIX = "studyhub-offline-v3:";
 export const OFFLINE_DB_VERSION = 1;
 const KNOWN_USERS_STORAGE_KEY = "studyhub-offline-known-users";
+const DELETE_DB_TIMEOUT_MS = 1_500;
+const CLOSE_DB_TIMEOUT_MS = 1_500;
 
 export interface StudyHubOfflineSchema extends DBSchema {
   downloaded_sets: {
@@ -295,6 +297,7 @@ export async function openOfflineDb(
   }
 
   const dbName = getOfflineDbName(safeId);
+  let openedDb: IDBPDatabase<StudyHubOfflineSchema> | null = null;
   const promise = openDB<StudyHubOfflineSchema>(dbName, OFFLINE_DB_VERSION, {
     upgrade(db) {
       if (!db.objectStoreNames.contains("downloaded_sets")) {
@@ -358,13 +361,36 @@ export async function openOfflineDb(
         });
       }
     },
+    blocking(_currentVersion, _blockedVersion, event) {
+      // Close stale handles immediately when another tab upgrades or deletes this user's DB
+      openConnections.delete(safeId);
+      if (activeOfflineUserId === safeId) {
+        activeOfflineUserId = null;
+      }
+      try {
+        openedDb?.close();
+      } catch {
+        // Ignore already closed db
+      }
+      try {
+        const targetDb = event.target as IDBDatabase | null;
+        targetDb?.close();
+      } catch {
+        // Ignore already closed db
+      }
+    },
     terminated() {
       openConnections.delete(safeId);
     },
-  }).catch((err: unknown) => {
-    openConnections.delete(safeId);
-    throw normalizeOfflineStorageError(err);
-  });
+  })
+    .then((db) => {
+      openedDb = db;
+      return db;
+    })
+    .catch((err: unknown) => {
+      openConnections.delete(safeId);
+      throw normalizeOfflineStorageError(err);
+    });
 
   openConnections.set(safeId, promise);
   activeOfflineUserId = safeId;
@@ -372,20 +398,40 @@ export async function openOfflineDb(
   return promise;
 }
 
-export async function closeOfflineDb(userId: string): Promise<void> {
+export async function closeOfflineDb(
+  userId: string,
+  timeoutMs: number = CLOSE_DB_TIMEOUT_MS,
+): Promise<void> {
   const safeId = validateUserId(userId);
   const existing = openConnections.get(safeId);
   openConnections.delete(safeId);
-  if (existing) {
-    try {
-      const db = await existing;
-      db.close();
-    } catch {
-      // Ignore already closed/failed db
-    }
-  }
   if (activeOfflineUserId === safeId) {
     activeOfflineUserId = null;
+  }
+  if (!existing) {
+    return;
+  }
+
+  let timerId: ReturnType<typeof setTimeout> | null = null;
+  const closeTask = existing
+    .then((db) => {
+      db.close();
+    })
+    .catch(() => {
+      // Ignore already closed/failed db
+    });
+
+  try {
+    await Promise.race([
+      closeTask,
+      new Promise<void>((resolve) => {
+        timerId = setTimeout(resolve, Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timerId !== null) {
+      clearTimeout(timerId);
+    }
   }
 }
 
@@ -395,22 +441,38 @@ export async function closeAllOfflineDbs(): Promise<void> {
   activeOfflineUserId = null;
   await Promise.allSettled(
     entries.map(async ([, promise]) => {
-      const db = await promise;
-      db.close();
+      let timerId: ReturnType<typeof setTimeout> | null = null;
+      const closeTask = promise
+        .then((db) => {
+          db.close();
+        })
+        .catch(() => undefined);
+      try {
+        await Promise.race([
+          closeTask,
+          new Promise<void>((resolve) => {
+            timerId = setTimeout(resolve, CLOSE_DB_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timerId !== null) {
+          clearTimeout(timerId);
+        }
+      }
     }),
   );
 }
 
 /**
  * Safely switches offline storage partition from one account to another.
- * Closes the previous account's DB handle so Account B never shares connections or state with Account A.
+ * Closes the previous account's DB handle (bounded timeout) so Account B never shares connections or state with Account A.
  */
 export async function switchOfflineUser(
   previousUserId: string | null | undefined,
   nextUserId: string | null | undefined,
 ): Promise<void> {
   if (previousUserId && previousUserId.trim()) {
-    await closeOfflineDb(previousUserId);
+    await closeOfflineDb(previousUserId, CLOSE_DB_TIMEOUT_MS);
   }
   if (nextUserId && nextUserId.trim()) {
     activeOfflineUserId = validateUserId(nextUserId);
@@ -433,14 +495,23 @@ const ALL_STORE_NAMES = [
 /**
  * Permanently clears all offline data for a specific user (call on logout or explicit Clear Local Data).
  * Atomically empties all 8 object stores first (preventing stale data reads even if another tab
- * delays `deleteDB`), closes the connection, and deletes the user-partitioned database.
+ * delays `deleteDB`), closes the connection, and deletes the user-partitioned database with a
+ * bounded timeout fallback so multi-tab sign-out never stalls indefinitely.
  */
-export async function clearUserOfflineData(userId: string): Promise<void> {
+export async function clearUserOfflineData(
+  userId: string,
+  options: { deleteTimeoutMs?: number } = {},
+): Promise<void> {
   const safeId = validateUserId(userId);
   const existingClear = pendingClears.get(safeId);
   if (existingClear) {
     return existingClear;
   }
+
+  const deleteTimeoutMs =
+    typeof options.deleteTimeoutMs === "number" && options.deleteTimeoutMs >= 0
+      ? options.deleteTimeoutMs
+      : DELETE_DB_TIMEOUT_MS;
 
   const clearPromise = (async () => {
     const existingConn = openConnections.get(safeId);
@@ -462,17 +533,41 @@ export async function clearUserOfflineData(userId: string): Promise<void> {
       }
     }
 
-    await closeOfflineDb(safeId);
+    await closeOfflineDb(safeId, deleteTimeoutMs);
     forgetKnownOfflineUser(safeId);
 
     if (!isIndexedDbAvailable()) {
       return;
     }
 
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    const deleteTask = deleteDB(getOfflineDbName(safeId), {
+      blocked() {
+        // Another tab still holds a handle; bounded timeout below prevents sign-out stall
+      },
+    });
+
     try {
-      await deleteDB(getOfflineDbName(safeId));
+      await Promise.race([
+        deleteTask.finally(() => {
+          settled = true;
+        }),
+        new Promise<void>((resolve) => {
+          timerId = setTimeout(() => {
+            if (!settled) {
+              deleteTask.catch(() => undefined);
+            }
+            resolve();
+          }, deleteTimeoutMs);
+        }),
+      ]);
     } catch (err) {
       throw normalizeOfflineStorageError(err);
+    } finally {
+      if (timerId !== null) {
+        clearTimeout(timerId);
+      }
     }
   })().finally(() => {
     pendingClears.delete(safeId);

@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveLocalizedTitle } from "@/app/providers";
 import { mapLoginAuthError } from "@/components/auth/login-form";
+import { BrandLogo } from "@/components/layout/brand-logo";
 import {
   ACTIVE_USER_POINTER_KEY,
   AUTH_BROADCAST_CHANNEL,
@@ -66,6 +69,10 @@ describe("StudyHub V3.2 — Client Cache Isolation & Session Cleanup (V32-001 / 
     );
     window.localStorage.setItem("studyhub-shortcuts-enabled", "false");
     window.localStorage.setItem("studyhub-sidebar-collapsed", "true");
+    window.localStorage.setItem(
+      "studyhub-offline-known-users",
+      JSON.stringify(["user-a", "user-b"]),
+    );
     window.localStorage.setItem(ACTIVE_USER_POINTER_KEY, "user-a");
     window.localStorage.setItem("unrelated-app-key", "keep-me");
     window.sessionStorage.setItem("studyhub-offline-active-session", "set-1");
@@ -95,6 +102,9 @@ describe("StudyHub V3.2 — Client Cache Isolation & Session Cleanup (V32-001 / 
     expect(window.localStorage.getItem("studyhub-user-preferences")).toBeNull();
     expect(window.localStorage.getItem("studyhub-shortcuts-enabled")).toBeNull();
     expect(window.localStorage.getItem("studyhub-sidebar-collapsed")).toBeNull();
+    expect(
+      window.localStorage.getItem("studyhub-offline-known-users"),
+    ).toBeNull();
     expect(window.localStorage.getItem(ACTIVE_USER_POINTER_KEY)).toBeNull();
     expect(window.localStorage.getItem("unrelated-app-key")).toBe("keep-me");
     expect(
@@ -321,7 +331,7 @@ describe("StudyHub V3.2 — Architecture Security & Cache Contract Guards", () =
     expect(providersSrc).not.toMatch(/:\s*storedUserId\s*;/);
   });
 
-  it("enforces server sign-out verification before offline wipe in app-shell.tsx and preserves SW no-cache headers", () => {
+  it("enforces server sign-out JSON Accept header before offline wipe in app-shell.tsx and settings-view.tsx, and preserves SW no-cache headers", () => {
     const shellSrc = readFileSync(
       resolve(root, "src/components/layout/app-shell.tsx"),
       "utf8",
@@ -333,6 +343,19 @@ describe("StudyHub V3.2 — Architecture Security & Cache Contract Guards", () =
     expect(clearOfflineIdx).toBeGreaterThan(signoutIdx);
     expect(purgeIdx).toBeGreaterThan(clearOfflineIdx);
     expect(shellSrc).toContain("if (!response.ok)");
+    expect(shellSrc.slice(signoutIdx, signoutIdx + 220)).toContain(
+      'Accept: "application/json"',
+    );
+
+    const settingsSrc = readFileSync(
+      resolve(root, "src/components/layout/settings-view.tsx"),
+      "utf8",
+    );
+    const settingsSignoutIdx = settingsSrc.indexOf('fetch("/auth/signout"');
+    expect(settingsSignoutIdx).toBeGreaterThan(-1);
+    expect(
+      settingsSrc.slice(settingsSignoutIdx, settingsSignoutIdx + 220),
+    ).toContain('Accept: "application/json"');
 
     const nextConfigSrc = readFileSync(resolve(root, "next.config.ts"), "utf8");
     expect(nextConfigSrc).toContain(
@@ -343,5 +366,28 @@ describe("StudyHub V3.2 — Architecture Security & Cache Contract Guards", () =
     expect(nextConfigSrc).toContain(
       "public, max-age=86400, stale-while-revalidate=604800",
     );
+  });
+
+  it("renders BrandLogo SSR output as native <picture> with prefers-color-scheme: dark <source> and zero dark:opacity-0 LCP delay (V32-014)", () => {
+    const mainHtml = renderToStaticMarkup(
+      React.createElement(BrandLogo, { variant: "main", priority: "high" }),
+    );
+    expect(mainHtml).toContain("<picture");
+    expect(mainHtml).toContain('media="(prefers-color-scheme: dark)"');
+    expect(mainHtml).toMatch(/srcset="\/brand\/logo-main-dark\.png"/i);
+    expect(mainHtml).toContain('src="/brand/logo-main.png"');
+    expect(mainHtml).toMatch(/fetchpriority="high"/i);
+    expect(mainHtml).not.toContain("dark:opacity-0");
+    expect(mainHtml.match(/<img\b/g)?.length).toBe(1);
+
+    const fullHtml = renderToStaticMarkup(
+      React.createElement(BrandLogo, { variant: "full", size: "lg" }),
+    );
+    expect(fullHtml).toContain("<picture");
+    expect(fullHtml).toContain('media="(prefers-color-scheme: dark)"');
+    expect(fullHtml).toMatch(/srcset="\/brand\/logo-full-dark\.png"/i);
+    expect(fullHtml).toContain('src="/brand/logo-full.png"');
+    expect(fullHtml).not.toContain("dark:opacity-0");
+    expect(fullHtml.match(/<img\b/g)?.length).toBe(1);
   });
 });

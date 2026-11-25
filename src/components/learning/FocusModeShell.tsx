@@ -98,100 +98,119 @@ export function FocusModeShell({
   return (
     <div className="min-h-dvh bg-background text-foreground flex flex-col">
       <header className="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur-xs">
-        {/* Responsive counter-first mobile layout (no crushed 1-letter titles!) + crisp single-row desktop bar (`RU-12`, `RU-17`) */}
-        <div className="mx-auto grid max-w-6xl grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 py-1.5 sm:flex sm:h-14 sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-0">
-          {/* Left: Back button + optional Direct Mode Switcher */}
-          <div className="order-1 flex shrink-0 items-center gap-1 sm:gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 px-2 sm:px-3"
-              asChild
-            >
-              <Link
-                href={backHref}
-                onClick={onBeforeBack}
-                aria-label={
-                  backLabel ??
-                  lText(locale, "Quay lại học phần", "Back to study set")
-                }
+        {/* Responsive 2-row mobile layout (`<sm`, 320px–639px) + single-row desktop bar (`sm:`):
+            Row 1 on mobile keeps every action >=44px & counter strictly single-line with zero horizontal clipping (`V32-035` / `RU-12`).
+            Row 2 on mobile gives the set title full horizontal width so it never crushes to 1 letter. */}
+        <div className="mx-auto flex max-w-6xl flex-col gap-1 px-2 py-1.5 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-0">
+          {/* Mobile Row 1 / Desktop Left+Right wrapper using `sm:contents` so desktop stays a clean 3-part row */}
+          <div className="flex w-full min-w-0 items-center justify-between gap-1.5 sm:contents">
+            {/* Left: Back button + optional Direct Mode Switcher */}
+            <div className="flex shrink-0 items-center gap-1 sm:order-1 sm:gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="size-11 shrink-0 p-0 sm:h-9 sm:w-auto sm:min-h-9 sm:min-w-9 sm:px-3"
+                asChild
               >
-                <ArrowLeft className="size-4" aria-hidden="true" />
-                <span className="hidden sm:inline">
-                  {backLabel ?? lText(locale, "Quay lại", "Back")}
-                </span>
-              </Link>
-            </Button>
+                <Link
+                  href={backHref}
+                  onClick={onBeforeBack}
+                  aria-label={
+                    backLabel ??
+                    lText(locale, "Quay lại học phần", "Back to study set")
+                  }
+                >
+                  <ArrowLeft className="size-4" aria-hidden="true" />
+                  <span className="hidden sm:inline">
+                    {backLabel ?? lText(locale, "Quay lại", "Back")}
+                  </span>
+                </Link>
+              </Button>
 
-            {studySetId && currentModeMeta ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="min-h-11 sm:min-h-9 gap-1 px-2.5 text-xs font-medium"
-                    aria-label={lText(locale, "Chuyển chế độ học", "Switch study mode")}
-                  >
-                    <CurrentModeIcon className="size-3.5 text-primary shrink-0" aria-hidden="true" />
-                    <span className="max-w-[92px] truncate sm:max-w-none">
-                      {lText(locale, currentModeMeta.vi, currentModeMeta.en)}
-                    </span>
-                    <ChevronDown className="size-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-48">
-                  {SWITCHER_MODES.map((m) => {
-                    const Icon = m.icon;
-                    const isCurrent = m.id === activeMode;
-                    return (
-                      <DropdownMenuItem
-                        key={m.id}
-                        asChild
-                        className={cn(
-                          "min-h-10 gap-2 cursor-pointer",
-                          isCurrent && "bg-accent font-semibold text-accent-foreground",
-                        )}
-                      >
-                        <Link href={`/sets/${studySetId}/${m.id}`}>
-                          <Icon className="size-4 shrink-0" aria-hidden="true" />
-                          <span>{lText(locale, m.vi, m.en)}</span>
-                        </Link>
-                      </DropdownMenuItem>
-                    );
-                  })}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : null}
+              {studySetId && currentModeMeta ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="min-h-11 min-w-11 shrink-0 gap-1 px-2 text-xs font-medium sm:min-h-9 sm:min-w-0 sm:px-2.5"
+                      aria-label={lText(
+                        locale,
+                        `Chuyển chế độ học (đang ở ${currentModeMeta.vi})`,
+                        `Switch study mode (current: ${currentModeMeta.en})`,
+                      )}
+                    >
+                      <CurrentModeIcon className="size-4 text-primary shrink-0 sm:size-3.5" aria-hidden="true" />
+                      <span className="hidden sm:inline">
+                        {lText(locale, currentModeMeta.vi, currentModeMeta.en)}
+                      </span>
+                      <ChevronDown className="size-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-48">
+                    {SWITCHER_MODES.map((m) => {
+                      const Icon = m.icon;
+                      const isCurrent = m.id === activeMode;
+                      return (
+                        <DropdownMenuItem
+                          key={m.id}
+                          asChild
+                          className={cn(
+                            "min-h-10 gap-2 cursor-pointer",
+                            isCurrent && "bg-accent font-semibold text-accent-foreground",
+                          )}
+                        >
+                          <Link href={`/sets/${studySetId}/${m.id}`}>
+                            <Icon className="size-4 shrink-0" aria-hidden="true" />
+                            <span>{lText(locale, m.vi, m.en)}</span>
+                          </Link>
+                        </DropdownMenuItem>
+                      );
+                    })}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+            </div>
+
+            {/* Right: Single-line progress counter pill + Mode-specific controls */}
+            <div className="flex min-w-0 shrink-0 items-center gap-1 sm:order-3 sm:gap-2">
+              {hasProgress ? (
+                <span
+                  className="shrink-0 whitespace-nowrap rounded-full bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground tabular-nums sm:px-2.5"
+                  aria-label={lText(
+                    locale,
+                    `Tiến độ ${progressCurrent} trên ${progressTotal}`,
+                    `Progress ${progressCurrent} of ${progressTotal}`,
+                  )}
+                >
+                  <span className="sm:hidden">
+                    {progressCurrent}/{progressTotal}
+                  </span>
+                  <span className="hidden sm:inline">
+                    {progressCurrent} / {progressTotal}
+                  </span>
+                </span>
+              ) : null}
+              {headerRight}
+            </div>
           </div>
 
-          {/* Title & Subtitle: full-width secondary line on mobile (`<sm`) so titles NEVER crush to "A" / "M..", inline on `sm:` */}
-          <div className="order-3 col-span-3 min-w-0 border-t border-border/50 pt-1 sm:order-2 sm:col-span-1 sm:flex-1 sm:border-t-0 sm:pt-0">
-            <h1 className="truncate text-xs font-semibold text-foreground sm:text-base">
+          {/* Title & Subtitle: full-width secondary line on mobile (`<sm`), inline center on desktop (`sm:`) */}
+          <div className="flex min-w-0 items-center justify-between gap-2 border-t border-border/50 pt-1 sm:order-2 sm:block sm:flex-1 sm:border-t-0 sm:pt-0">
+            <h1 className="min-w-0 truncate text-xs font-semibold text-foreground sm:text-base">
               {title}
             </h1>
+            {currentModeMeta ? (
+              <span className="shrink-0 whitespace-nowrap text-[11px] font-medium text-muted-foreground sm:hidden">
+                {lText(locale, currentModeMeta.vi, currentModeMeta.en)}
+              </span>
+            ) : null}
             {subtitle ? (
               <p className="hidden truncate text-xs text-muted-foreground sm:block">
                 {subtitle}
               </p>
             ) : null}
-          </div>
-
-          {/* Right: Progress counter pill + Mode-specific controls */}
-          <div className="order-2 col-start-3 flex shrink-0 items-center gap-1.5 sm:order-3 sm:gap-2">
-            {hasProgress ? (
-              <span
-                className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground tabular-nums"
-                aria-label={lText(
-                  locale,
-                  `Tiến độ ${progressCurrent} trên ${progressTotal}`,
-                  `Progress ${progressCurrent} of ${progressTotal}`,
-                )}
-              >
-                {progressCurrent} / {progressTotal}
-              </span>
-            ) : null}
-            {headerRight}
           </div>
         </div>
 

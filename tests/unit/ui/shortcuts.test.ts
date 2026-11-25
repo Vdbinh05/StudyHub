@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import * as React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "@/lib/i18n";
+import { DEFAULT_USER_PREFERENCES } from "@/lib/preferences";
 import {
   DEFAULT_SHORTCUT_CATALOG,
   IME_COMPOSITION_WINDOW_MS,
@@ -11,6 +16,70 @@ import {
   isProtectedBrowserCombo,
   matchesShortcutCombo,
 } from "@/lib/shortcuts";
+
+const mockRouterReplace = vi.fn();
+const mockRouterRefresh = vi.fn();
+let mockSearchParamsString = "";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    replace: mockRouterReplace,
+    refresh: mockRouterRefresh,
+    push: vi.fn(),
+  }),
+  useSearchParams: () => new URLSearchParams(mockSearchParamsString),
+  usePathname: () => "/settings",
+}));
+
+vi.mock("next-themes", () => ({
+  useTheme: () => ({ theme: "light", setTheme: vi.fn(), resolvedTheme: "light" }),
+}));
+
+const mockUpdatePreferences = vi.fn(async () => DEFAULT_USER_PREFERENCES);
+vi.mock("@/lib/preferences", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/preferences")>();
+  return {
+    ...actual,
+    useUserPreferences: () => ({
+      preferences: actual.DEFAULT_USER_PREFERENCES,
+      isLoading: false,
+      isSaving: false,
+      updatePreferences: mockUpdatePreferences,
+      playFeedbackSound: vi.fn(),
+    }),
+  };
+});
+
+vi.mock("@/components/layout/ShortcutProvider", () => ({
+  useShortcuts: () => ({
+    openHelp: vi.fn(),
+    setShortcutsEnabled: vi.fn(),
+    shortcutsEnabled: true,
+  }),
+}));
+
+vi.mock("@/components/pwa/PwaProvider", () => ({
+  useOptionalPwa: () => null,
+  clearOfflineDataForLogout: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/components/pwa/OfflineManagerPanel", () => ({
+  OfflineManagerPanel: () =>
+    React.createElement("div", { "data-testid": "offline-manager-panel" }, "Offline"),
+}));
+
+vi.mock("@/components/pwa/InstallAppCard", () => ({
+  InstallAppCard: () =>
+    React.createElement("div", { "data-testid": "install-app-card" }, "Install"),
+}));
+
+afterEach(() => {
+  cleanup();
+  mockSearchParamsString = "";
+  mockRouterReplace.mockReset();
+  mockRouterRefresh.mockReset();
+  mockUpdatePreferences.mockClear();
+});
 
 function makeKeyEvent(
   init: KeyboardEventInit & {
@@ -554,6 +623,92 @@ describe("StudyHub V3.2 — Shared shouldIgnoreShortcutEvent Guard (src/lib/ui/s
       ).toBe(false);
     } finally {
       closedDialog.remove();
+    }
+  });
+});
+
+describe("StudyHub V3.2 — SettingsView Synchronous Tab Switch & URL Sync (V32-026 / FUNC-15)", () => {
+  it("switches to Tab 2 synchronously before async router.replace settles and stays in sync with deep links & Back/Forward", async () => {
+    class MockResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+
+    try {
+      const { SettingsView } = await import("@/components/layout/settings-view");
+      const qc = new QueryClient();
+      const I18nProviderCompat = I18nProvider as React.ComponentType<{
+        defaultLocale?: "vi" | "en";
+        children?: React.ReactNode;
+      }>;
+      const renderView = () =>
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(
+            I18nProviderCompat,
+            { defaultLocale: "vi" },
+            React.createElement(SettingsView),
+          ),
+        );
+
+      mockSearchParamsString = "";
+      const { container, rerender } = render(renderView());
+
+      // Initially on Tab 1 (preferences): #pref-motion mounted, Tab 2 #mp-fc-audio absent
+      expect(container.querySelector("#pref-motion")).not.toBeNull();
+      expect(container.querySelector("#mp-fc-audio")).toBeNull();
+
+      // Click Tab 2 WITHOUT updating mockSearchParamsString (simulates in-flight async router.replace)
+      const modesTab = screen.getByRole("tab", {
+        name: /chế độ học|learning modes/i,
+      });
+      fireEvent.mouseDown(modesTab);
+      fireEvent.click(modesTab);
+
+      // 0ms synchronous panel switch: Tab 2 switch #mp-fc-audio is immediately active!
+      expect(mockRouterReplace).toHaveBeenCalledWith("/settings?tab=modes", {
+        scroll: false,
+      });
+      const modeSwitch = container.querySelector(
+        '[role="tabpanel"][data-state="active"] #mp-fc-audio',
+      );
+      expect(modeSwitch).not.toBeNull();
+      expect(container.querySelector("#pref-motion")).toBeNull();
+
+      // Toggling Tab 2's switch mutates mode_preferences.flashcards.auto_play_audio (not Tab 1)
+      fireEvent.click(modeSwitch!);
+      expect(mockUpdatePreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode_preferences: expect.objectContaining({
+            flashcards: expect.objectContaining({ auto_play_audio: true }),
+          }),
+        }),
+        { persistRemote: false },
+      );
+
+      // When async router.replace finally settles to ?tab=modes, Tab 2 stays active cleanly
+      mockSearchParamsString = "tab=modes";
+      rerender(renderView());
+      expect(
+        container.querySelector('[role="tabpanel"][data-state="active"] #mp-fc-audio'),
+      ).not.toBeNull();
+
+      // External deep link (?tab=offline) switches immediately to Offline tab
+      mockSearchParamsString = "tab=offline";
+      rerender(renderView());
+      expect(screen.getByTestId("offline-manager-panel")).toBeTruthy();
+      expect(container.querySelector("#mp-fc-audio")).toBeNull();
+
+      // Browser Back to /settings (no ?tab=) syncs back to Tab 1 without snapping to Tab 2
+      mockSearchParamsString = "";
+      rerender(renderView());
+      expect(container.querySelector("#pref-motion")).not.toBeNull();
+      expect(container.querySelector("#mp-fc-audio")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

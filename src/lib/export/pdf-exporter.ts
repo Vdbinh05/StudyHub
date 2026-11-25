@@ -314,7 +314,11 @@ export function formatStructuredExamResponseForPdf(
 
     case "blanks": {
       const answersMap = response.answers ?? {};
-      if (typePayload?.type === "fill_in_blank" && typePayload.blanks.length > 0) {
+      if (
+        typePayload?.type === "fill_in_blank" &&
+        Array.isArray(typePayload.blanks) &&
+        typePayload.blanks.length > 0
+      ) {
         const values = typePayload.blanks.map((blank, idx) => {
           const val = (answersMap[blank.blank_id] ?? "").trim();
           return { idx, val };
@@ -349,7 +353,7 @@ export function formatStructuredExamResponseForPdf(
         return null;
       }
       const itemMap = new Map<string, string>();
-      if (typePayload?.type === "ordering") {
+      if (typePayload?.type === "ordering" && Array.isArray(typePayload.items)) {
         for (const item of typePayload.items) {
           itemMap.set(item.id, item.text);
         }
@@ -365,24 +369,45 @@ export function formatStructuredExamResponseForPdf(
       if (entries.length === 0) return null;
 
       if (typePayload?.type === "matching") {
+        const rawMatching = typePayload as unknown as {
+          pairs?: Array<{ id: string; right_id: string; right_text: string }>;
+          distractors?: Array<{ right_id: string; right_text: string }>;
+          left_items?: Array<{ id: string }>;
+          right_items?: Array<{ right_id: string; right_text: string }>;
+        };
         const rightTextById = new Map<string, string>();
-        for (const pair of typePayload.pairs) {
-          rightTextById.set(pair.right_id, pair.right_text);
-        }
-        for (const distractor of typePayload.distractors ?? []) {
-          rightTextById.set(distractor.right_id, distractor.right_text);
-        }
-
-        const formatted: string[] = [];
-        typePayload.pairs.forEach((pair, idx) => {
-          const chosenRightId = pairMap[pair.id];
-          if (chosenRightId) {
-            formatted.push(
-              `${idx + 1}-${rightTextById.get(chosenRightId) ?? chosenRightId}`,
-            );
+        if (Array.isArray(rawMatching.pairs)) {
+          for (const pair of rawMatching.pairs) {
+            rightTextById.set(pair.right_id, pair.right_text);
           }
-        });
-        if (formatted.length > 0) return formatted.join("; ");
+          for (const distractor of rawMatching.distractors ?? []) {
+            rightTextById.set(distractor.right_id, distractor.right_text);
+          }
+          const formatted: string[] = [];
+          rawMatching.pairs.forEach((pair, idx) => {
+            const chosenRightId = pairMap[pair.id];
+            if (chosenRightId) {
+              formatted.push(
+                `${idx + 1}-${rightTextById.get(chosenRightId) ?? chosenRightId}`,
+              );
+            }
+          });
+          if (formatted.length > 0) return formatted.join("; ");
+        } else if (Array.isArray(rawMatching.left_items) && Array.isArray(rawMatching.right_items)) {
+          for (const item of rawMatching.right_items) {
+            rightTextById.set(item.right_id, item.right_text);
+          }
+          const formatted: string[] = [];
+          rawMatching.left_items.forEach((left, idx) => {
+            const chosenRightId = pairMap[left.id];
+            if (chosenRightId) {
+              formatted.push(
+                `${idx + 1}-${rightTextById.get(chosenRightId) ?? chosenRightId}`,
+              );
+            }
+          });
+          if (formatted.length > 0) return formatted.join("; ");
+        }
       }
 
       return entries.map(([left, right]) => `${left}-${right}`).join("; ");
@@ -390,18 +415,23 @@ export function formatStructuredExamResponseForPdf(
 
     case "hotspot": {
       const selectedIds = response.selected_hotspot_ids ?? [];
-      if (
-        selectedIds.length > 0 &&
-        typePayload?.type === "image_hotspot" &&
-        typePayload.target_hotspots.length > 0
-      ) {
-        const labelById = new Map(
-          typePayload.target_hotspots.map((target) => [target.id, target.label]),
-        );
-        const labels = selectedIds
-          .map((id) => labelById.get(id))
-          .filter((label): label is string => Boolean(label));
-        if (labels.length > 0) return labels.join(", ");
+      if (selectedIds.length > 0 && typePayload?.type === "image_hotspot") {
+        const rawHotspot = typePayload as unknown as {
+          target_hotspots?: Array<{ id: string; label: string }>;
+          target_labels?: Array<{ id: string; label: string }>;
+        };
+        const targets = Array.isArray(rawHotspot.target_hotspots)
+          ? rawHotspot.target_hotspots
+          : Array.isArray(rawHotspot.target_labels)
+            ? rawHotspot.target_labels
+            : [];
+        if (targets.length > 0) {
+          const labelById = new Map(targets.map((target) => [target.id, target.label]));
+          const labels = selectedIds
+            .map((id) => labelById.get(id))
+            .filter((label): label is string => Boolean(label));
+          if (labels.length > 0) return labels.join(", ");
+        }
       }
       const clicks = response.clicks ?? [];
       if (clicks.length === 0) return null;
@@ -443,13 +473,19 @@ function computeAnswerSummary(
   }
 
   if (q.questionType === "fill_in_blank" && q.typePayload?.type === "fill_in_blank") {
-    const parts = q.typePayload.blanks.map(
-      (b, idx) => `(${idx + 1}) ${b.accepted_answers[0] ?? "—"}`,
-    );
-    return { answerText: parts.join("; "), correctLabels: [] };
+    const blanks = Array.isArray(q.typePayload.blanks) ? q.typePayload.blanks : [];
+    const parts = blanks.map((b, idx) => {
+      const accepted = Array.isArray(b?.accepted_answers) ? b.accepted_answers : [];
+      return `(${idx + 1}) ${accepted[0] ?? "—"}`;
+    });
+    return { answerText: parts.length > 0 ? parts.join("; ") : "—", correctLabels: [] };
   }
 
   if (q.questionType === "numerical" && q.typePayload?.type === "numerical") {
+    const rawVal = q.typePayload.correct_value;
+    if (typeof rawVal !== "number" || !Number.isFinite(rawVal)) {
+      return { answerText: "—", correctLabels: [] };
+    }
     const unit = q.typePayload.unit ? ` ${q.typePayload.unit}` : "";
     const tol =
       typeof q.typePayload.abs_tolerance === "number" &&
@@ -457,27 +493,39 @@ function computeAnswerSummary(
         ? ` (±${q.typePayload.abs_tolerance})`
         : "";
     return {
-      answerText: `${q.typePayload.correct_value}${unit}${tol}`,
+      answerText: `${rawVal}${unit}${tol}`,
       correctLabels: [],
     };
   }
 
   if (q.questionType === "ordering" && q.typePayload?.type === "ordering") {
-    const ordered = [...q.typePayload.items]
-      .sort((a, b) => a.correct_position - b.correct_position)
+    const items = Array.isArray(q.typePayload.items) ? q.typePayload.items : [];
+    const hasPositions = items.some(
+      (item) => typeof item?.correct_position === "number",
+    );
+    if (!hasPositions) {
+      return { answerText: "—", correctLabels: [] };
+    }
+    const ordered = [...items]
+      .sort((a, b) => (a.correct_position ?? 0) - (b.correct_position ?? 0))
       .map((item, idx) => `${idx + 1}. ${item.text}`);
-    return { answerText: ordered.join(" → "), correctLabels: [] };
+    return { answerText: ordered.length > 0 ? ordered.join(" → ") : "—", correctLabels: [] };
   }
 
   if (q.questionType === "matching" && q.typePayload?.type === "matching") {
-    const pairs = q.typePayload.pairs.map(
-      (p, idx) => `${idx + 1}-${p.right_text}`,
-    );
-    return { answerText: pairs.join("; "), correctLabels: [] };
+    const pairs = Array.isArray(q.typePayload.pairs) ? q.typePayload.pairs : [];
+    if (pairs.length === 0) {
+      return { answerText: "—", correctLabels: [] };
+    }
+    const formattedPairs = pairs.map((p, idx) => `${idx + 1}-${p.right_text ?? "—"}`);
+    return { answerText: formattedPairs.join("; "), correctLabels: [] };
   }
 
   if (q.questionType === "image_hotspot" && q.typePayload?.type === "image_hotspot") {
-    const labels = q.typePayload.target_hotspots.map((h) => h.label).filter(Boolean);
+    const targets = Array.isArray(q.typePayload.target_hotspots)
+      ? q.typePayload.target_hotspots
+      : [];
+    const labels = targets.map((h) => h?.label).filter(Boolean);
     return {
       answerText: labels.length > 0 ? labels.join(", ") : isVi ? "(Điểm nóng trên hình)" : "(Image hotspot)",
       correctLabels: [],
@@ -925,6 +973,7 @@ export async function exportStudySetToPdf(
   } else {
     // --- Standard Paper / Explanations / Incorrect Review Modes ---
     const renderedPassageIds = new Set<string>();
+    const includeAnswerKey = options.mode !== "question_paper";
     const showInlineAnswers =
       options.mode === "paper_with_explanations" ||
       options.mode === "incorrect_review";
@@ -932,13 +981,15 @@ export async function exportStudySetToPdf(
     for (let idx = 0; idx < preparedQuestions.length; idx += 1) {
       const q = preparedQuestions[idx];
       const qNum = idx + 1;
-      const ans = computeAnswerSummary(q, isVi);
-      answerKey.push({
-        questionNumber: qNum,
-        questionId: q.id,
-        answerText: ans.answerText,
-        correctLabels: ans.correctLabels,
-      });
+      const ans = includeAnswerKey ? computeAnswerSummary(q, isVi) : null;
+      if (ans) {
+        answerKey.push({
+          questionNumber: qNum,
+          questionId: q.id,
+          answerText: ans.answerText,
+          correctLabels: ans.correctLabels,
+        });
+      }
 
       // Render shared reading passage once before its first referencing question
       const passageBody =
@@ -1039,10 +1090,11 @@ export async function exportStudySetToPdf(
           }
         }
       } else if (q.questionType === "ordering" && q.typePayload?.type === "ordering") {
+        const rawItems = Array.isArray(q.typePayload.items) ? q.typePayload.items : [];
         const displayItems =
           options.shuffleOptions && rng
-            ? deterministicShuffle(q.typePayload.items, rng)
-            : q.typePayload.items;
+            ? deterministicShuffle(rawItems, rng)
+            : rawItems;
         displayItems.forEach((item, i) => {
           drawWrapped(`[   ] ${i + 1}. ${item.text}`, {
             indent: 16,
@@ -1050,21 +1102,47 @@ export async function exportStudySetToPdf(
           });
         });
       } else if (q.questionType === "matching" && q.typePayload?.type === "matching") {
-        const rightItems =
+        const rawMatching = q.typePayload as unknown as {
+          pairs?: Array<{ left_text?: string; right_text?: string }>;
+          distractors?: Array<{ right_text?: string }>;
+          left_items?: Array<{ left_text?: string }>;
+          right_items?: Array<{ right_text?: string }>;
+        };
+        const leftTexts = Array.isArray(rawMatching.pairs)
+          ? rawMatching.pairs.map((p) => String(p?.left_text ?? ""))
+          : Array.isArray(rawMatching.left_items)
+            ? rawMatching.left_items.map((item) => String(item?.left_text ?? ""))
+            : [];
+        const rawRightTexts = Array.isArray(rawMatching.pairs)
+          ? [
+              ...rawMatching.pairs.map((p) => String(p?.right_text ?? "")),
+              ...(Array.isArray(rawMatching.distractors)
+                ? rawMatching.distractors.map((d) => String(d?.right_text ?? ""))
+                : []),
+            ]
+          : Array.isArray(rawMatching.right_items)
+            ? rawMatching.right_items.map((item) => String(item?.right_text ?? ""))
+            : [];
+        const rightTexts =
           options.shuffleOptions && rng
-            ? deterministicShuffle(
-                q.typePayload.pairs.map((p) => p.right_text),
-                rng,
-              )
-            : q.typePayload.pairs.map((p) => p.right_text);
-        q.typePayload.pairs.forEach((pair, i) => {
+            ? deterministicShuffle(rawRightTexts, rng)
+            : rawRightTexts;
+        const rowCount = Math.max(leftTexts.length, rightTexts.length);
+        for (let i = 0; i < rowCount; i += 1) {
+          const leftPart = i < leftTexts.length ? `${i + 1}. ${leftTexts[i]}` : "";
           const rightLabel = String.fromCharCode(65 + i);
-          const rightVal = rightItems[i] ?? "";
-          drawWrapped(`${i + 1}. ${pair.left_text}   |   ${rightLabel}. ${rightVal}`, {
-            indent: 16,
-            size: fontSize,
-          });
-        });
+          const rightPart = i < rightTexts.length ? `${rightLabel}. ${rightTexts[i]}` : "";
+          const rowLine =
+            leftPart && rightPart
+              ? `${leftPart}   |   ${rightPart}`
+              : leftPart || rightPart;
+          if (rowLine) {
+            drawWrapped(rowLine, {
+              indent: 16,
+              size: fontSize,
+            });
+          }
+        }
       } else if (
         q.questionType === "short_answer" ||
         q.questionType === "numerical" ||
@@ -1085,7 +1163,7 @@ export async function exportStudySetToPdf(
       }
 
       // Inline review / answer + explanation lines
-      if (showInlineAnswers) {
+      if (showInlineAnswers && ans) {
         if (
           (options.mode === "incorrect_review" ||
             options.mode === "paper_with_explanations") &&

@@ -1,4 +1,5 @@
 import "fake-indexeddb/auto";
+import { deleteDB } from "idb";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearUserOfflineData,
@@ -337,5 +338,46 @@ describe("Account-Partitioned IndexedDB Offline Store (`src/lib/offline/db.ts`)"
     expect(fallback.supported).toBe(false);
     expect(fallback.usageBytes).toBe(0);
     expect(fallback.usagePercent).toBeNull();
+  });
+
+  it("closes stale openOfflineDb handles via blocking() when another tab deletes the DB (Wave 6)", async () => {
+    await putDownloadedSet(USER_A, makeSetRecord(USER_A, SET_1, "Multi-tab Set"));
+
+    // Simulate another tab issuing deleteDB while this tab still holds an open handle
+    let blockedFired = false;
+    await deleteDB(getOfflineDbName(USER_A), {
+      blocked() {
+        blockedFired = true;
+      },
+    });
+
+    // blocking() closed this tab's handle immediately so deleteDB completed without stalling
+    expect(blockedFired).toBe(false);
+    expect(await getAllDownloadedSets(USER_A)).toEqual([]);
+  });
+
+  it("never stalls clearUserOfflineData when an external uncooperative IDB handle blocks deleteDB (Wave 6)", async () => {
+    await putDownloadedSet(USER_A, makeSetRecord(USER_A, SET_1, "Blocked Set"));
+
+    // Open a raw external IDB handle that intentionally refuses to close on versionchange
+    const stubbornDb = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(getOfflineDbName(USER_A), 1);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    try {
+      const startMs = Date.now();
+      await clearUserOfflineData(USER_A, { deleteTimeoutMs: 60 });
+      const elapsedMs = Date.now() - startMs;
+
+      // Must resolve via bounded timeout rather than hanging indefinitely
+      expect(elapsedMs).toBeLessThan(1_000);
+    } finally {
+      stubbornDb.close();
+    }
+
+    // All stores were emptied atomically before deleteDB timeout, so zero stale records remain
+    expect(await getAllDownloadedSets(USER_A)).toEqual([]);
   });
 });

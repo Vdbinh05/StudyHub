@@ -675,6 +675,15 @@ describe("StudyHub V3.2 Backend Security, Reliability & Performance Regressions"
       expect(syncSrc).toContain("OPAQUE_INACCESSIBLE_MESSAGE");
     });
 
+    it("POST /auth/signout emits relative Location: /login on 303 and private, no-store on JSON (V32-013)", () => {
+      const signoutSrc = readRepoFile("src/app/auth/signout/route.ts");
+      expect(signoutSrc).toContain('Location: "/login"');
+      expect(signoutSrc).not.toContain('new URL("/login"');
+      expect(signoutSrc).toContain('"private, no-store"');
+      expect(signoutSrc).toContain('"Vary"');
+      expect(signoutSrc).toContain("ok: true");
+    });
+
     it("DELETE /api/sets/[id] safely marks and reaps only unpinned orphan media_assets (DB-14)", () => {
       const setIdSrc = readRepoFile("src/app/api/sets/[id]/route.ts");
       expect(setIdSrc).toContain("content_media_relations");

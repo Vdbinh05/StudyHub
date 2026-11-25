@@ -152,8 +152,15 @@ function SettingsViewInner() {
   const pwa = useOptionalPwa();
   const { openHelp, setShortcutsEnabled } = useShortcuts();
 
-  // Derive active tab directly from `?tab=` so header links & browser Back/Forward always stay in sync
-  const activeTab: SettingsTabKey = resolveTabParam(searchParams.get("tab"));
+  // Sync active tab with `?tab=` for deep links & Back/Forward while updating
+  // synchronously on click so immediate panel switches never race async router.replace.
+  const urlTab: SettingsTabKey = resolveTabParam(searchParams.get("tab"));
+  const [prevUrlTab, setPrevUrlTab] = React.useState<SettingsTabKey>(urlTab);
+  const [activeTab, setActiveTab] = React.useState<SettingsTabKey>(urlTab);
+  if (prevUrlTab !== urlTab) {
+    setPrevUrlTab(urlTab);
+    setActiveTab(urlTab);
+  }
 
   const {
     preferences,
@@ -508,6 +515,7 @@ function SettingsViewInner() {
         await fetch("/auth/signout", {
           method: "POST",
           credentials: "same-origin",
+          headers: { Accept: "application/json" },
         }).catch(() => undefined);
         await clearOfflineDataForLogout(pwa?.activeUserId);
         await purgeAllUserClientState(queryClient, pwa?.activeUserId, {
@@ -533,6 +541,7 @@ function SettingsViewInner() {
 
   const handleTabChange = (val: string) => {
     const next = resolveTabParam(val);
+    setActiveTab(next);
     const params = new URLSearchParams(searchParams.toString());
     if (next === "preferences") {
       params.delete("tab");
