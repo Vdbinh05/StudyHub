@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 44" fill="none" role="img" aria-label="StudyHub">
+  <text x="2" y="31" font-family="Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="30" font-weight="800" letter-spacing="-0.8">
+    <tspan fill="#162A69">Study</tspan><tspan fill="#3458DB">Hub</tspan>
+  </text>
+  <path d="M16 39C48 33 82 34 104 41C126 34 160 33 192 39C162 36 128 37 104 43C80 37 46 36 16 39Z" fill="#7AB4FA"/>
+</svg>
