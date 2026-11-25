@@ -171,3 +171,75 @@ StudyHub V3.2 is **100% safely reversible with zero data loss**:
 - **Blocking Defects (`P0` / `P1`):** **`0`**
 - **Verified Live Production URL:** `https://studyhub-three-mauve.vercel.app` (`studyhub-9zfmzbepc`, `13b22cc`, `hkg1::hnd1`)
 - **Signed:** Agent 10 (`final-auditor`, Independent Final Auditor) — `2026-11-25T17:45Z`
+
+---
+
+## 8. Critical V3.2 Addendum (`V32-053`, `V32-054`, `V32-055`) — Live Production Final Acceptance Audit
+
+> **Auditor:** Agent 10 — Independent Final Auditor (`final-auditor`, zero edits to `src/*`, `supabase/*`, or `tests/*`)  
+> **Audit Date:** 2026-11-25 (UTC `19:10–19:18Z`)  
+> **Live Production Deployment:** `https://studyhub-three-mauve.vercel.app` (Vercel Production **`studyhub-kmvmqknb9`**, commit **`31d6dfb`**, `hkg1::hnd1` Tokyo)  
+> **Live Database Schema:** Supabase Cloud (`cuoaifyupfmkstqhcjwy`, PG 17.12) with Migration **`0020_v3_2_post_import_multimedia_editor.sql`** applied LIVE  
+> **Updated Binding Verdict:** **`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`** (`0` P0 / `0` P1 open across all **55** tracked issues: `52` core V3.2 + `3` Addendum `V32-053`/`V32-054`/`V32-055`)
+
+### 8.1 Addendum Static, Migration & Live Vitest Gate (`31d6dfb`)
+
+| Gate | Command / Probe | Measured Live Result (`31d6dfb`) | Status |
+| :--- | :--- | :--- | :---: |
+| **TypeScript Strict** | `npm run typecheck` | Exit **`0`** (`0` errors) | **PASS** |
+| **ESLint & React Hooks** | `npm run lint` | Exit **`0`** (`0` errors, `0` warnings) | **PASS** |
+| **Migration Immutability** | `git diff --name-only 39952bd -- supabase/migrations/` | Strictly **2 additive files**: `0019_v3_2_stability_security_and_perf.sql` and `0020_v3_2_post_import_multimedia_editor.sql` (`0001`–`0018` untouched) | **PASS** |
+| **Live Production Health** | `GET https://studyhub-three-mauve.vercel.app/api/health` | `200 OK`, `x-vercel-id: hkg1::hnd1::c5hkw-...`, `Cache-Control: private, no-store`, `supabaseConfigured: true` | **PASS** |
+| **Full Live Vitest Suite** | `LIVE_API_BASE_URL=https://studyhub-three-mauve.vercel.app npm run test` | **`67 / 67` files passed, `533 / 533` tests passed (`0` failed, `0` skipped, `37.02s`, exit `0`)** — incl. all **`38 / 38`** live DB/RLS/API integration tests against live `hnd1` + Migration `0020` (`live-db-rpcs` `8/8`, `live-rls-security` `11/11`, `live-v3-db-rpcs` `8/8`, `live-v3-rls-security` `11/11`) | **PASS** |
+
+### 8.2 14-Point Live Production Browser Acceptance Walkthrough (§16 — `https://studyhub-three-mauve.vercel.app`)
+
+Executed fresh on live Vercel Production (`studyhub-kmvmqknb9`, Playwright Chromium) using an isolated disposable account (`v32-final-add-*`, 100% deleted post-run), a synthetic 4-question text-only `.docx` bank, and 9 distinct valid colored PNG fixtures:
+
+| §16 Point | Verification Scope | Live Production Evidence (`studyhub-kmvmqknb9`) | Verdict |
+| :-: | :--- | :--- | :---: |
+| **(1)** | Import text-only `.docx` + attach explanation image in Import Preview (`V32-054`) | Parsed & committed `4/4` questions from synthetic `.docx`; opening inline `Sửa` on Q1 before commit and attaching `preview-expl-q1.png` (`Thêm ảnh giải thích`) persisted `1` `role='explanation'` attachment on Q1 (`q1PreviewExplanationMediaPersisted: true`) and rendered live on `/sets/[id]`. | **PASS** |
+| **(2)** | Post-import CTA `"Xem và chỉnh sửa câu hỏi"` + 1-tap Edit on Study Set Hub | Post-import success screen rendered visible link `"Xem và chỉnh sửa câu hỏi"` -> `/sets/[id]/edit`. Study Set Question Bank (`/sets/[id]`) exposed **`4/4`** 1-tap `hub-edit-question-*` Edit buttons (`live-prod-set-hub-edit.png`). | **PASS** |
+| **(3)** | Open Unified Question Editor modal | Clicking Q2's 1-tap Edit button opened `UnifiedQuestionEditorModal` (`role="dialog"`, `#uq-prompt`, `initialType: "single_choice"`). | **PASS** |
+| **(4)** | Add `2` images to question content (file upload + real `ClipboardEvent("paste")`) | File upload via `Thêm ảnh câu hỏi` returned `POST /api/uploads/image` **`201`**; real browser `ClipboardEvent("paste")` dispatched onto `#uq-prompt` triggered `POST /api/uploads/image` **`201`**. | **PASS** |
+| **(5)** | Distinct images on Options A, B, C, D (`2` on A, image-only `""` on B, keeping `single_choice`) | Attached `2` PNGs on Option A (`2/6`), `1` PNG on Option B + cleared Option B text to `""` (activated **`Đáp án chỉ dùng hình ảnh`** badge), and `1` distinct PNG each on C & D — without changing `question_type` from `single_choice`. | **PASS** |
+| **(6)** | Add explanation image | Expanded explanation accordion and attached `q2-explanation-1.png` (`POST /api/uploads/image` **`201`**; `live-prod-unified-editor.png`). | **PASS** |
+| **(7)** | Save (`PATCH 200`, original `question.id` & `option.id`s preserved) | `PATCH /api/sets/[id]/questions/[q2Id]` returned **`200 OK`**, preserving original `question.id`, keeping `question_type === "single_choice"`, and preserving **`4/4`** original `option.id` UUIDs. | **PASS** |
+| **(8)** | Full reload 100% persistence | Post-reload `GET /api/sets/[id]/questions/[q2Id]` & DOM confirmed: `promptMediaCount: 2`, `explMediaCount: 1`, `optCounts: [A:2, B:1 (content=""), C:1, D:1]`, **`8/8`** loaded `<img>` elements on Q2 card (`naturalWidth > 0`). | **PASS** |
+| **(9)** | Practice Mode images + contextual Edit preserving session position | Answered Q1 (`1 / 4`), navigated to Q2: **`7/7`** prompt+option images loaded (`0` broken, `0` explanation image pre-check). Contextual Edit updated Q2 prompt (`PATCH 200`), rendered new prompt immediately, and kept exact session header **`1 / 4`** (`sessionPositionPreserved: true`). | **PASS** |
+| **(10)** | Timed Exam: `0` edit buttons, `0` explanation images pre-submit | `POST /api/exams` (`201`, `shuffle_options: true`) omitted `review_media_snapshot` (`false`) and stripped all `explanation`/`hint`/`back` roles from `media_snapshot` (`false`). Active `/exams/[id]` rendered **`0`** edit buttons and strictly **`7`** loaded prompt+option images (`0` explanation images). | **PASS** |
+| **(11)** | Submit Exam -> exact scoring + post-submit explanation image on Results | Selected correct Option A (`Sao Thủy`) on Q2 -> Submit -> Results scored exact **`25%` (`1 / 4`)**, API returned `submittedQ2ReviewMediaCount: 1`, and Results DOM loaded all **`9 / 9`** images (`7` Q2 prompt/option + `1` Q2 explanation + `1` Q1 preview explanation; `0` broken, `0` `[object Object]`). | **PASS** |
+| **(12)** | PDF Export: `question_paper` (0 expl leak) vs `paper_with_explanations` | Live `POST /api/export/pdf` inspected via `pdf-lib`: `question_paper` -> **`200 OK`**, `%PDF-`, `847,441 B`, `2` pages, **`7` `/Image` XObjects** (`0` explanation images); `paper_with_explanations` -> **`200 OK`**, `%PDF-`, `850,166 B`, `3` pages, **`9` `/Image` XObjects** (**`+2`** explanation images cleanly included!). | **PASS** |
+| **(13)** | Contextual `"Chỉnh sửa câu hỏi gốc"` on Exam Results + historical immutability | Modal rendered `role="note"` non-mutation disclaimer (`disclaimerVisible: true`, `disclaimerHasNonMutationNotice: true`). Saving updated source Q2 (`[Post-Results Source Edit]`), while reloading historical Exam Results preserved the original snapshot prompt (`[Practice Edited]`) and exact score (`25%`, `1 / 4`). | **PASS** |
+| **(14)** | Mobile `390×844` live check | `/sets/[id]`: `0px` overflow, 1-tap Edit button **`44×44px`** (`rightClipPx: 0`). Modal: `0px` doc/modal overflow, `0px` right clip, Option A image controls visible, sticky Save **`44px` tall** (`top: 703..bottom: 747 <= 844`, `right: 365 <= 390`, unobstructed), **`0`** console/page errors (`live-prod-mobile-390-editor.png`). | **PASS** |
+
+### 8.3 Live Production Addendum Screenshots Captured (`docs/audit/v3.2-stability/screenshots/addendum-after/`)
+- [`live-prod-set-hub-edit.png`](./screenshots/addendum-after/live-prod-set-hub-edit.png) — Live Desktop `/sets/[id]` showing 1-tap `[✎ Chỉnh sửa]`, 5 media filter chips, `#1` search, and persisted Import Preview explanation image.
+- [`live-prod-unified-editor.png`](./screenshots/addendum-after/live-prod-unified-editor.png) — Live Desktop `UnifiedQuestionEditorModal` showing multi-image per-option controls (B/C/D thumbnails, crop/replace/alt/delete, `Dán (Ctrl+V)`), explanation section, and sticky `Hủy | Lưu thay đổi | → Lưu & Câu tiếp` footer.
+- [`live-prod-mobile-390-editor.png`](./screenshots/addendum-after/live-prod-mobile-390-editor.png) — Live Mobile `390×844` modal showing Option A `2/6` multi-image reorder arrows, Option B `Đáp án chỉ dùng hình ảnh` badge, `0px` overflow/clip, and unobstructed sticky Save footer.
+
+### 8.4 Addendum Companion Reports Cross-Check (`5 / 5` Verified Consistent)
+- [`ADDENDUM_POST_IMPORT_EDIT_REPORT.md`](./ADDENDUM_POST_IMPORT_EDIT_REPORT.md): Phase 3B final `PASS` — `8/8` scenarios, `15/15` cross-mode rendering surfaces (incl. `V32-054` & `V32-055` fixes + `/api/progress/due` + `#100` filtered bank row numbers), `22/22` Playwright E2E green.
+- [`SECURITY_REGRESSION.md` §6](./SECURITY_REGRESSION.md): `PASS` — `7/7` live 4-role RBAC / cross-tenant `media_id` / 4-vector pre-submit explanation-media anti-leak / `409` delete guard / `missing_media` privacy checks + `153/153` security unit & live RLS tests green.
+- [`PERFORMANCE_BEFORE_AFTER.md` §8](./PERFORMANCE_BEFORE_AFTER.md): `PASS` — 500Q bank `0` full reloads, `0px` scroll drift, `0.82×` 20-cycle `Save & Next` endurance, `0` leaked blob URLs (`3/3` revoked), `0.0 KB` initial cold-load impact from lazy `UnifiedQuestionEditorModal`, `MediaAttachmentEditor`, and `@tiptap`.
+- [`REAL_USER_REPORT.md` §7](./REAL_USER_REPORT.md): `APPROVED / PASS` — Student experience jumped from `3.0/10` -> **`9.5/10`** (`0` console/page/HTTP `>=400` errors; minor P3 filtered bank row number polish subsequently closed and verified in Phase 3B `#108`).
+- [`ISSUE_TRACKER.md` §6](./ISSUE_TRACKER.md): All 3 Addendum P1 issues (`V32-053`, `V32-054`, `V32-055`) verified and `CLOSED`.
+
+### 8.5 Addendum Disposable Cleanup & Real Owner Data Preservation Attestation
+
+| Entity / Table / Bucket | Pre-Walkthrough (`dbPre`) | Post-Walkthrough (`dbPost`) | Disposable Cleanup Verified | Status |
+| :--- | ---: | ---: | :--- | :---: |
+| `auth.users` | **`2`** | **`2`** | `1` `v32-final-add-*` deleted; `disposableUsers: []` (`0`) | **100% Preserved** |
+| `profiles` / `user_preferences` | `2` / `2` | `2` / `2` | Cascaded cleanly | **100% Preserved** |
+| `study_sets` | **`4`** | **`4`** | `1` deleted | **100% Preserved** |
+| `questions` / `question_options` | **`599`** / `2,400` | **`599`** / `2,400` | `4` deleted | **100% Preserved** |
+| `exam_attempts` | **`2`** | **`2`** | `1` deleted | **100% Preserved** |
+| `study_sessions` / `user_question_progress` | `27` / `87` | `27` / `87` | Cascaded cleanly | **100% Preserved** |
+| `media_assets` | `0` | `0` | **`9`** deleted | **100% Preserved** |
+| Storage (`study-media` + `study-temp` under test prefix) | `0` | `0` | **`9`** objects removed; `remainingStorageUnderUser: 0` | **100% Cleaned** |
+
+### 8.6 Updated Binding Sign-Off (V3.2 + Addendum `V32-053`)
+- **Updated Release Decision:** **`PRODUCTION READY WITH DOCUMENTED MINOR LIMITATIONS`** *(same 4 non-blocking V3.2 minor limitations from §5.2 apply — zero new limitations introduced by Addendum `V32-053` / Migration `0020`)*
+- **Blocking Defects (`P0` / `P1`):** **`0`** (all `55` tracked issues resolved: `53` `CLOSED`, `2` `MITIGATED / DOCUMENTED`, `0` `OPEN`)
+- **Verified Live Production URL:** `https://studyhub-three-mauve.vercel.app` (`studyhub-kmvmqknb9`, `31d6dfb`, `hkg1::hnd1`, Migration `0020` live)
+- **Signed:** Agent 10 (`final-auditor`, Independent Final Auditor) — `2026-11-25T19:18Z`
