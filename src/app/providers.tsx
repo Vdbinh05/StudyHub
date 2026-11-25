@@ -14,7 +14,7 @@ const LazyOfflinePwaProvider = dynamic(
 
 const EXACT_ROUTE_TITLES: Record<string, { vi: string; en: string }> = {
   "/": {
-    vi: "StudyHub — Nền tảng tự học & luyện thi cá nhân",
+    vi: "StudyHub — Học thông minh · Ôn tập hiệu quả · Thi thử linh hoạt",
     en: "StudyHub — Personal Self-Study & Exam Platform",
   },
   "/login": { vi: "Đăng nhập | StudyHub", en: "Sign in | StudyHub" },

@@ -10,6 +10,7 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react";
+import { BrandLogo } from "@/components/layout/brand-logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -55,11 +56,12 @@ function OfflinePageContent() {
       {/* Top Bar */}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <div className="bg-primary text-primary-foreground flex size-9 items-center justify-center rounded-lg font-bold tracking-tight">
-            SH
-          </div>
+          <BrandLogo variant="icon" size="md" />
           <div>
-            <p className="text-sm font-semibold leading-tight">StudyHub</p>
+            <p className="text-sm font-extrabold leading-tight tracking-tight">
+              <span className="text-brand-navy dark:text-foreground">Study</span>
+              <span className="text-primary">Hub</span>
+            </p>
             <p className="text-muted-foreground text-xs">
               {vi ? "Trung tâm học ngoại tuyến" : "Offline Study Hub"}
             </p>

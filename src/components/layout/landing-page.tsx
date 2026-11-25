@@ -2,7 +2,6 @@ import * as React from "react";
 import Link from "next/link";
 import {
   ArrowRight,
-  BookOpen,
   CheckCircle2,
   Clock,
   FileCheck2,
@@ -239,7 +238,7 @@ function LandingBody({ locale }: { locale: Locale }) {
                       : "100% Exact Answer-Key Grading"}
                   </span>
                 </Badge>
-                <Badge variant="secondary">
+                <Badge variant="gold">
                   {vi
                     ? "Miễn phí · Không giới hạn"
                     : "Free · Zero Limits"}
@@ -248,8 +247,8 @@ function LandingBody({ locale }: { locale: Locale }) {
 
               <h1 className="text-foreground text-2xl leading-tight font-bold tracking-tight text-balance sm:text-4xl lg:text-5xl lg:leading-[1.14]">
                 {vi
-                  ? "Tự học, ôn thẻ ghi nhớ và luyện thi trắc nghiệm chính xác tuyệt đối."
-                  : "Study flashcards, drill question banks, and run timed mock exams with zero guesswork."}
+                  ? "Tự học thông minh, ôn tập hiệu quả và thi thử linh hoạt mỗi ngày."
+                  : "Study flashcards, review effectively, and run flexible mock exams."}
               </h1>
 
               <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed sm:text-base lg:text-lg">
@@ -321,8 +320,12 @@ function LandingBody({ locale }: { locale: Locale }) {
               </dl>
             </div>
 
-            {/* Structured Product Workflow Preview */}
-            <div className="lg:col-span-5">
+            {/* Brand Visual Showcase & 3-Step Workflow Preview */}
+            <div className="space-y-4 lg:col-span-5">
+              <div className="border-border bg-card flex items-center justify-center rounded-2xl border px-6 py-5 shadow-xs">
+                <BrandLogo variant="full" size="lg" priority="high" />
+              </div>
+
               <Card className="border-border shadow-sm">
                 <CardHeader className="border-border border-b pb-3">
                   <div className="flex items-center justify-between gap-2">
@@ -340,13 +343,13 @@ function LandingBody({ locale }: { locale: Locale }) {
                     </Badge>
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-3 pt-1">
+                <CardContent className="space-y-2.5 pt-1">
                   {workflowSteps.map((item) => (
                     <div
                       key={item.step}
-                      className="bg-secondary/60 flex items-start gap-3 rounded-lg p-3"
+                      className="bg-secondary/75 border-border/60 flex items-start gap-3 rounded-lg border p-3"
                     >
-                      <span className="bg-primary/10 text-primary flex size-7 shrink-0 items-center justify-center rounded-md font-mono text-xs font-bold tabular-nums">
+                      <span className="bg-primary-subtle text-primary-subtle-foreground flex size-7 shrink-0 items-center justify-center rounded-md font-mono text-xs font-bold tabular-nums">
                         {item.step}
                       </span>
                       <div className="min-w-0">
@@ -385,14 +388,27 @@ function LandingBody({ locale }: { locale: Locale }) {
             </div>
 
             <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {studyModes.map((mode) => {
+              {studyModes.map((mode, idx) => {
                 const Icon = mode.icon;
+                const iconTone =
+                  idx % 4 === 0
+                    ? "bg-primary-subtle text-primary"
+                    : idx % 4 === 1
+                      ? "bg-accent text-accent-foreground"
+                      : idx % 4 === 2
+                        ? "bg-success-subtle text-success-subtle-foreground"
+                        : "bg-brand-gold-subtle text-brand-gold-foreground";
                 return (
                   <div
                     key={mode.title}
-                    className="border-border bg-background flex flex-col gap-2 rounded-xl border p-4"
+                    className="border-border bg-background hover:border-primary/40 flex flex-col gap-2 rounded-xl border p-4 transition-colors"
                   >
-                    <div className="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg">
+                    <div
+                      className={cn(
+                        "flex size-9 items-center justify-center rounded-lg",
+                        iconTone,
+                      )}
+                    >
                       <Icon className="size-4.5" aria-hidden="true" />
                     </div>
                     <h3 className="text-foreground text-sm font-semibold">
@@ -496,7 +512,7 @@ function LandingBody({ locale }: { locale: Locale }) {
         {/* Bottom CTA */}
         <section className="cv-auto py-9 sm:py-12">
           <div className="mx-auto flex max-w-3xl flex-col items-center gap-3 px-4 text-center sm:px-6">
-            <BookOpen className="text-primary size-7" aria-hidden="true" />
+            <BrandLogo variant="icon" size="lg" priority="lazy" />
             <h2 className="text-foreground text-xl font-bold tracking-tight sm:text-2xl">
               {vi
                 ? "Sẵn sàng xây dựng thư viện ôn thi của riêng bạn?"
@@ -531,12 +547,12 @@ function LandingBody({ locale }: { locale: Locale }) {
 
       <footer className="border-border bg-card border-t py-6">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 text-xs sm:flex-row sm:px-6">
-          <div className="flex items-center gap-3">
-            <BrandLogo />
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 sm:justify-start">
+            <BrandLogo priority="lazy" />
             <span className="text-muted-foreground">
               {vi
-                ? "Nền tảng tự học & luyện thi cá nhân"
-                : "Personal study & exam prep workspace"}
+                ? "Học thông minh · Ôn tập hiệu quả · Thi thử linh hoạt"
+                : "Study Smart · Review Effectively · Flexible Mock Exams"}
             </span>
           </div>
           <div className="text-muted-foreground flex flex-wrap items-center gap-4">

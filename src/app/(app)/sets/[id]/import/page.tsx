@@ -25,7 +25,7 @@ export default async function StudySetImportPage({ params }: ImportPageProps) {
       <div className="mx-auto max-w-2xl px-4 py-12">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base text-amber-700 dark:text-amber-400">
+            <CardTitle className="text-warning-subtle-foreground flex items-center gap-2 text-base">
               <AlertCircle className="size-5" aria-hidden="true" />
               Chưa cấu hình kết nối Supabase
             </CardTitle>

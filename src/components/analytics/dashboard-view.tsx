@@ -421,7 +421,7 @@ export function DashboardView() {
                     : "Home"}
               </h1>
               {summary.streakDays > 0 && (
-                <Badge variant="warning" className="font-mono tabular-nums">
+                <Badge variant="gold" className="font-mono tabular-nums">
                   <Flame className="size-3.5" aria-hidden="true" />
                   <span>
                     {summary.streakDays} {vi ? "ngày" : "d"}
@@ -528,7 +528,7 @@ export function DashboardView() {
               )}
             </section>
           ) : summary.continueSet ? (
-            <Card>
+            <Card className="border-primary/25 shadow-xs">
               <CardHeader className="pb-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">

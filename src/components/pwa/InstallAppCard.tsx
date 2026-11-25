@@ -6,7 +6,6 @@ import {
   Download,
   PlusSquare,
   Share,
-  Smartphone,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -69,9 +68,18 @@ export function InstallAppCard({
     <Card className={cn("border-border", className)}>
       <CardHeader className="gap-1.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <div className="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg">
-              <Smartphone className="size-4" aria-hidden="true" />
+          <div className="flex items-center gap-2.5">
+            <div className="border-border bg-background flex size-10 shrink-0 items-center justify-center rounded-xl border p-1 shadow-xs">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/icons/icon-192.png"
+                alt=""
+                aria-hidden="true"
+                width={32}
+                height={32}
+                loading="lazy"
+                className="size-8 object-contain"
+              />
             </div>
             <CardTitle className="text-base">
               {i18n

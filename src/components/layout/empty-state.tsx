@@ -26,7 +26,7 @@ export function EmptyState({
         className,
       )}
     >
-      <div className="bg-secondary text-muted-foreground mb-4 flex size-12 items-center justify-center rounded-xl">
+      <div className="border-brand-soft-blue/50 bg-primary-subtle text-primary mb-4 flex size-12 items-center justify-center rounded-xl border">
         <Icon className="size-6" aria-hidden="true" />
       </div>
       <h2 className="text-foreground text-base font-semibold tracking-tight">

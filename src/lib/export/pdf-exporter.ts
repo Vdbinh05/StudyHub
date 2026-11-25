@@ -376,13 +376,13 @@ function getPalette(grayscale: boolean): Palette {
     };
   }
   return {
-    text: rgb(0.08, 0.1, 0.16),
-    muted: rgb(0.38, 0.43, 0.51),
-    primary: rgb(0.26, 0.28, 0.78), // Academic Indigo
-    success: rgb(0.09, 0.5, 0.26), // Crisp Green
+    text: rgb(0.08, 0.13, 0.31), // StudyHub Text Dark (#14214f)
+    muted: rgb(0.29, 0.36, 0.51), // StudyHub Muted (#4a5b82)
+    primary: rgb(0.2, 0.35, 0.86), // StudyHub Primary Blue (#3458db)
+    success: rgb(0.08, 0.5, 0.33), // StudyHub Harmonized Mint-Green (#157f54)
     danger: rgb(0.73, 0.14, 0.16), // Crisp Red
-    border: rgb(0.81, 0.84, 0.89),
-    surface: rgb(0.96, 0.97, 0.99),
+    border: rgb(0.85, 0.91, 1.0), // StudyHub Border Soft (#d9e7ff)
+    surface: rgb(0.97, 0.98, 1.0), // StudyHub Surface Light (#f7faff)
   };
 }
 

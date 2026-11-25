@@ -3,80 +3,93 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ============================================================================
- * StudyHub V2.0 — Design System Tokens
- * Aesthetic: Minimal, calm, academic SaaS (Indigo primary, Blue accent,
- * Green success, Red error, Amber warning, Neutral Slate surfaces).
- * WCAG 2.2 AA verified contrast (>= 4.5:1 text, >= 3.0:1 UI boundaries);
- * targeted prefers-reduced-motion & user preference support; print styles.
+ * StudyHub — Brand Design System Tokens
+ * Palette derived directly from the StudyHub logo:
+ * - Primary Navy (#1d2f7a), Primary Blue (#3458db), Soft Blue (#a9d2ff)
+ * - Accent Gold (#f3c64c, restrained highlights), Lavender (#8a7cf7), Mint (#8ed8b7)
+ * - Text Dark (#14214f), Surface Light (#f7faff), Border Soft (#d9e7ff)
+ * WCAG 2.2 AA verified contrast (>= 4.5:1 text, >= 3.0:1 UI boundaries) in
+ * both Light and Dark mode; Forced Colors Mode fallbacks; print styles.
  * ========================================================================== */
 
 :root {
   color-scheme: light dark;
 
-  /* Base surfaces (Slate neutral) */
-  --background: #f8fafc;
-  --foreground: #0f172a;
+  /* Base surfaces — bright, calm academic tint */
+  --background: #f7faff;
+  --foreground: #14214f;
   --card: #ffffff;
-  --card-foreground: #0f172a;
+  --card-foreground: #14214f;
   --popover: #ffffff;
-  --popover-foreground: #0f172a;
+  --popover-foreground: #14214f;
 
-  /* Primary: Indigo (6.29:1 with #ffffff) */
-  --primary: #4f46e5;
+  /* Brand core — StudyHub Primary Blue (5.89:1 with #ffffff) & Navy */
+  --primary: #3458db;
   --primary-foreground: #ffffff;
-  --primary-hover: #4338ca;
+  --primary-hover: #2545be;
+  --primary-subtle: #ebf3ff;
+  --primary-subtle-foreground: #1d2f7a;
+
+  /* Brand accents drawn directly from logo */
+  --brand-navy: #1d2f7a;
+  --brand-soft-blue: #a9d2ff;
+  --brand-gold: #f3c64c;
+  --brand-gold-subtle: #fef9e7;
+  --brand-gold-foreground: #855800;
+  --brand-lavender: #8a7cf7;
+  --brand-mint: #8ed8b7;
 
   /* Secondary / Subtle surface */
-  --secondary: #f1f5f9;
-  --secondary-foreground: #1e293b;
+  --secondary: #eef4ff;
+  --secondary-foreground: #1d2f7a;
 
   /* Muted */
-  --muted: #f1f5f9;
-  --muted-foreground: #475569;
+  --muted: #eef4ff;
+  --muted-foreground: #4a5b82;
 
-  /* Accent: Blue (5.17:1 with #ffffff) */
-  --accent: #eff6ff;
-  --accent-foreground: #1d4ed8;
-  --accent-solid: #2563eb;
+  /* Accent: Soft Blue highlight + Navy text (10.57:1) */
+  --accent: #e6f1ff;
+  --accent-foreground: #1d2f7a;
+  --accent-solid: #1d2f7a;
   --accent-solid-foreground: #ffffff;
 
-  /* Semantic status — WCAG 2.2 AA (>= 4.5:1 text contrast) */
-  --success: #15803d;
+  /* Semantic status — WCAG 2.2 AA (>= 4.5:1 text contrast), harmonized with logo Mint & Gold */
+  --success: #157f54;
   --success-foreground: #ffffff;
-  --success-subtle: #f0fdf4;
-  --success-subtle-foreground: #15803d;
+  --success-subtle: #ecfdf5;
+  --success-subtle-foreground: #116945;
 
   --destructive: #dc2626;
   --destructive-foreground: #ffffff;
   --destructive-subtle: #fef2f2;
   --destructive-subtle-foreground: #b91c1c;
 
-  --warning: #b45309;
+  --warning: #9a5b00;
   --warning-foreground: #ffffff;
-  --warning-subtle: #fffbeb;
-  --warning-subtle-foreground: #b45309;
+  --warning-subtle: #fef8e6;
+  --warning-subtle-foreground: #854d0e;
 
-  /* Borders, inputs (>= 3.0:1 on #ffffff per WCAG 1.4.11: 4.76:1), rings */
-  --border: #e2e8f0;
-  --input: #64748b;
-  --ring: #4f46e5;
+  /* Borders (#d9e7ff Border Soft), inputs (4.19:1 on #ffffff per WCAG 1.4.11), rings */
+  --border: #d9e7ff;
+  --input: #667ca8;
+  --ring: #3458db;
 
-  /* Chart palette */
-  --chart-1: #4f46e5;
-  --chart-2: #2563eb;
-  --chart-3: #15803d;
-  --chart-4: #b45309;
-  --chart-5: #dc2626;
+  /* Chart palette — StudyHub logo colors */
+  --chart-1: #3458db;
+  --chart-2: #8a7cf7;
+  --chart-3: #157f54;
+  --chart-4: #d99b18;
+  --chart-5: #1d2f7a;
 
   /* Sidebar */
   --sidebar: #ffffff;
-  --sidebar-foreground: #0f172a;
-  --sidebar-primary: #4f46e5;
+  --sidebar-foreground: #14214f;
+  --sidebar-primary: #3458db;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f1f5f9;
-  --sidebar-accent-foreground: #0f172a;
-  --sidebar-border: #e2e8f0;
-  --sidebar-ring: #4f46e5;
+  --sidebar-accent: #edf4ff;
+  --sidebar-accent-foreground: #1d2f7a;
+  --sidebar-border: #d9e7ff;
+  --sidebar-ring: #3458db;
 
   /* Radius scale */
   --radius: 0.625rem;
@@ -90,70 +103,81 @@
 :root.dark {
   color-scheme: dark;
 
-  /* Base surfaces (Dark Slate neutral) */
-  --background: #0b1120;
-  --foreground: #f8fafc;
-  --card: #111827;
-  --card-foreground: #f8fafc;
-  --popover: #111827;
-  --popover-foreground: #f8fafc;
+  /* Base surfaces — calm deep StudyHub navy (zero harsh pure black, zero neon) */
+  --background: #0b1224;
+  --foreground: #f1f6ff;
+  --card: #111b33;
+  --card-foreground: #f1f6ff;
+  --popover: #111b33;
+  --popover-foreground: #f1f6ff;
 
-  /* Primary: Indigo — WCAG 2.2 AA (6.29:1 / 7.90:1 with #ffffff) */
-  --primary: #4f46e5;
-  --primary-foreground: #ffffff;
-  --primary-hover: #4338ca;
+  /* Primary: Luminous StudyHub Blue — WCAG 2.2 AA (6.52:1 button, 6.05:1 links on card) */
+  --primary: #6b96ff;
+  --primary-foreground: #09132b;
+  --primary-hover: #82a7ff;
+  --primary-subtle: #18274d;
+  --primary-subtle-foreground: #a9d2ff;
+
+  /* Brand accents adapted for Dark Mode */
+  --brand-navy: #a9d2ff;
+  --brand-soft-blue: #274480;
+  --brand-gold: #f3c64c;
+  --brand-gold-subtle: #2f2612;
+  --brand-gold-foreground: #f7d87c;
+  --brand-lavender: #a296fa;
+  --brand-mint: #8ed8b7;
 
   /* Secondary / Subtle surface */
-  --secondary: #1e293b;
-  --secondary-foreground: #f1f5f9;
+  --secondary: #172342;
+  --secondary-foreground: #e6f0ff;
 
   /* Muted */
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
+  --muted: #172342;
+  --muted-foreground: #9db2d9;
 
-  /* Accent: Blue — WCAG 2.2 AA (5.17:1 with #ffffff) */
-  --accent: #172554;
-  --accent-foreground: #93c5fd;
-  --accent-solid: #2563eb;
+  /* Accent: Deep Brand Navy + Soft Blue foreground (9.03:1) */
+  --accent: #182952;
+  --accent-foreground: #a9d2ff;
+  --accent-solid: #3458db;
   --accent-solid-foreground: #ffffff;
 
-  /* Semantic status — WCAG 2.2 AA */
-  --success: #22c55e;
-  --success-foreground: #052e16;
-  --success-subtle: #052e16;
-  --success-subtle-foreground: #86efac;
+  /* Semantic status — WCAG 2.2 AA harmonized with logo Mint & Gold */
+  --success: #34d399;
+  --success-foreground: #052e1e;
+  --success-subtle: #0c2c23;
+  --success-subtle-foreground: #8ed8b7;
 
   --destructive: #dc2626;
   --destructive-foreground: #ffffff;
-  --destructive-subtle: #450a0a;
+  --destructive-subtle: #3b1219;
   --destructive-subtle-foreground: #fca5a5;
 
-  --warning: #f59e0b;
-  --warning-foreground: #451a03;
-  --warning-subtle: #451a03;
-  --warning-subtle-foreground: #fcd34d;
+  --warning: #f3c64c;
+  --warning-foreground: #2a1d04;
+  --warning-subtle: #2e230d;
+  --warning-subtle-foreground: #f7d87c;
 
-  /* Borders, inputs (>= 3.0:1 on #111827 per WCAG 1.4.11: 3.73:1), rings */
-  --border: #1e293b;
-  --input: #64748b;
-  --ring: #818cf8;
+  /* Borders, inputs (4.57:1 on #111b33 per WCAG 1.4.11), rings */
+  --border: #1f3056;
+  --input: #6b84b8;
+  --ring: #74a3ff;
 
-  /* Chart palette */
-  --chart-1: #818cf8;
-  --chart-2: #60a5fa;
-  --chart-3: #4ade80;
-  --chart-4: #fbbf24;
-  --chart-5: #f87171;
+  /* Chart palette — legible StudyHub tones on dark navy */
+  --chart-1: #6b96ff;
+  --chart-2: #a296fa;
+  --chart-3: #8ed8b7;
+  --chart-4: #f3c64c;
+  --chart-5: #a9d2ff;
 
-  /* Sidebar — WCAG 2.2 AA (6.29:1 with #ffffff) */
-  --sidebar: #0f172a;
-  --sidebar-foreground: #f8fafc;
-  --sidebar-primary: #4f46e5;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #1e293b;
-  --sidebar-accent-foreground: #f8fafc;
-  --sidebar-border: #1e293b;
-  --sidebar-ring: #818cf8;
+  /* Sidebar */
+  --sidebar: #0e172e;
+  --sidebar-foreground: #f1f6ff;
+  --sidebar-primary: #6b96ff;
+  --sidebar-primary-foreground: #09132b;
+  --sidebar-accent: #182952;
+  --sidebar-accent-foreground: #a9d2ff;
+  --sidebar-border: #1f3056;
+  --sidebar-ring: #74a3ff;
 }
 
 @theme inline {
@@ -169,6 +193,15 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary-hover: var(--primary-hover);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-primary-subtle-foreground: var(--primary-subtle-foreground);
+  --color-brand-navy: var(--brand-navy);
+  --color-brand-soft-blue: var(--brand-soft-blue);
+  --color-brand-gold: var(--brand-gold);
+  --color-brand-gold-subtle: var(--brand-gold-subtle);
+  --color-brand-gold-foreground: var(--brand-gold-foreground);
+  --color-brand-lavender: var(--brand-lavender);
+  --color-brand-mint: var(--brand-mint);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -231,8 +264,14 @@
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
+    accent-color: var(--primary);
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     overflow-wrap: break-word;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-foreground);
   }
 
   h1,
@@ -457,6 +496,16 @@ html[data-large-text="true"] body {
   line-height: 1.65;
 }
 
+/* Forced Colors Mode (Windows High Contrast) safe fallbacks */
+@media (forced-colors: active) {
+  :root {
+    --border: CanvasText;
+    --ring: Highlight;
+    --primary: Highlight;
+    --primary-foreground: HighlightText;
+  }
+}
+
 /* Printable study sheet stylesheet (WCAG & PRD printable sheets) */
 @media print {
   @page {
@@ -466,7 +515,7 @@ html[data-large-text="true"] body {
   html,
   body {
     background: #ffffff !important;
-    color: #0f172a !important;
+    color: #14214f !important;
     color-scheme: light !important;
     font-size: 11pt;
   }
@@ -491,6 +540,6 @@ html[data-large-text="true"] body {
   tr {
     break-inside: avoid;
     box-shadow: none !important;
-    border-color: #cbd5e1 !important;
+    border-color: #c5d7f7 !important;
   }
 }
