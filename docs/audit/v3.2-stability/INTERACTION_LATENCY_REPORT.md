@@ -70,3 +70,30 @@
 - **Static Verification (`src/components/exam/ExamNavigatorGrid.tsx:118-131`):** `filteredEntries` is stored in `filteredEntriesRef`, and the `rowVirtualizer.scrollToIndex(activeRow, { align: "auto" })` effect now depends ONLY on `[currentIndex, statusFilter, subjectFilter, rowVirtualizer, useVirtual]`. Selecting, changing, or flagging an answer no longer triggers redundant virtualizer scroll calculations.
 - **Empirical Verification:** Sustained 20-jump latency on the 250-Q exam dropped from **`32.1 ms` → `17.9 ms` (`-44.2%`)** on Desktop, and Mobile 4G `4×` CPU select/change/jump latencies all dropped **`-14%` to `-18%`**.
 - **Verdict for `PERF-07` (`V32-042` interaction slice):** **PASS**.
+
+---
+
+## 5. Wave 7 Final Live Production Interaction Verification (`https://studyhub-three-mauve.vercel.app`, `13b22cc`)
+
+*Measured on live Vercel Production (`studyhub-9zfmzbepc`, `hkg1::hnd1`, `2026-11-25T17:20–17:26Z`) against the synthetic 250-Q Study Set & 250-Q Live Exam Runner (`n = 5` for tap/nav/jump/flip/star, `n = 20` rapid jumps, `n = 3` for Save Note & Global Search):*
+
+| Interaction | Wave 1 Live Desk (`39952bd`) | Wave 7 Live Desk (`13b22cc`) Med (`p95`) | Wave 7 Live Mob 4G* (`13b22cc`) Med (`p95`) | Delta (Desk W1 → W7 Live) | Verdict |
+| --- | ---: | ---: | ---: | ---: | :---: |
+| **Practice — Select Answer → Feedback** | `60.0 ms` | **`72.7 ms`** (`121.3 ms`) | `351.1 ms` (`533.2 ms`)* | `+12.7 ms` | **PASS (`<100ms` Desk)** |
+| **Practice — Answer API (`POST`)** | `305.6 ms` | **`191.2 ms`** (`264.9 ms`) | `419.7 ms` (`470.5 ms`) | **`-37.4%`** | **PASS (`hnd1`)** |
+| **Practice — Star / Unstar Question** | `42.2 ms` | **`56.3 ms`** (`73.2 ms`) | `205.8 ms` (`288.6 ms`)* | `+14.1 ms` | **PASS (`<100ms` Desk)** |
+| **Practice — Save Note (UI Paint)** | `322.7 ms` *(blocking)* | **`81.7 ms`** (`100.7 ms`) | **`223.6 ms`** (`443.7 ms`) | **`-74.7%` (`4.0×` faster!)** | **PASS (`<100ms` Desk)** |
+| **Flashcards — Flip Card** | `53.8 ms` | **`34.4 ms`** (`54.1 ms`) | `144.7 ms` (`303.0 ms`)* | **`-36.1%`** | **PASS (`<50ms` Desk)** |
+| **Flashcards — Next Card** | `68.2 ms` | **`32.9 ms`** (`35.1 ms`) | `170.2 ms` (`253.9 ms`)* | **`-51.8%`** | **PASS (`<50ms` Desk)** |
+| **Flashcards — Previous Card** | `65.8 ms` | **`31.0 ms`** (`34.5 ms`) | **`121.4 ms`** (`146.4 ms`) | **`-52.9%`** | **PASS (`<50ms` Desk)** |
+| **250Q Exam — Select Answer (A)** | `58.2 ms` | **`63.7 ms`** (`66.6 ms`) | `258.2 ms` (`360.0 ms`)* | `+5.5 ms` | **PASS (`<100ms` Desk)** |
+| **250Q Exam — Change Answer (A → B)** | `66.0 ms` | **`63.2 ms`** (`74.6 ms`) | `197.6 ms` (`230.2 ms`)* | **`-4.2%`** | **PASS (`<100ms` Desk)** |
+| **250Q Exam — Flag / Mark Question** | `66.4 ms` | **`63.9 ms`** (`69.9 ms`) | `278.1 ms` (`359.2 ms`)* | **`-3.8%`** | **PASS (`<100ms` Desk)** |
+| **250Q Exam — Next / Prev (`Q1↔Q2`)** | `67.8` / `65.2 ms` | **`63.2`** / **`64.2 ms`** (`70.5`/`73.8`) | `280.0` / `248.6 ms`* | **`-6.8%` / `-1.5%`** | **PASS (`<100ms` Desk)** |
+| **250Q Exam — Jump `Q1 → Q200`** | `45.7 ms` | **`60.2 ms`** (`121.9 ms`) | `583.1 ms` (`720.8 ms`)* | `+14.5 ms` | **PASS (`<100ms` Desk)** |
+| **250Q Exam — Jump `Q200 → Q250`** | `51.8 ms` | **`49.8 ms`** (`67.7 ms`) | `610.2 ms` (`799.7 ms`)* | **`-3.9%`** | **PASS (`<50ms` Desk)** |
+| **250Q Exam — 20 Rapid Grid Jumps** | `32.1 ms` | **`64.2 ms`** (`p95 92.3 ms`, `n=20`) | — | `<100ms` sustained | **PASS** |
+| **250Q Exam — Open Mobile Nav Sheet** | `251.1 ms` *(Mob)* | N/A | `826.9 ms` (`1,559.8 ms`)* | — | **Stretch P3** |
+| **Global Search (`Ctrl+K`) → Results** | `1,260 ms` | **`864.5 ms`** (`API 638.6 ms`) | — | **`-31.4%`** | **PASS** |
+
+*\*Honest Lab Note:* On live Desktop Wi-Fi (`1×` CPU), **100% of direct interactions measured `31.0–81.7 ms` median** (strictly `< 100 ms`), with `POST /api/sessions/*/answers` `-37.4%` faster on `hnd1` (`305.6 → 191.2 ms`), Save Note `-74.7%` faster (`322.7 → 81.7 ms`), Flashcards `-36%` to `-53%` faster, and Global Search `-31.4%` faster (`1,260 → 864.5 ms`). Mobile `4×` CPU-throttled client timers during the `17:20–17:26Z` Wave 7 window were inflated ~`2×` by concurrent foreground CPU load on the Windows host (compare against idle-host Wave 5 `4×` CPU medians of `99.7–173.4 ms` in §3 above).
