@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
-import { fetchCycleSubjectProgress } from "@/lib/supabase/coverage-helper";
+import {
+  computeLiveCoverageMetrics,
+  fetchCycleSubjectProgress,
+} from "@/lib/supabase/coverage-helper";
 import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import { uuidSchema } from "@/lib/validation/common";
 import type { CoverageCycle, CoverageCycleAttempt } from "@/types/domain";
@@ -95,36 +98,39 @@ export async function GET(
       ? attemptMeta.get(cycle.active_attempt_id)
       : undefined;
 
-    const remainingCount = Math.max(
-      0,
-      cycle.total_questions - cycle.completed_count - cycle.assigned_count,
+    const live = await computeLiveCoverageMetrics(
+      supabase,
+      user.id,
+      cycle,
+      subjectProgress,
+      Boolean(activeMeta && activeMeta.status === "in_progress"),
     );
-    const progressPercent =
-      cycle.total_questions > 0
-        ? Math.round((cycle.completed_count / cycle.total_questions) * 10000) /
-          100
-        : 0;
 
     const enriched: CoverageCycle = {
       ...cycle,
+      status: live.status,
+      completed_at: live.completed_at,
+      assigned_count: live.assigned_count,
+      active_attempt_id: live.active_attempt_id,
       source_snapshot: (Array.isArray(cycle.source_snapshot)
         ? cycle.source_snapshot
         : []) as CoverageCycle["source_snapshot"],
       filter_snapshot: (cycle.filter_snapshot ?? {}) as Record<string, unknown>,
-      remaining_count: remainingCount,
-      progress_percent: progressPercent,
+      remaining_count: live.remaining_count,
+      progress_percent: live.progress_percent,
       subject_progress: subjectProgress,
       attempts,
-      active_attempt: activeMeta
-        ? {
-            id: activeMeta.id,
-            status: activeMeta.status,
-            total_questions: activeMeta.total_questions,
-            answered_count: activeMeta.answered_count,
-            started_at: activeMeta.started_at,
-            expires_at: activeMeta.expires_at,
-          }
-        : null,
+      active_attempt:
+        live.active_attempt_id && activeMeta
+          ? {
+              id: activeMeta.id,
+              status: activeMeta.status,
+              total_questions: activeMeta.total_questions,
+              answered_count: activeMeta.answered_count,
+              started_at: activeMeta.started_at,
+              expires_at: activeMeta.expires_at,
+            }
+          : null,
     };
 
     return apiSuccess(enriched);

@@ -203,6 +203,20 @@ export function StepSourceInput({
                         ? "Detecting questions, answers, and images…"
                         : "Đang nhận diện câu hỏi, đáp án và hình ảnh…"}
                     </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-1 min-h-9"
+                      onClick={() => {
+                        onSelectFile(null);
+                        if (fileInputRef.current) fileInputRef.current.value = "";
+                      }}
+                    >
+                      {locale === "en"
+                        ? "Cancel & choose another file"
+                        : "Hủy & chọn tệp khác"}
+                    </Button>
                   </div>
                 ) : (
                   <>

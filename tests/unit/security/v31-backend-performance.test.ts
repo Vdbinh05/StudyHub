@@ -135,12 +135,12 @@ describe("StudyHub V3.1 Backend & Region Performance Hardening", () => {
     expect(isMissingRpcError(null)).toBe(false);
   });
 
-  it("verifies signed-url private 30-min cache header and compact questions summary mode", () => {
+  it("verifies signed-url short private cache header (V32-008) and compact questions summary mode", () => {
     const signedUrlSrc = readFileSync(
       path.resolve(process.cwd(), "src/app/api/uploads/signed-url/route.ts"),
       "utf8",
     );
-    expect(signedUrlSrc).toContain('"Cache-Control", "private, max-age=1800"');
+    expect(signedUrlSrc).toContain('"private, max-age=60, must-revalidate"');
     expect(signedUrlSrc).toContain('"Vary", "Cookie"');
 
     const questionsSrc = readFileSync(

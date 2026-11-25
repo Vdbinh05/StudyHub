@@ -5,7 +5,10 @@ import {
   parseImportInput,
   type ExtendedImportPreviewResult,
 } from "@/lib/import/index";
-import { normalizeForComparison } from "@/lib/import/text-utils";
+import {
+  mapWithConcurrency,
+  normalizeForComparison,
+} from "@/lib/import/text-utils";
 import { validateImportBatch } from "@/lib/import/validator";
 import {
   ImportSecurityError,
@@ -28,6 +31,7 @@ import { streamJsonResponse } from "@/lib/security/stream-response";
 import {
   consumeTempUploadBytes,
   stageTempImportMedia,
+  TEMP_STORAGE_BUCKET,
 } from "@/lib/supabase/temp-storage";
 import type { ImportOptions } from "@/types/import";
 import { fetchExistingQuestionFingerprints } from "../_existing-fingerprints";
@@ -335,55 +339,92 @@ export async function POST(request: Request) {
     }
 
     if (totalInlineMediaChars > STAGE_PREVIEW_MEDIA_THRESHOLD_BYTES) {
-      const stagedPathByRId = new Map<string, string>();
+      // Decode & deduplicate by SHA-256 first so identical images across rIds only upload once
+      const decodedBySha256 = new Map<
+        string,
+        { sha256: string; bytes: Uint8Array; mime: string; ext: string }
+      >();
+      const sha256ByRId = new Map<string, string>();
       for (const [rId, dataUrl] of uniqueDataUrlByRId.entries()) {
         const decoded = decodeSafeRasterDataUrl(dataUrl);
         if (!decoded) continue;
         const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
+        sha256ByRId.set(rId, sha256);
+        if (!decodedBySha256.has(sha256)) {
+          decodedBySha256.set(sha256, { sha256, ...decoded });
+        }
+      }
+
+      // Bound-parallelize Storage staging (concurrency = 6) to eliminate serial upload waterfall (DB-10)
+      const stagedPathBySha256 = new Map<string, string>();
+      const uniqueBlobs = Array.from(decodedBySha256.values());
+      await mapWithConcurrency(uniqueBlobs, 6, async (blob) => {
         try {
           const { storagePath: stagedMediaPath } = await stageTempImportMedia(supabase, {
             userId: user.id,
-            sha256,
-            extension: decoded.ext,
-            mimeType: decoded.mime,
-            bytes: decoded.bytes,
+            sha256: blob.sha256,
+            extension: blob.ext,
+            mimeType: blob.mime,
+            bytes: blob.bytes,
           });
-          stagedPathByRId.set(rId, stagedMediaPath);
+          stagedPathBySha256.set(blob.sha256, stagedMediaPath);
         } catch {
           // Graceful fallback if study-temp bucket is unavailable in local dev
+        }
+      });
+
+      const stagedPathByRId = new Map<string, string>();
+      for (const [rId, sha256] of sha256ByRId.entries()) {
+        const stagedPath = stagedPathBySha256.get(sha256);
+        if (stagedPath) {
+          stagedPathByRId.set(rId, stagedPath);
+        }
+      }
+
+      // Mint lightweight signed preview URLs in a single batched call so >1.5 MB DOCX previews
+      // render real thumbnails instead of blank gray icon boxes (FUNC-27(2)).
+      const previewUrlByPath = new Map<string, string>();
+      const uniqueStagedPaths = Array.from(new Set(stagedPathByRId.values()));
+      if (uniqueStagedPaths.length > 0) {
+        try {
+          const { data: signedEntries } = await supabase.storage
+            .from(TEMP_STORAGE_BUCKET)
+            .createSignedUrls(uniqueStagedPaths, 1800);
+          for (const entry of signedEntries ?? []) {
+            if (entry.path && entry.signedUrl) {
+              previewUrlByPath.set(entry.path, entry.signedUrl);
+            }
+          }
+        } catch {
+          // Non-fatal: tempStoragePath remains intact for commit even if preview signing fails
         }
       }
 
       if (stagedPathByRId.size > 0) {
+        const attachStagedMeta = <T extends { rId: string; dataUrl?: string }>(m: T) => {
+          const staged = stagedPathByRId.get(m.rId);
+          if (!staged) return m;
+          const { dataUrl: _removed, ...rest } = m;
+          void _removed;
+          const previewUrl = previewUrlByPath.get(staged);
+          return {
+            ...rest,
+            tempStoragePath: staged,
+            ...(previewUrl ? { previewUrl } : {}),
+          };
+        };
+
         finalPreview = {
           ...finalPreview,
           questions: finalPreview.questions.map((q) => ({
             ...q,
-            promptMedia: q.promptMedia?.map((m) => {
-              const staged = stagedPathByRId.get(m.rId);
-              if (!staged) return m;
-              const { dataUrl: _removed, ...rest } = m;
-              void _removed;
-              return { ...rest, tempStoragePath: staged };
-            }),
+            promptMedia: q.promptMedia?.map(attachStagedMeta),
             options: q.options.map((o) => ({
               ...o,
-              media: o.media?.map((m) => {
-                const staged = stagedPathByRId.get(m.rId);
-                if (!staged) return m;
-                const { dataUrl: _removed, ...rest } = m;
-                void _removed;
-                return { ...rest, tempStoragePath: staged };
-              }),
+              media: o.media?.map(attachStagedMeta),
             })),
           })),
-          extractedMedia: finalPreview.extractedMedia?.map((m) => {
-            const staged = stagedPathByRId.get(m.rId);
-            if (!staged) return m;
-            const { dataUrl: _removed, ...rest } = m;
-            void _removed;
-            return { ...rest, tempStoragePath: staged };
-          }),
+          extractedMedia: finalPreview.extractedMedia?.map(attachStagedMeta),
         };
       }
     }
@@ -396,7 +437,10 @@ export async function POST(request: Request) {
     if (approxByteLength > STREAM_JSON_THRESHOLD_BYTES) {
       return streamJsonResponse(envelope, {
         status: 200,
-        headers: { "Cache-Control": "private, no-store" },
+        headers: {
+          "Cache-Control": "private, no-store",
+          Vary: "Cookie",
+        },
       });
     }
 

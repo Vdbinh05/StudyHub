@@ -69,7 +69,8 @@ function buildFallbackBreakdowns(payload: ExamAttemptPayload): {
     const hasAns =
       ans !== undefined &&
       ((ans.selected_option_ids && ans.selected_option_ids.length > 0) ||
-        Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0));
+        Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0) ||
+        Boolean(ans.structured_response));
     const correct = hasAns && Boolean(ans?.is_correct);
 
     // Chapter breakdown (preserves exact V1 shape when source_study_set_id is absent)
@@ -222,6 +223,9 @@ export async function GET(
           attempt_question_id: a.attempt_question_id,
           selected_option_ids: a.selected_option_ids,
           typed_answer: a.typed_answer,
+          structured_response: a.structured_response ?? null,
+          confidence: a.confidence ?? null,
+          hint_used: a.hint_used ?? false,
           is_flagged: a.is_flagged,
           client_seq: a.client_seq ?? 0,
           updated_at: a.updated_at,

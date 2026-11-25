@@ -201,7 +201,12 @@ export function LandingLocaleShell({
     <div className="bg-background text-foreground flex min-h-dvh flex-col overflow-x-clip">
       <header className="border-border bg-card/90 sticky top-0 z-30 border-b backdrop-blur-xs">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-3 sm:h-16 sm:gap-4 sm:px-6">
-          <Link href="/" aria-label="StudyHub" className="shrink-0">
+          <Link
+            href="/"
+            prefetch={false}
+            aria-label="StudyHub"
+            className="inline-flex min-h-11 shrink-0 items-center"
+          >
             {brandLogo}
           </Link>
 

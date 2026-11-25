@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/security/authz";
 import { apiSuccess, AppError, handleApiError } from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { rpcSubmitExamAttempt, type ExamAttemptPayload } from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import type {
@@ -42,7 +46,8 @@ function buildFallbackChapterBreakdown(
     const hasAns =
       ans !== undefined &&
       ((ans.selected_option_ids && ans.selected_option_ids.length > 0) ||
-        Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0));
+        Boolean(ans.typed_answer && ans.typed_answer.trim().length > 0) ||
+        Boolean(ans.structured_response));
 
     if (!hasAns) entry.unanswered += 1;
     else if (ans.is_correct) entry.correct += 1;
@@ -58,34 +63,33 @@ function buildFallbackChapterBreakdown(
 }
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.EXAM_SUBMIT,
+      user.id,
+    );
+    if (limited) return limited;
+
     const { attemptId } = await context.params;
     const id = uuidSchema.parse(attemptId);
 
-    // Verify ownership first before invoking atomic RPC
-    const { data: attempt, error: checkErr } = await supabase
-      .from("exam_attempts")
-      .select("id")
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (checkErr) throw checkErr;
-    if (!attempt) {
-      throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
-    }
-
-    // Atomic, FOR UPDATE locked, strictly server-scored & idempotent V2.0 RPC
+    // Atomic, FOR UPDATE locked, strictly server-scored & idempotent RPC (enforces user_id = auth.uid() inside SQL)
     const { data: gradedPayload, error } = await rpcSubmitExamAttempt(
       supabase,
       id,
     );
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === "P0002") {
+        throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
+      }
+      throw error;
+    }
     if (!gradedPayload) {
       throw new AppError("NOT_FOUND", "Exam attempt not found.", 404);
     }

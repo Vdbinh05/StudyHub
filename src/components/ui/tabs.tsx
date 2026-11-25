@@ -25,7 +25,7 @@ function TabsList({
     <TabsPrimitive.List
       data-slot="tabs-list"
       className={cn(
-        "bg-muted text-muted-foreground inline-flex min-h-11 sm:min-h-9 w-fit items-center justify-center rounded-lg p-1",
+        "bg-muted text-muted-foreground inline-flex min-h-12 w-fit items-center justify-center rounded-lg p-1 sm:min-h-9",
         className,
       )}
       {...props}
@@ -41,7 +41,7 @@ function TabsTrigger({
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex min-h-9 sm:min-h-7 flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium whitespace-nowrap transition-colors after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:border-b-2 after:border-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-accent-foreground data-[state=active]:font-semibold data-[state=active]:shadow-xs data-[state=active]:after:border-primary",
+        "relative inline-flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:border-b-2 after:border-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-accent-foreground data-[state=active]:font-semibold data-[state=active]:shadow-xs data-[state=active]:after:border-primary sm:min-h-8 sm:py-1",
         className,
       )}
       {...props}

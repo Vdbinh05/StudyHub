@@ -2,7 +2,7 @@
  * StudyHub V3.0 Service Worker — Safe Static Shell & Offline Fallback.
  *
  * Security & Reliability Guarantees:
- * - Versioned static shell cache (`studyhub-v3-shell-v1`).
+ * - Versioned static shell cache (`studyhub-v3-shell-v2`).
  * - Precaches `/offline`, manifest, and app icons.
  * - Cache-first ONLY for same-origin immutable static assets (`/_next/static/*`,
  *   `/icons/*`, `/manifest.webmanifest`).

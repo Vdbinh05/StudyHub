@@ -19,7 +19,12 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
     <div className="bg-background text-foreground flex min-h-dvh flex-col">
       <header className="border-border bg-card/95 border-b backdrop-blur-xs">
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4 sm:px-6">
-          <Link href="/" aria-label="StudyHub">
+          <Link
+            href="/"
+            prefetch={false}
+            aria-label="StudyHub"
+            className="inline-flex min-h-11 items-center"
+          >
             <BrandLogo />
           </Link>
           <div className="flex items-center gap-1.5">

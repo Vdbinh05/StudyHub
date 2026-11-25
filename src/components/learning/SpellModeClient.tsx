@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   ArrowRight,
@@ -39,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
+  detectSpeechLanguage,
   filterVoicesByLanguage,
   getDefaultTtsController,
   selectBestVoice,
@@ -55,6 +58,7 @@ import {
   recordStudySessionAnswer,
   updateStudySession,
   upsertCheckpoint,
+  upsertCheckpointKeepalive,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
 import {
@@ -78,6 +82,7 @@ import {
   type SpellQueueState,
   type SpellTargetDescriptor,
 } from "@/lib/learning/spell";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import type {
   ConfidenceLevel,
   LearningSessionCheckpoint,
@@ -94,12 +99,13 @@ import {
   StudyEmptyState,
   StudyErrorState,
   StudyLoadingSkeleton,
+  useAuthenticatedUserId,
   useStudySetBundle,
 } from "./useStudySetBundle";
 
 const SPEED_OPTIONS = [0.6, 0.75, 0.9, 1.0, 1.25, 1.5] as const;
 const LANG_OPTIONS = [
-  { value: "auto", vi: "Tự động theo giao diện", en: "Auto (UI language)" },
+  { value: "auto", vi: "Tự động theo nội dung thẻ", en: "Auto-detect from text" },
   { value: "vi-VN", vi: "Tiếng Việt (vi-VN)", en: "Vietnamese (vi-VN)" },
   { value: "en-US", vi: "Tiếng Anh - Mỹ (en-US)", en: "English - US (en-US)" },
   { value: "en-GB", vi: "Tiếng Anh - Anh (en-GB)", en: "English - UK (en-GB)" },
@@ -110,13 +116,50 @@ const LANG_OPTIONS = [
   { value: "zh-CN", vi: "Tiếng Trung (zh-CN)", en: "Chinese (zh-CN)" },
 ] as const;
 
+function computeSpellProgressMetrics(queue: SpellQueueState): {
+  progressedCount: number;
+  currentIndex: number;
+  progressPercent: number;
+} {
+  const total = Math.max(0, queue.totalItems);
+  if (total === 0) {
+    return { progressedCount: 0, currentIndex: 0, progressPercent: 0 };
+  }
+  if (queue.sessionCompleted) {
+    return {
+      progressedCount: total,
+      currentIndex: Math.max(0, total - 1),
+      progressPercent: 100,
+    };
+  }
+  const completedCount = queue.completedIds.length;
+  const progressedCount = Math.min(
+    total,
+    Math.max(completedCount, Math.min(total, queue.totalAttempts)),
+  );
+  const partialOnly = Math.max(0, progressedCount - completedCount);
+  const weightedPct = Math.round(
+    ((completedCount + partialOnly * 0.45) / total) * 100,
+  );
+  const progressPercent =
+    progressedCount > 0 ? Math.max(1, Math.min(99, weightedPct)) : 0;
+  const currentIndex =
+    progressedCount > 0 ? Math.min(Math.max(0, total - 1), progressedCount) : 0;
+  return { progressedCount, currentIndex, progressPercent };
+}
+
 export interface SpellModeClientProps {
   setId: string;
 }
 
 export function SpellModeClient({ setId }: SpellModeClientProps) {
   const { locale } = useI18n();
+  const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const isFreshLaunch = searchParams.get("fresh") === "1";
   const { preferences, playFeedbackSound } = useUserPreferences();
+  const authenticatedUserId = useAuthenticatedUserId();
+  const spellPrefs = preferences.mode_preferences?.spell;
   const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
 
   const {
@@ -129,21 +172,44 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     updateLocalProgress,
   } = useStudySetBundle(setId);
 
-  // Filters & sensitivity controls
+  // Filters & sensitivity controls hydrated from mode_preferences.spell (V32-025 / RU-05)
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
   const [preferUploadedAudio, setPreferUploadedAudio] = React.useState(true);
-  const [speechRate, setSpeechRate] = React.useState<number>(1.0);
-  const [speechLang, setSpeechLang] = React.useState<string>("auto");
-  const [selectedVoiceURI, setSelectedVoiceURI] = React.useState<string>("auto");
-  const [autoPlayAudio, setAutoPlayAudio] = React.useState<boolean>(false);
+  const [speechRate, setSpeechRate] = React.useState<number>(
+    () => spellPrefs?.speech_rate ?? 1.0,
+  );
+  const [speechLang, setSpeechLang] = React.useState<string>(() => {
+    const prefLang = spellPrefs?.preferred_lang;
+    // Default to text-aware auto-detection unless user explicitly selected a non-default language (RU-05)
+    if (prefLang && prefLang !== "auto" && prefLang !== "vi-VN") {
+      return prefLang;
+    }
+    return "auto";
+  });
+  const [selectedVoiceURI, setSelectedVoiceURI] = React.useState<string>(
+    () => spellPrefs?.preferred_voice || "auto",
+  );
+  const [autoPlayAudio, setAutoPlayAudio] = React.useState<boolean>(
+    () => spellPrefs?.auto_play_prompt ?? false,
+  );
   const [repeatLoop, setRepeatLoop] = React.useState<boolean>(false);
-  const [confidenceEnabled, setConfidenceEnabled] = React.useState<boolean>(false);
+  const [confidenceOverride, setConfidenceOverride] = React.useState<
+    boolean | null
+  >(null);
+  const confidenceEnabled =
+    confidenceOverride ?? Boolean(preferences.confidence_enabled);
+  const setConfidenceEnabled = React.useCallback((next: boolean) => {
+    setConfidenceOverride(next);
+  }, []);
 
-  // Spelling sensitivity (preserves Vietnamese diacritics by default!)
+  // Spelling sensitivity (preserves Vietnamese diacritics by default; respects strict_diacritics pref)
   const [caseSensitive, setCaseSensitive] = React.useState(false);
   const [ignoreWhitespace, setIgnoreWhitespace] = React.useState(true);
   const [ignorePunctuation, setIgnorePunctuation] = React.useState(true);
-  const [ignoreAccents, setIgnoreAccents] = React.useState(false);
+  const [ignoreAccents, setIgnoreAccents] = React.useState<boolean>(
+    () => spellPrefs?.strict_diacritics === false,
+  );
+  const showHintLetters = spellPrefs?.show_hint_letters !== false;
 
   // Audio / TTS state
   const ttsRef = React.useRef(getDefaultTtsController());
@@ -155,7 +221,8 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
   const [audioPlaying, setAudioPlaying] = React.useState(false);
 
   // Active Spell session state
-  const [queueState, setQueueState] = React.useState<SpellQueueState | null>(null);
+  const [rawQueueState, setQueueState] =
+    React.useState<SpellQueueState | null>(null);
   const [typedInput, setTypedInput] = React.useState("");
   const [hintLevel, setHintLevel] = React.useState<SpellHintLevel>(0);
   const [selectedConfidence, setSelectedConfidence] =
@@ -238,10 +305,10 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     return map;
   }, [spellTargets]);
 
-  // Initialize queue once per (setId, chapter) + check remote/local checkpoint
+  // Initialize queue once per (setId, chapter) + check remote/local checkpoint (V32-015 / FUNC-17 / RU-06)
   React.useEffect(() => {
     if (!bundle) return;
-    const initKey = `${setId}:${selectedChapter}:${spellTargets.length}`;
+    const initKey = `${setId}:${selectedChapter}:${spellTargets.length > 0 ? "ready" : "empty"}`;
     if (initializedKeyRef.current === initKey) return;
     initializedKeyRef.current = initKey;
 
@@ -266,9 +333,20 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
         })
         .catch(() => {});
 
-      // Inspect checkpoints for Resume banner
+      // Honor ?fresh=1 (FUNC-17)
+      if (isFreshLaunch) {
+        if (authenticatedUserId) {
+          clearLocalCheckpoint(authenticatedUserId, sessionKey);
+        }
+        void deleteCheckpoint({ sessionKey }).catch(() => {});
+        return;
+      }
+
+      // Inspect checkpoints keyed by authenticatedUserId (NEVER bundle.studySet.owner_id — FUNC-17!)
       const liveSet = new Set(freshIds);
-      const localCp = loadLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+      const localCp = authenticatedUserId
+        ? loadLocalCheckpoint(authenticatedUserId, sessionKey)
+        : null;
       void listCheckpoints({ studySetId: setId, mode: "spell", sessionKey })
         .then((remotes: LearningSessionCheckpoint[]) => {
           const remote = remotes[0] ?? null;
@@ -281,6 +359,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
             remainingIds?: string[];
             completedIds?: string[];
             missedIds?: string[];
+            totalAttempts?: number;
           };
           const savedRemaining = Array.isArray(savedState.remainingIds)
             ? savedState.remainingIds
@@ -302,14 +381,22 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
             missedIds: (savedState.missedIds ?? []).filter((id) =>
               liveSet.has(id),
             ),
+            totalAttempts:
+              typeof savedState.totalAttempts === "number"
+                ? savedState.totalAttempts
+                : (savedState.completedIds ?? []).length,
             totalItems: freshIds.length,
           };
+          const metrics = computeSpellProgressMetrics(restored);
           setPendingResume({
             checkpointId: picked.checkpointId,
             source: picked.source,
-            currentIndex: picked.currentIndex,
+            currentIndex: Math.max(picked.currentIndex, metrics.currentIndex),
             totalItems: freshIds.length,
-            progressPercent: picked.progressPercent,
+            progressPercent: Math.max(
+              picked.progressPercent,
+              metrics.progressPercent,
+            ),
             updatedAt: picked.updatedAt,
             removedCount: rec.removedIds.length,
             restoredQueue: restored,
@@ -317,19 +404,57 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
         })
         .catch(() => {});
     }
-  }, [bundle, selectedChapter, sessionKey, setId, spellTargets]);
+  }, [
+    authenticatedUserId,
+    bundle,
+    isFreshLaunch,
+    selectedChapter,
+    sessionKey,
+    setId,
+    spellTargets,
+  ]);
+
+  // Progressive background streaming append (100% pure derived state — V32-015):
+  // Appends Pages 2..N spellable items without resetting queue[0] or calling setState in useEffect.
+  const queueState = React.useMemo(() => {
+    if (!rawQueueState) return null;
+    if (spellTargets.length === 0) return rawQueueState;
+    const existingIds = new Set<string>([
+      ...rawQueueState.queue.map((i) => i.questionId),
+      ...rawQueueState.completedIds,
+    ]);
+    const addedItems = spellTargets
+      .filter((e) => !existingIds.has(e.question.id))
+      .map((e) => ({
+        questionId: e.question.id,
+        requiredCleanPasses: 1,
+        cleanPasses: 0,
+        missedCount: 0,
+        usedReveal: false,
+      }));
+    if (addedItems.length === 0) return rawQueueState;
+    return {
+      ...rawQueueState,
+      queue: [...rawQueueState.queue, ...addedItems],
+      totalItems: rawQueueState.totalItems + addedItems.length,
+      sessionCompleted: false,
+    };
+  }, [rawQueueState, spellTargets]);
 
   const currentQueueItem = queueState?.queue[0] ?? null;
   const currentEntry = currentQueueItem
     ? targetMap.get(currentQueueItem.questionId) ?? null
     : null;
 
-  const effectiveLang =
-    speechLang === "auto"
-      ? locale === "vi"
-        ? "vi-VN"
-        : "en-US"
-      : speechLang;
+  // Auto-detect TTS language from card text (English words -> en-US, Vietnamese -> vi-VN — V32-031 / RU-05!)
+  const effectiveLang = React.useMemo(() => {
+    if (speechLang !== "auto") return speechLang;
+    const fallbackLang = locale === "vi" ? "vi-VN" : "en-US";
+    return detectSpeechLanguage(
+      currentEntry?.target.speakText ?? "",
+      fallbackLang,
+    );
+  }, [currentEntry?.target.speakText, locale, speechLang]);
 
   const filteredVoices = React.useMemo(
     () =>
@@ -410,7 +535,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     ],
   );
 
-  // Stop stale speech on card transition + optional auto-play
+  // Stop stale speech on card transition + optional auto-play (NEVER gated by prefersReducedMotion — V32-025!)
   React.useEffect(() => {
     ttsRef.current.stop();
     const el = audioElRef.current;
@@ -418,66 +543,89 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
       el.pause();
       el.currentTime = 0;
     }
-    if (autoPlayAudio && currentEntry && !feedback && !prefersReducedMotion) {
+    if (autoPlayAudio && currentEntry && !feedback) {
       const timer = window.setTimeout(() => {
         handlePlayPrompt();
       }, 150);
       return () => window.clearTimeout(timer);
     }
     return undefined;
-  }, [
-    autoPlayAudio,
-    currentEntry,
-    feedback,
-    handlePlayPrompt,
-    prefersReducedMotion,
-  ]);
+  }, [autoPlayAudio, currentEntry, feedback, handlePlayPrompt]);
 
   const saveCheckpointSnapshot = React.useCallback(
-    (nextQueue: SpellQueueState) => {
+    (nextQueue: SpellQueueState, keepalive: boolean = false) => {
       if (!bundle) return;
-      const completedCount = nextQueue.completedIds.length;
-      const pct =
-        nextQueue.totalItems > 0
-          ? Math.round((completedCount / nextQueue.totalItems) * 100)
-          : 100;
 
       if (nextQueue.sessionCompleted) {
-        clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+        if (authenticatedUserId) {
+          clearLocalCheckpoint(authenticatedUserId, sessionKey);
+        }
         void deleteCheckpoint({ sessionKey }).catch(() => {});
         return;
       }
 
+      const metrics = computeSpellProgressMetrics(nextQueue);
       const stateJson = {
         remainingIds: nextQueue.queue.map((i) => i.questionId),
         completedIds: nextQueue.completedIds,
         missedIds: nextQueue.missedIds,
+        totalAttempts: nextQueue.totalAttempts,
       };
-      saveLocalCheckpoint({
-        version: 1,
-        userId: bundle.studySet.owner_id,
-        studySetId: setId,
-        mode: "spell",
-        sessionKey,
-        currentIndex: completedCount,
-        totalItems: nextQueue.totalItems,
-        progressPercent: pct,
-        stateJson,
-        committedEventKeys: [],
-        updatedAt: new Date().toISOString(),
-      });
-      void upsertCheckpoint({
+      if (authenticatedUserId) {
+        saveLocalCheckpoint({
+          version: 1,
+          userId: authenticatedUserId,
+          studySetId: setId,
+          mode: "spell",
+          sessionKey,
+          currentIndex: metrics.currentIndex,
+          totalItems: nextQueue.totalItems,
+          progressPercent: metrics.progressPercent,
+          stateJson,
+          committedEventKeys: [],
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      const remotePayload = {
         study_set_id: setId,
-        mode: "spell",
+        mode: "spell" as const,
         session_key: sessionKey,
         state_json: stateJson,
-        progress_percent: pct,
-        current_index: completedCount,
+        progress_percent: metrics.progressPercent,
+        current_index: metrics.currentIndex,
         total_items: nextQueue.totalItems,
-      }).catch(() => {});
+      };
+      if (keepalive) {
+        upsertCheckpointKeepalive(remotePayload);
+      } else {
+        void upsertCheckpoint(remotePayload).catch(() => {});
+      }
     },
-    [bundle, sessionKey, setId],
+    [authenticatedUserId, bundle, sessionKey, setId],
   );
+
+  // Flush Spell checkpoint on pagehide / visibilitychange so progress is never dropped (V32-027)
+  const latestSpellQueueRef = React.useRef<SpellQueueState | null>(null);
+  React.useEffect(() => {
+    latestSpellQueueRef.current = queueState;
+  }, [queueState]);
+
+  React.useEffect(() => {
+    const flushNow = () => {
+      const q = latestSpellQueueRef.current;
+      if (!q || q.sessionCompleted || q.totalAttempts === 0) return;
+      saveCheckpointSnapshot(q, true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flushNow();
+    };
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushNow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [saveCheckpointSnapshot]);
 
   const gradingOptions: SpellGradingOptions = React.useMemo(
     () => ({
@@ -538,6 +686,15 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
         updated_at: new Date().toISOString(),
       });
 
+      // Persist checkpoint immediately so counter & Resume never lose an answered item even before clicking Next (RU-06 / RU-18)
+      const previewNextQueue = recordSpellQueueAttempt(queueState, {
+        isCorrect: result.isCorrect,
+        usedHint,
+        revealedAnswer,
+      });
+      latestSpellQueueRef.current = previewNextQueue;
+      saveCheckpointSnapshot(previewNextQueue);
+
       if (sessionIdRef.current) {
         void recordStudySessionAnswer(sessionIdRef.current, {
           question_id: currentEntry.question.id,
@@ -567,6 +724,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
       hintLevel,
       playFeedbackSound,
       queueState,
+      saveCheckpointSnapshot,
       selectedConfidence,
       setId,
       typedInput,
@@ -605,7 +763,13 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
           completed_items: nextQueue.completedIds.length,
           correct_items: nextQueue.correctAttempts,
           duration_seconds: dur,
-        }).catch(() => {});
+        })
+          .then(() => {
+            invalidateLearningCaches(queryClient, setId);
+          })
+          .catch(() => {});
+      } else {
+        invalidateLearningCaches(queryClient, setId);
       }
     } else {
       window.setTimeout(() => inputRef.current?.focus(), 40);
@@ -614,8 +778,10 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     feedback,
     hintLevel,
     playFeedbackSound,
+    queryClient,
     queueState,
     saveCheckpointSnapshot,
+    setId,
     stopAllAudio,
   ]);
 
@@ -629,15 +795,20 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     setFeedback(null);
     setPendingResume(null);
     startedAtRef.current = Date.now();
-    if (bundle) {
-      clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+    if (authenticatedUserId) {
+      clearLocalCheckpoint(authenticatedUserId, sessionKey);
     }
     void deleteCheckpoint({ sessionKey }).catch(() => {});
-  }, [bundle, sessionKey, spellTargets, stopAllAudio]);
+  }, [authenticatedUserId, sessionKey, spellTargets, stopAllAudio]);
 
   if (isLoading) {
     return (
-      <FocusModeShell backHref={`/sets/${setId}`} title={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}>
+      <FocusModeShell
+        backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="spell"
+        title={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}
+      >
         <StudyLoadingSkeleton />
       </FocusModeShell>
     );
@@ -645,7 +816,12 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
 
   if (isError || !bundle) {
     return (
-      <FocusModeShell backHref={`/sets/${setId}`} title={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}>
+      <FocusModeShell
+        backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="spell"
+        title={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}
+      >
         <StudyErrorState
           message={error instanceof Error ? error.message : undefined}
           onRetry={() => void refetch()}
@@ -667,6 +843,8 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     return (
       <FocusModeShell
         backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="spell"
         title={bundle.studySet.title}
         subtitle={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}
       >
@@ -687,29 +865,34 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
     );
   }
 
-  const completedCount = queueState?.completedIds.length ?? 0;
   const totalCount = queueState?.totalItems ?? spellTargets.length;
+  const spellProgress = queueState
+    ? computeSpellProgressMetrics(queueState)
+    : { progressedCount: 0, currentIndex: 0, progressPercent: 0 };
+  // Increment header progress immediately when feedback is confirmed (V32-041 RU-18!)
+  const displayedProgressCount = Math.min(
+    totalCount,
+    spellProgress.progressedCount + (feedback ? 1 : 0),
+  );
 
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
+      studySetId={setId}
+      activeMode="spell"
       title={bundle.studySet.title}
       subtitle={lText(locale, "Nghe & Gõ (Spell)", "Spell — Listen & Type")}
-      progressCurrent={completedCount}
+      progressCurrent={displayedProgressCount}
       progressTotal={totalCount}
       headerRight={
         <div className="flex items-center gap-1.5">
-          <Badge variant="outline" className="tabular-nums">
-            {completedCount}/{totalCount}
-          </Badge>
-
           <Popover>
             <PopoverTrigger asChild>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                className="min-h-10 sm:min-h-9"
+                className="min-h-11 sm:min-h-9"
               >
                 <Settings2 className="size-4" aria-hidden="true" />
                 <span className="hidden sm:inline">
@@ -852,7 +1035,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
         ) : null}
 
         {/* Resume Checkpoint Banner */}
-        {pendingResume ? (
+        {!isFreshLaunch && pendingResume ? (
           <ResumeSessionBanner
             modeLabel={lText(locale, "Nghe & Gõ (Spell)", "Spell Mode")}
             currentIndex={pendingResume.currentIndex}
@@ -868,7 +1051,9 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
             onRestart={handleRestartFresh}
             onDiscard={() => {
               setPendingResume(null);
-              clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+              if (authenticatedUserId) {
+                clearLocalCheckpoint(authenticatedUserId, sessionKey);
+              }
               void deleteCheckpoint({ sessionKey }).catch(() => {});
             }}
           />
@@ -1169,8 +1354,20 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
                       {(
                         [
                           { lvl: 1 as SpellHintLevel, vi: "Nghĩa", en: "Definition" },
-                          { lvl: 2 as SpellHintLevel, vi: "Chữ cái đầu", en: "First Letter" },
-                          { lvl: 3 as SpellHintLevel, vi: "Độ dài từ", en: "Word Length" },
+                          ...(showHintLetters
+                            ? [
+                                {
+                                  lvl: 2 as SpellHintLevel,
+                                  vi: "Chữ cái đầu",
+                                  en: "First Letter",
+                                },
+                                {
+                                  lvl: 3 as SpellHintLevel,
+                                  vi: "Độ dài từ",
+                                  en: "Word Length",
+                                },
+                              ]
+                            : []),
                           { lvl: 4 as SpellHintLevel, vi: "Hiện đáp án", en: "Reveal" },
                         ] as const
                       ).map((item) => (
@@ -1180,7 +1377,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
                           size="sm"
                           variant={hintLevel === item.lvl ? "secondary" : "outline"}
                           disabled={Boolean(feedback)}
-                          className="h-8 text-xs"
+                          className="min-h-11 text-xs sm:min-h-8"
                           onClick={() => setHintLevel(item.lvl)}
                         >
                           {item.lvl === 4 ? (
@@ -1440,7 +1637,7 @@ export function SpellModeClient({ setId }: SpellModeClientProps) {
         subject={bundle.studySet.subject ?? undefined}
         chapters={chapters}
         mode="spell"
-        userId={bundle.studySet.owner_id}
+        userId={authenticatedUserId ?? ""}
         onResetComplete={() => {
           void refetch();
           handleRestartFresh();

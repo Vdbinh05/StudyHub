@@ -73,6 +73,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/lib/i18n";
+import { purgeAllUserClientState } from "@/lib/auth/client-session-cleanup";
 import {
   uploadFileToTempStorage,
   VERCEL_SAFE_DIRECT_PAYLOAD_BYTES,
@@ -81,6 +82,7 @@ import {
   DEFAULT_MODE_PREFERENCES,
   useUserPreferences,
 } from "@/lib/preferences";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import { tryCreateClient } from "@/lib/supabase/client";
 import type {
   DiagramStudyMode,
@@ -105,15 +107,25 @@ interface RestoreSummary {
     sets?: number;
     study_sets?: number;
     questions?: number;
+    passages?: number;
+    shared_passages?: number;
+    diagrams?: number;
+    diagram_sets?: number;
+    notes?: number;
+    user_question_notes?: number;
   };
 }
 
 interface ParsedBackupPreview {
   fileName: string;
   payload: Record<string, unknown>;
+  schemaVersion: string | null;
   foldersCount: number;
   setsCount: number;
   questionsCount: number;
+  diagramsCount: number;
+  passagesCount: number;
+  notesCount: number;
 }
 
 function clampGoal(raw: string): number {
@@ -140,9 +152,8 @@ function SettingsViewInner() {
   const pwa = useOptionalPwa();
   const { openHelp, setShortcutsEnabled } = useShortcuts();
 
-  const urlTab = resolveTabParam(searchParams.get("tab"));
-  const [selectedTab, setSelectedTab] = React.useState<SettingsTabKey | null>(null);
-  const activeTab: SettingsTabKey = selectedTab ?? urlTab;
+  // Derive active tab directly from `?tab=` so header links & browser Back/Forward always stay in sync
+  const activeTab: SettingsTabKey = resolveTabParam(searchParams.get("tab"));
 
   const {
     preferences,
@@ -371,14 +382,31 @@ function SettingsViewInner() {
           ? root.sets
           : [];
       const questionsArr = Array.isArray(root.questions) ? root.questions : [];
+      const diagramsArr = Array.isArray(root.diagram_sets) ? root.diagram_sets : [];
+      const passagesArr = Array.isArray(root.shared_passages)
+        ? root.shared_passages
+        : [];
+      const notesArr = Array.isArray(root.user_question_notes)
+        ? root.user_question_notes
+        : [];
+      const schemaVersion =
+        typeof root.schema_version === "string"
+          ? root.schema_version
+          : typeof parsed.schema_version === "string"
+            ? parsed.schema_version
+            : null;
 
       setRestoreResultText(null);
       setBackupPreview({
         fileName: file.name,
         payload: root,
+        schemaVersion,
         foldersCount: foldersArr.length,
         setsCount: setsArr.length,
         questionsCount: questionsArr.length,
+        diagramsCount: diagramsArr.length,
+        passagesCount: passagesArr.length,
+        notesCount: notesArr.length,
       });
     } catch {
       toast.error(
@@ -428,10 +456,24 @@ function SettingsViewInner() {
       setRestoreConfirmOpen(false);
       setBackupPreview(null);
       const r = result?.restored;
+      const diagramsCount = r?.diagrams ?? r?.diagram_sets ?? 0;
+      const passagesCount = r?.passages ?? r?.shared_passages ?? 0;
+      const notesCount = r?.notes ?? r?.user_question_notes ?? 0;
+      const extraParts: string[] = [];
+      if (passagesCount > 0) {
+        extraParts.push(vi ? `${passagesCount} đoạn đọc` : `${passagesCount} passages`);
+      }
+      if (diagramsCount > 0) {
+        extraParts.push(vi ? `${diagramsCount} sơ đồ` : `${diagramsCount} diagrams`);
+      }
+      if (notesCount > 0) {
+        extraParts.push(vi ? `${notesCount} ghi chú` : `${notesCount} notes`);
+      }
+      const extraSuffix = extraParts.length > 0 ? ` (${extraParts.join(", ")})` : "";
       const summaryText = r
         ? vi
-          ? `Đã khôi phục ${r.folders ?? 0} thư mục, ${r.sets ?? r.study_sets ?? 0} học phần và ${r.questions ?? 0} câu hỏi.`
-          : `Restored ${r.folders ?? 0} folders, ${r.sets ?? r.study_sets ?? 0} study sets, and ${r.questions ?? 0} questions.`
+          ? `Đã khôi phục ${r.folders ?? 0} thư mục, ${r.sets ?? r.study_sets ?? 0} học phần và ${r.questions ?? 0} câu hỏi${extraSuffix}.`
+          : `Restored ${r.folders ?? 0} folders, ${r.sets ?? r.study_sets ?? 0} study sets, and ${r.questions ?? 0} questions${extraSuffix}.`
         : vi
           ? "Đã khôi phục dữ liệu từ bản sao lưu thành công."
           : "Account backup restored successfully.";
@@ -461,15 +503,23 @@ function SettingsViewInner() {
     onSuccess: async (scope) => {
       setDeleteScope(null);
       setConfirmPhrase("");
-      queryClient.clear();
       if (scope === "account") {
+        await queryClient.cancelQueries();
+        await fetch("/auth/signout", {
+          method: "POST",
+          credentials: "same-origin",
+        }).catch(() => undefined);
         await clearOfflineDataForLogout(pwa?.activeUserId);
-        await fetch("/auth/signout", { method: "POST", credentials: "same-origin" });
+        await purgeAllUserClientState(queryClient, pwa?.activeUserId, {
+          broadcast: "logout",
+        });
         toast.success(
           vi ? "Đã xóa dữ liệu và đăng xuất." : "Account data cleared and signed out.",
         );
-        router.push("/login");
+        window.location.replace(new URL("/login", window.location.origin).toString());
       } else {
+        await queryClient.cancelQueries();
+        queryClient.clear();
         toast.success(
           vi ? "Đã xóa toàn bộ dữ liệu học tập." : "All study data deleted.",
         );
@@ -483,7 +533,6 @@ function SettingsViewInner() {
 
   const handleTabChange = (val: string) => {
     const next = resolveTabParam(val);
-    setSelectedTab(next);
     const params = new URLSearchParams(searchParams.toString());
     if (next === "preferences") {
       params.delete("tab");
@@ -712,9 +761,10 @@ function SettingsViewInner() {
                           void updatePreferences(
                             { sound_effects: val },
                             { persistRemote: false },
-                          ).then(() => {
-                            if (val) playFeedbackSound("flip");
-                          });
+                          );
+                          if (val) {
+                            playFeedbackSound("correct", { force: true });
+                          }
                         }}
                       />
                     </div>
@@ -1323,7 +1373,7 @@ function SettingsViewInner() {
             </CardContent>
           </Card>
 
-          {/* Export & Restore Personal Data (SH-033) */}
+          {/* Export & Restore Personal Data (SH-033 / V32-006) */}
           <Card>
             <CardHeader>
               <CardTitle className="text-base">
@@ -1331,8 +1381,8 @@ function SettingsViewInner() {
               </CardTitle>
               <CardDescription>
                 {vi
-                  ? "Tải xuống bản sao JSON toàn bộ thư mục, học phần và câu hỏi, hoặc khôi phục lại từ bản sao StudyHub đã lưu."
-                  : "Download a portable JSON archive of your folders, study sets, and questions, or restore from a saved StudyHub JSON backup."}
+                  ? "Xuất tệp JSON (tối đa 15 MB khi khôi phục) gồm toàn bộ thư mục, học phần, 12 dạng câu hỏi (kèm nội dung định dạng & cấu trúc đáp án), đoạn đọc chung, sơ đồ tương tác, ghi chú cá nhân và tùy chọn. Lịch sử thi, tiến độ học và tệp phương tiện gốc chỉ được xuất để lưu trữ tham khảo, không ghi đè khi khôi phục."
+                  : "Export a portable JSON archive (up to 15 MB on restore) covering folders, study sets, all 12 question types (including rich text and structured payloads), shared passages, diagrams, personal notes, and preferences. Exam history, study progress, and binary media files are exported as read-only archive metadata and are not overwritten on restore."}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1372,8 +1422,8 @@ function SettingsViewInner() {
                     </p>
                     <p className="text-muted-foreground font-mono text-xs tabular-nums">
                       {vi
-                        ? `${backupPreview.foldersCount} thư mục · ${backupPreview.setsCount} học phần · ${backupPreview.questionsCount} câu hỏi`
-                        : `${backupPreview.foldersCount} folders · ${backupPreview.setsCount} study sets · ${backupPreview.questionsCount} questions`}
+                        ? `${backupPreview.foldersCount} thư mục · ${backupPreview.setsCount} học phần · ${backupPreview.questionsCount} câu hỏi${backupPreview.diagramsCount > 0 ? ` · ${backupPreview.diagramsCount} sơ đồ` : ""}${backupPreview.passagesCount > 0 ? ` · ${backupPreview.passagesCount} đoạn đọc` : ""}${backupPreview.notesCount > 0 ? ` · ${backupPreview.notesCount} ghi chú` : ""}`
+                        : `${backupPreview.foldersCount} folders · ${backupPreview.setsCount} study sets · ${backupPreview.questionsCount} questions${backupPreview.diagramsCount > 0 ? ` · ${backupPreview.diagramsCount} diagrams` : ""}${backupPreview.passagesCount > 0 ? ` · ${backupPreview.passagesCount} passages` : ""}${backupPreview.notesCount > 0 ? ` · ${backupPreview.notesCount} notes` : ""}`}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -1462,8 +1512,7 @@ function SettingsViewInner() {
         userId={pwa?.activeUserId ?? undefined}
         pendingOfflineEventsCount={pwa?.syncSummary?.pendingCount ?? 0}
         onResetComplete={() => {
-          queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-          queryClient.invalidateQueries({ queryKey: ["statistics"] });
+          void invalidateLearningCaches(queryClient);
         }}
       />
 
@@ -1476,8 +1525,8 @@ function SettingsViewInner() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {vi
-                ? `Hệ thống sẽ nhập các thư mục, học phần và câu hỏi từ "${backupPreview?.fileName ?? ""}" vào tài khoản của bạn mà không xóa các học phần hiện có.`
-                : `Folders, study sets, and questions from "${backupPreview?.fileName ?? ""}" will be restored into your account alongside existing items.`}
+                ? `Hệ thống sẽ nhập các thư mục, học phần, 12 dạng câu hỏi, đoạn đọc, sơ đồ và ghi chú cá nhân từ "${backupPreview?.fileName ?? ""}" vào tài khoản của bạn mà không xóa dữ liệu hiện có. (Tiến độ học và lịch sử thi cũ được giữ nguyên.)`
+                : `Folders, study sets, all 12 question types, passages, diagrams, and personal notes from "${backupPreview?.fileName ?? ""}" will be restored alongside existing data. (Existing progress and exam history remain untouched.)`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

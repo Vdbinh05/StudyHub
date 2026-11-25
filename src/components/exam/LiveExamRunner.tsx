@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -50,18 +50,27 @@ import { lText } from "@/components/learning/learning-copy";
 import {
   StudyErrorState,
   StudyLoadingSkeleton,
+  useAuthenticatedUserId,
 } from "@/components/learning/useStudySetBundle";
 import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
+import { invalidateExamCaches } from "@/lib/query-keys";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import {
   fetchExamAttempt,
-  isEditableEventTarget,
   LearningApiError,
   saveExamAnswers,
+  saveExamAnswersKeepalive,
   submitExamAttempt,
   type ExamAnswerSaveItem,
   type ExamAttemptPayload,
 } from "@/lib/learning/api-client";
+import {
+  clearExamDraft,
+  loadExamDraft,
+  saveExamDraft,
+  type ExamDraftEntry,
+} from "@/lib/learning/exam-draft";
 import type { ConfidenceLevel, StructuredAnswerResponse } from "@/types/domain";
 import { cn } from "@/lib/utils";
 import {
@@ -89,8 +98,6 @@ interface LiveExamRunnerProps {
   attemptId: string;
   initialPayload?: ExamAttemptPayload | null;
 }
-
-const DRAFT_KEY_PREFIX = "studyhub-exam-draft-v2-";
 
 const EMPTY_LOCAL_RECORD: LocalAnswerRecord = {
   selectedOptionIds: [],
@@ -215,41 +222,22 @@ const SyncStatusPill = React.memo(function SyncStatusPill({
   );
 });
 
-function readLocalDraft(
-  attemptId: string,
-): Record<string, LocalAnswerRecord> | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(`${DRAFT_KEY_PREFIX}${attemptId}`);
-    if (!raw) return null;
-    return JSON.parse(raw) as Record<string, LocalAnswerRecord>;
-  } catch {
-    return null;
-  }
-}
-
-function writeLocalDraft(
-  attemptId: string,
+function toDraftEntries(
   map: Record<string, LocalAnswerRecord>,
-): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      `${DRAFT_KEY_PREFIX}${attemptId}`,
-      JSON.stringify(map),
-    );
-  } catch {
-    // Ignore quota errors
+): Record<string, ExamDraftEntry> {
+  const entries: Record<string, ExamDraftEntry> = {};
+  for (const [id, rec] of Object.entries(map)) {
+    entries[id] = {
+      selectedOptionIds: rec.selectedOptionIds,
+      typedAnswer: rec.typedAnswer,
+      structuredResponse: rec.structuredResponse ?? null,
+      confidence: rec.confidence ?? null,
+      hintUsed: false,
+      isFlagged: rec.isFlagged,
+      clientSeq: rec.clientSeq,
+    };
   }
-}
-
-function clearLocalDraft(attemptId: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.removeItem(`${DRAFT_KEY_PREFIX}${attemptId}`);
-  } catch {
-    // Ignore
-  }
+  return entries;
 }
 
 export function LiveExamRunner({
@@ -258,19 +246,32 @@ export function LiveExamRunner({
   initialPayload,
 }: LiveExamRunnerProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { locale, t } = useI18n();
   const { preferences } = useUserPreferences();
+  const authUserId = useAuthenticatedUserId();
+
+  // Check if CustomExamBuilderClient pre-seeded either cache key for 0ms launch (`PERF-04`)
+  const preSeededPayload = React.useMemo(() => {
+    if (initialPayload) return initialPayload;
+    return (
+      queryClient.getQueryData<ExamAttemptPayload>(["exam-attempt-live", attemptId]) ??
+      queryClient.getQueryData<ExamAttemptPayload>(["exam-attempt", attemptId]) ??
+      undefined
+    );
+  }, [attemptId, initialPayload, queryClient]);
 
   const examQuery = useQuery<ExamAttemptPayload>({
     queryKey: ["exam-attempt-live", attemptId],
     queryFn: () => fetchExamAttempt(attemptId),
-    initialData: initialPayload ?? undefined,
+    initialData: preSeededPayload,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
 
   const payload = examQuery.data;
   const attempt = payload?.attempt;
+  const draftUserId = authUserId ?? attempt?.user_id ?? "";
   const questions = React.useMemo(
     () =>
       [...(payload?.questions ?? [])].sort((a, b) => a.position - b.position),
@@ -320,14 +321,59 @@ export function LiveExamRunner({
   const debounceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const draftWriteTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const draftIdleIdRef = React.useRef<number | null>(null);
   const clientSeqRef = React.useRef<number>(1);
+  const flushGenRef = React.useRef<number>(0);
   const submittingRef = React.useRef<boolean>(false);
   const initializedAnswersRef = React.useRef<boolean>(false);
+  const answerMapRef = React.useRef<Record<string, LocalAnswerRecord>>({});
+  const currentIndexRef = React.useRef<number>(0);
+  const draftUserIdRef = React.useRef<string>(draftUserId);
   const jumpInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  React.useEffect(() => {
+    answerMapRef.current = answerMap;
+  }, [answerMap]);
+
+  React.useEffect(() => {
+    currentIndexRef.current = currentIndex;
+  }, [currentIndex]);
+
+  React.useEffect(() => {
+    draftUserIdRef.current = draftUserId;
+  }, [draftUserId]);
+
+  const persistDraftSync = React.useCallback(
+    (
+      nextMap: Record<string, LocalAnswerRecord>,
+      nextIndex: number,
+      explicitUserId?: string,
+    ) => {
+      const uid = explicitUserId ?? draftUserIdRef.current;
+      if (!uid) return;
+      saveExamDraft(uid, attemptId, toDraftEntries(nextMap), nextIndex);
+    },
+    [attemptId],
+  );
+
+  // Reset per-attempt React state during render if attemptId changes without remount (FUNC-18(1))
+  const [trackedAttemptId, setTrackedAttemptId] = React.useState(attemptId);
+  if (trackedAttemptId !== attemptId) {
+    setTrackedAttemptId(attemptId);
+    setCurrentIndex(0);
+    setAnswerMap({});
+  }
+
+  // Reset per-attempt refs & external sync store whenever `attemptId` prop changes (fixes FUNC-18(1))
+  React.useEffect(() => {
+    initializedAnswersRef.current = false;
+    submittingRef.current = false;
+    dirtyQueueRef.current.clear();
+    clientSeqRef.current = 1;
+    flushGenRef.current += 1;
+    currentIndexRef.current = 0;
+    answerMapRef.current = {};
+    syncStore.set("saved");
+  }, [attemptId, syncStore]);
 
   // Redirect to results immediately if attempt is already submitted/expired
   React.useEffect(() => {
@@ -336,12 +382,93 @@ export function LiveExamRunner({
       attempt.status !== "in_progress" &&
       attempt.status !== "discarded"
     ) {
-      clearLocalDraft(attemptId);
+      if (draftUserId) {
+        clearExamDraft(draftUserId, attemptId);
+      }
       router.replace(resultsPath);
     }
-  }, [attempt, attemptId, resultsPath, router]);
+  }, [attempt, attemptId, draftUserId, resultsPath, router]);
 
-  // Hydrate server answers + merge ONLY strictly newer local draft entries (`client_seq` / `updatedAtMs`)
+  const flushDirtyQueueRef = React.useRef<(() => Promise<boolean>) | null>(null);
+
+  // Flush autosave queue in <=150 chunks with monotonic client_seq & generation guard (fixes SH-010 & FUNC-18(2))
+  const flushDirtyQueue = React.useCallback(async (): Promise<boolean> => {
+    if (dirtyQueueRef.current.size === 0) {
+      syncStore.set("saved");
+      return true;
+    }
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      syncStore.set("pending_offline");
+      return false;
+    }
+
+    const gen = ++flushGenRef.current;
+    const batch = Array.from(dirtyQueueRef.current.values());
+    syncStore.set("saving");
+    try {
+      const res = await saveExamAnswers(attemptId, batch);
+      if (res.server_now) {
+        const srvMs = Date.parse(res.server_now);
+        if (!Number.isNaN(srvMs)) {
+          const nextOffset = srvMs - Date.now();
+          // Guard >1500ms drift so routine autosaves NEVER restart ExamTimer or re-render parent (P1-4)
+          setServerClockOffsetMs((prev) =>
+            Math.abs(nextOffset - prev) > 1500 ? nextOffset : prev,
+          );
+        }
+      }
+      // Clear only items that were not superseded mid-flight
+      for (const item of batch) {
+        const current = dirtyQueueRef.current.get(item.attempt_question_id);
+        if (current && current.client_seq === item.client_seq) {
+          dirtyQueueRef.current.delete(item.attempt_question_id);
+        }
+      }
+      if (dirtyQueueRef.current.size === 0) {
+        syncStore.set("saved");
+      } else {
+        syncStore.set("saving");
+        if (!debounceTimerRef.current) {
+          debounceTimerRef.current = setTimeout(() => {
+            debounceTimerRef.current = null;
+            void flushDirtyQueueRef.current?.();
+          }, 250);
+        }
+      }
+      return true;
+    } catch (err) {
+      if (
+        err instanceof LearningApiError &&
+        (err.code === "EXAM_EXPIRED" || err.status === 409)
+      ) {
+        toast.info(
+          lText(
+            locale,
+            "Bài thi đã hết giờ hoặc đã được nộp.",
+            "This exam has expired or was already submitted.",
+          ),
+        );
+        router.replace(resultsPath);
+        return false;
+      }
+      // Generation guard (FUNC-18(2)): a stale failed flush must NEVER overwrite a newer successful "saved" state!
+      if (gen === flushGenRef.current && dirtyQueueRef.current.size > 0) {
+        syncStore.set(
+          typeof navigator !== "undefined" && !navigator.onLine
+            ? "pending_offline"
+            : "error",
+        );
+      }
+      return false;
+    }
+  }, [attemptId, locale, resultsPath, router, syncStore]);
+
+  React.useEffect(() => {
+    flushDirtyQueueRef.current = flushDirtyQueue;
+  }, [flushDirtyQueue]);
+
+  // Hydrate server answers + merge ONLY strictly newer user-partitioned local draft entries
+  // AND immediately auto-flush merged unsynced drafts (fixes V32-005 & RU-02!)
   React.useEffect(() => {
     if (!payload || initializedAnswersRef.current) return;
     initializedAnswersRef.current = true;
@@ -381,27 +508,43 @@ export function LiveExamRunner({
       };
     }
 
-    // Merge local offline draft ONLY when local entry is newer than server (fixes BUG-009!)
-    const draft = readLocalDraft(attemptId);
+    const uid = authUserId ?? payload.attempt.user_id;
+    let restoredIndex = 0;
+    const draft = uid ? loadExamDraft(uid, attemptId) : null;
     if (draft) {
-      for (const [aqId, rec] of Object.entries(draft)) {
+      const totalQ = payload.questions.length;
+      if (totalQ > 0) {
+        restoredIndex = Math.max(
+          0,
+          Math.min(draft.currentQuestionIndex, totalQ - 1),
+        );
+      }
+      for (const [aqId, rec] of Object.entries(draft.entries)) {
         const serverRec = hydrated[aqId];
         const isLocalNewer =
           !serverRec ||
           (rec.clientSeq > 0 && rec.clientSeq > serverRec.clientSeq) ||
-          (rec.updatedAtMs > 0 && rec.updatedAtMs > serverRec.updatedAtMs + 1000);
+          (draft.updatedAt > 0 && draft.updatedAt > serverRec.updatedAtMs + 1000);
 
         if (isLocalNewer) {
           const nextSeq = Math.max(rec.clientSeq, maxSeq);
           maxSeq = nextSeq + 1;
-          hydrated[aqId] = { ...rec, clientSeq: nextSeq };
+          hydrated[aqId] = {
+            selectedOptionIds: rec.selectedOptionIds ?? [],
+            typedAnswer: rec.typedAnswer ?? "",
+            structuredResponse: rec.structuredResponse ?? null,
+            confidence: rec.confidence ?? null,
+            isFlagged: Boolean(rec.isFlagged),
+            clientSeq: nextSeq,
+            updatedAtMs: draft.updatedAt,
+          };
           dirtyQueueRef.current.set(aqId, {
             attempt_question_id: aqId,
-            selected_option_ids: rec.selectedOptionIds,
-            typed_answer: rec.typedAnswer || null,
+            selected_option_ids: rec.selectedOptionIds ?? [],
+            typed_answer: rec.typedAnswer?.trim() ? rec.typedAnswer : null,
             structured_response: rec.structuredResponse ?? null,
             confidence: rec.confidence ?? null,
-            is_flagged: rec.isFlagged,
+            is_flagged: Boolean(rec.isFlagged),
             client_seq: nextSeq,
           });
         }
@@ -409,73 +552,28 @@ export function LiveExamRunner({
     }
 
     clientSeqRef.current = maxSeq;
+    answerMapRef.current = hydrated;
     setAnswerMap(hydrated);
-  }, [attemptId, payload]);
+    currentIndexRef.current = restoredIndex;
+    setCurrentIndex(restoredIndex);
 
-  // Flush autosave queue in <=150 chunks with monotonic client_seq (fixes SH-010!)
-  const flushDirtyQueue = React.useCallback(async (): Promise<boolean> => {
-    if (dirtyQueueRef.current.size === 0) {
-      syncStore.set("saved");
-      return true;
+    // Immediately sync merged dirty items & NEVER display false green "Saved" while unsynced items remain (V32-005)
+    if (dirtyQueueRef.current.size > 0) {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        syncStore.set("pending_offline");
+      } else {
+        syncStore.set("saving");
+        void flushDirtyQueue();
+      }
     }
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      syncStore.set("pending_offline");
-      return false;
-    }
+  }, [attemptId, authUserId, flushDirtyQueue, payload, syncStore]);
 
-    const batch = Array.from(dirtyQueueRef.current.values());
-    syncStore.set("saving");
-    try {
-      const res = await saveExamAnswers(attemptId, batch);
-      if (res.server_now) {
-        const srvMs = Date.parse(res.server_now);
-        if (!Number.isNaN(srvMs)) {
-          const nextOffset = srvMs - Date.now();
-          // Guard >1500ms drift so routine autosaves NEVER restart ExamTimer or re-render parent (P1-4)
-          setServerClockOffsetMs((prev) =>
-            Math.abs(nextOffset - prev) > 1500 ? nextOffset : prev,
-          );
-        }
-      }
-      // Clear only items that were not superseded mid-flight
-      for (const item of batch) {
-        const current = dirtyQueueRef.current.get(item.attempt_question_id);
-        if (current && current.client_seq === item.client_seq) {
-          dirtyQueueRef.current.delete(item.attempt_question_id);
-        }
-      }
-      syncStore.set(dirtyQueueRef.current.size === 0 ? "saved" : "saving");
-      return true;
-    } catch (err) {
-      if (
-        err instanceof LearningApiError &&
-        (err.code === "EXAM_EXPIRED" || err.status === 409)
-      ) {
-        toast.info(
-          lText(
-            locale,
-            "Bài thi đã hết giờ hoặc đã được nộp.",
-            "This exam has expired or was already submitted.",
-          ),
-        );
-        router.replace(resultsPath);
-        return false;
-      }
-      syncStore.set(
-        typeof navigator !== "undefined" && !navigator.onLine
-          ? "pending_offline"
-          : "error",
-      );
-      return false;
-    }
-  }, [attemptId, locale, resultsPath, router, syncStore]);
-
-  // Flush merged local draft once hydrated if there are unsynced offline items
+  // Persist currentQuestionIndex synchronously whenever student navigates between questions (fixes RU-02!)
   React.useEffect(() => {
-    if (dirtyQueueRef.current.size > 0 && isOnline) {
-      void flushDirtyQueue();
-    }
-  }, [flushDirtyQueue, isOnline]);
+    if (!initializedAnswersRef.current) return;
+    if (attempt?.status !== "in_progress") return;
+    persistDraftSync(answerMapRef.current, currentIndex);
+  }, [attempt?.status, currentIndex, persistDraftSync]);
 
   const scheduleAutosave = React.useCallback(
     (
@@ -484,30 +582,8 @@ export function LiveExamRunner({
     ) => {
       dirtyQueueRef.current.set(item.attempt_question_id, item);
 
-      // Debounce + idle localStorage serialization so 250–500Q clicks never block main thread (P1-4)
-      if (draftWriteTimerRef.current) clearTimeout(draftWriteTimerRef.current);
-      if (
-        draftIdleIdRef.current !== null &&
-        typeof window !== "undefined" &&
-        "cancelIdleCallback" in window
-      ) {
-        window.cancelIdleCallback(draftIdleIdRef.current);
-        draftIdleIdRef.current = null;
-      }
-      draftWriteTimerRef.current = setTimeout(() => {
-        draftWriteTimerRef.current = null;
-        if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-          draftIdleIdRef.current = window.requestIdleCallback(
-            () => {
-              draftIdleIdRef.current = null;
-              writeLocalDraft(attemptId, nextFullMap);
-            },
-            { timeout: 1000 },
-          );
-        } else {
-          writeLocalDraft(attemptId, nextFullMap);
-        }
-      }, 300);
+      // SYNCHRONOUS localStorage persistence so fast F5 reload (<300ms) NEVER loses answers (fixes V32-004!)
+      persistDraftSync(nextFullMap, currentIndexRef.current);
 
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
       if (typeof navigator !== "undefined" && !navigator.onLine) {
@@ -517,14 +593,35 @@ export function LiveExamRunner({
 
       syncStore.set("saving");
       debounceTimerRef.current = setTimeout(() => {
+        debounceTimerRef.current = null;
         void flushDirtyQueue();
-      }, 400);
+      }, 350);
     },
-    [attemptId, flushDirtyQueue, syncStore],
+    [flushDirtyQueue, persistDraftSync, syncStore],
   );
 
-  // Monitor online / offline events and auto-resync cleanly when network returns
+  // Monitor online / offline + pagehide / visibilitychange keepalive flush (fixes V32-004!)
   React.useEffect(() => {
+    const flushOnHide = () => {
+      if (initializedAnswersRef.current) {
+        persistDraftSync(answerMapRef.current, currentIndexRef.current);
+      }
+      if (dirtyQueueRef.current.size > 0 && !submittingRef.current) {
+        if (typeof navigator === "undefined" || navigator.onLine) {
+          saveExamAnswersKeepalive(
+            attemptId,
+            Array.from(dirtyQueueRef.current.values()),
+          );
+        }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushOnHide();
+      }
+    };
+
     const handleOnline = () => {
       setIsOnline(true);
       toast.success(
@@ -543,31 +640,34 @@ export function LiveExamRunner({
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("pagehide", flushOnHide);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-      if (draftWriteTimerRef.current) clearTimeout(draftWriteTimerRef.current);
-      if (
-        draftIdleIdRef.current !== null &&
-        typeof window !== "undefined" &&
-        "cancelIdleCallback" in window
-      ) {
-        window.cancelIdleCallback(draftIdleIdRef.current);
-        draftIdleIdRef.current = null;
+      window.removeEventListener("pagehide", flushOnHide);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
       }
+      // Best-effort keepalive flush on SPA unmount as well
+      flushOnHide();
     };
-  }, [flushDirtyQueue, locale, syncStore]);
+  }, [attemptId, flushDirtyQueue, locale, persistDraftSync, syncStore]);
 
-  // Idempotent Exam Submit — NEVER swallows failed answer flush!
+  // Idempotent Exam Submit — NEVER swallows failed answer flush! Returns boolean for ExamTimer retry (FUNC-18(3))
   const executeSubmit = React.useCallback(
-    async (reason: "manual" | "expired") => {
-      if (submittingRef.current) return;
+    async (reason: "manual" | "expired"): Promise<boolean> => {
+      if (submittingRef.current) return true;
       submittingRef.current = true;
       setIsSubmitting(true);
       setConfirmSubmitOpen(false);
 
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
 
       try {
         if (dirtyQueueRef.current.size > 0) {
@@ -582,7 +682,7 @@ export function LiveExamRunner({
                   "You are offline with unsynced answers. Reconnect before submitting.",
                 ),
               );
-              return;
+              return false;
             }
           } else {
             // Chunked flush (<=150/batch); if manual submit & flush fails, HALT submit so answers are NEVER lost (SH-010)!
@@ -597,13 +697,16 @@ export function LiveExamRunner({
                   "Could not sync final answers to the server. Please retry before submitting.",
                 ),
               );
-              return;
+              return false;
             }
           }
         }
 
         await submitExamAttempt(attemptId);
-        clearLocalDraft(attemptId);
+        if (draftUserIdRef.current) {
+          clearExamDraft(draftUserIdRef.current, attemptId);
+        }
+        void invalidateExamCaches(queryClient, attemptId);
 
         if (reason === "expired") {
           toast.info(
@@ -620,6 +723,7 @@ export function LiveExamRunner({
         }
 
         router.replace(resultsPath);
+        return true;
       } catch (err) {
         submittingRef.current = false;
         setIsSubmitting(false);
@@ -632,23 +736,24 @@ export function LiveExamRunner({
                 "Could not submit exam. Please check your connection and retry.",
               ),
         );
+        return false;
       }
     },
-    [attemptId, flushDirtyQueue, locale, resultsPath, router],
+    [attemptId, flushDirtyQueue, locale, queryClient, resultsPath, router],
   );
 
   const handleTimerExpire = React.useCallback(() => {
-    void executeSubmit("expired");
+    return executeSubmit("expired");
   }, [executeSubmit]);
 
   const handleSafeExit = React.useCallback(async () => {
     setExitModalOpen(false);
+    persistDraftSync(answerMapRef.current, currentIndexRef.current);
     if (dirtyQueueRef.current.size > 0) {
-      writeLocalDraft(attemptId, answerMap);
       await flushDirtyQueue();
     }
     router.push(backHref);
-  }, [answerMap, attemptId, backHref, flushDirtyQueue, router]);
+  }, [backHref, flushDirtyQueue, persistDraftSync, router]);
 
   const allowNavigation = attempt?.allow_navigation ?? true;
   const allowMarkForReview = attempt?.allow_mark_for_review ?? true;
@@ -784,12 +889,15 @@ export function LiveExamRunner({
     setConfirmSubmitOpen(true);
   }, []);
 
+  const shortcutsEnabled = preferences.mode_preferences?.shortcuts?.enabled ?? true;
+
   // Stable ref-driven keydown listener — NEVER re-binds on every Q change (P1-4)!
   const keyStateRef = React.useRef({
     confirmSubmitOpen,
     exitModalOpen,
     navSheetOpen,
     shortcutsOpen,
+    shortcutsEnabled,
     currentIndex,
     questionsLength: questions.length,
     allowNavigation,
@@ -803,6 +911,7 @@ export function LiveExamRunner({
       exitModalOpen,
       navSheetOpen,
       shortcutsOpen,
+      shortcutsEnabled,
       currentIndex,
       questionsLength: questions.length,
       allowNavigation,
@@ -820,10 +929,11 @@ export function LiveExamRunner({
     handleToggleFlag,
     navSheetOpen,
     questions.length,
+    shortcutsEnabled,
     shortcutsOpen,
   ]);
 
-  // Keyboard shortcuts strictly guarded against inputs AND ALL open modals/sheets (SH-028)!
+  // Keyboard shortcuts strictly guarded against inputs, IME, shortcutsEnabled, AND ALL open modals/sheets (V32-023)!
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const st = keyStateRef.current;
@@ -840,17 +950,30 @@ export function LiveExamRunner({
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        if (
+          shouldIgnoreShortcutEvent(event, {
+            shortcutsEnabled: st.shortcutsEnabled,
+            allowInEditable: true,
+          })
+        ) {
+          return;
+        }
         event.preventDefault();
         setConfirmSubmitOpen(true);
         return;
       }
 
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditableEventTarget(event.target)) return;
+      if (
+        shouldIgnoreShortcutEvent(event, {
+          shortcutsEnabled: st.shortcutsEnabled,
+        })
+      ) {
+        return;
+      }
 
+      // `?` is handled exclusively by global `ShortcutProvider` so pressing `?` opens strictly ONE dialog (FUNC-11)!
       if (event.key === "?") {
-        event.preventDefault();
-        setShortcutsOpen(true);
         return;
       }
 
@@ -997,11 +1120,11 @@ export function LiveExamRunner({
             <Keyboard className="size-4" aria-hidden="true" />
           </Button>
 
-          {/* Always-Visible Quick Submit on BOTH Mobile & Desktop (fixes UX31-10!) */}
+          {/* Always-Visible Quick Submit on BOTH Mobile & Desktop (fixes UX31-10 & V32-034) */}
           <Button
             type="button"
             size="sm"
-            className="inline-flex min-h-9 shrink-0 gap-1 px-2.5 text-xs sm:px-3 sm:text-sm"
+            className="inline-flex min-h-11 sm:min-h-9 shrink-0 gap-1 px-2.5 text-xs sm:px-3 sm:text-sm"
             disabled={isSubmitting}
             onClick={handleOpenSubmitModal}
           >
@@ -1011,11 +1134,11 @@ export function LiveExamRunner({
         </div>
       }
     >
-      {/* Offline Banner — explicitly states server-authoritative deadline! */}
+      {/* Offline Banner — hidden on mobile where single top bar + status pill avoid triple stacking (RU-12) */}
       {!isOnline ? (
         <div
           role="alert"
-          className="mb-4 flex items-start gap-2.5 rounded-lg border border-warning/60 bg-warning-subtle px-4 py-3 text-xs sm:text-sm text-warning-subtle-foreground"
+          className="mb-4 hidden sm:flex items-start gap-2.5 rounded-lg border border-warning/60 bg-warning-subtle px-4 py-2.5 text-xs sm:text-sm text-warning-subtle-foreground"
         >
           <CloudOff className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <span>

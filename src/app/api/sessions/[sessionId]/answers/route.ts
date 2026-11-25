@@ -53,13 +53,18 @@ export async function POST(
       return apiSuccess(rpcResult, undefined, { status: 201 });
     }
     if (rpcErr && !isMissingRpcError(rpcErr)) {
+      // V32-044 / SEC-14: Map Postgres error codes to static safe messages (never forward raw rpcErr.message)
       if (rpcErr.code === "P0002") {
-        throw new AppError("NOT_FOUND", rpcErr.message || "Resource not found.", 404);
+        throw new AppError(
+          "NOT_FOUND",
+          "Study session or question not found.",
+          404,
+        );
       }
       if (rpcErr.code === "22023") {
         throw new AppError(
           "INVALID_REFERENCE",
-          rpcErr.message || "Question does not belong to this study session.",
+          "Invalid answer or question reference for this study session.",
           400,
         );
       }

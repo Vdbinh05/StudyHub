@@ -6,9 +6,14 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import {
+  isMissingRpcError,
+  rpcBumpStudySetContentVersion,
+  rpcSaveDiagramPatch,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import { updateDiagramSchema } from "@/lib/validation/v3";
-import type { Json, TablesUpdate } from "@/types/database";
+import type { Json, TablesInsert, TablesUpdate } from "@/types/database";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -64,6 +69,41 @@ export async function PATCH(
     const diagramId = uuidSchema.parse(id);
     const body = updateDiagramSchema.parse(await parseJsonBody(request));
 
+    // DB-02 & DB-10 (Migration 0019): Single-RTT atomic diagram update + batched hotspot upsert/delete
+    // + atomic content_version increments on both diagram_sets and study_sets
+    const rpcPatchPayload: Record<string, unknown> = {};
+    if (body.title !== undefined) rpcPatchPayload.title = body.title;
+    if (body.description !== undefined) rpcPatchPayload.description = body.description;
+    if (body.base_media_id !== undefined) rpcPatchPayload.base_media_id = body.base_media_id;
+    if (body.base_image_url !== undefined) rpcPatchPayload.base_image_url = body.base_image_url;
+    if (body.image_width !== undefined) rpcPatchPayload.image_width = body.image_width;
+    if (body.image_height !== undefined) rpcPatchPayload.image_height = body.image_height;
+
+    const { data: rpcResult, error: rpcErr } = await rpcSaveDiagramPatch(
+      supabase,
+      {
+        p_diagram_id: diagramId,
+        p_patch: rpcPatchPayload,
+        p_hotspots:
+          body.hotspots !== undefined
+            ? (body.hotspots as unknown as Array<Record<string, unknown>>)
+            : null,
+        p_replace_hotspots: body.hotspots !== undefined,
+      },
+    );
+    if (!rpcErr && rpcResult) {
+      return apiSuccess(rpcResult);
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      if (rpcErr.code === "P0002") {
+        throw new AppError("NOT_FOUND", "Diagram not found.", 404);
+      }
+      if (rpcErr.code === "42501") {
+        throw new AppError("FORBIDDEN", "You do not have permission to edit this diagram.", 403);
+      }
+      throw rpcErr;
+    }
+
     const { data: existing, error: fetchErr } = await supabase
       .from("diagram_sets")
       .select("*")
@@ -116,7 +156,7 @@ export async function PATCH(
     }
 
     if (body.hotspots !== undefined) {
-      // Preserve existing hotspot UUIDs where supplied, delete removed ones, insert new ones
+      // Preserve existing hotspot UUIDs where supplied, batch upserts & delete removed ones
       const { data: prevHotspots } = await supabase
         .from("diagram_hotspots")
         .select("id")
@@ -124,10 +164,14 @@ export async function PATCH(
 
       const prevIds = new Set((prevHotspots ?? []).map((h) => h.id));
       const keptIds = new Set<string>();
+      const upsertRows: TablesInsert<"diagram_hotspots">[] = [];
+      const insertRows: TablesInsert<"diagram_hotspots">[] = [];
 
       for (let i = 0; i < body.hotspots.length; i += 1) {
         const hs = body.hotspots[i];
         const commonData = {
+          diagram_id: diagramId,
+          study_set_id: existing.study_set_id,
           label: hs.label,
           accepted_alternatives: hs.accepted_alternatives,
           description: hs.description ?? null,
@@ -139,24 +183,27 @@ export async function PATCH(
 
         if (hs.id && prevIds.has(hs.id)) {
           keptIds.add(hs.id);
-          const { error: hsUpdErr } = await supabase
-            .from("diagram_hotspots")
-            .update(commonData)
-            .eq("id", hs.id)
-            .eq("diagram_id", diagramId);
-          if (hsUpdErr) throw hsUpdErr;
+          upsertRows.push({ id: hs.id, ...commonData });
         } else {
-          const { data: inserted, error: hsInsErr } = await supabase
-            .from("diagram_hotspots")
-            .insert({
-              diagram_id: diagramId,
-              study_set_id: existing.study_set_id,
-              ...commonData,
-            })
-            .select("id")
-            .single();
-          if (hsInsErr) throw hsInsErr;
-          if (inserted?.id) keptIds.add(inserted.id);
+          insertRows.push(commonData);
+        }
+      }
+
+      if (upsertRows.length > 0) {
+        const { error: hsUpsertErr } = await supabase
+          .from("diagram_hotspots")
+          .upsert(upsertRows, { onConflict: "id" });
+        if (hsUpsertErr) throw hsUpsertErr;
+      }
+
+      if (insertRows.length > 0) {
+        const { data: insertedRows, error: hsInsErr } = await supabase
+          .from("diagram_hotspots")
+          .insert(insertRows)
+          .select("id");
+        if (hsInsErr) throw hsInsErr;
+        for (const row of insertedRows ?? []) {
+          if (row.id) keptIds.add(row.id);
         }
       }
 
@@ -180,16 +227,23 @@ export async function PATCH(
 
     if (hsErr) throw hsErr;
 
-    const { data: setRow } = await supabase
-      .from("study_sets")
-      .select("content_version")
-      .eq("id", existing.study_set_id)
-      .maybeSingle();
-    if (setRow) {
-      await supabase
+    // DB-02: Atomic SQL increment of study_sets.content_version (with read-modify-write fallback)
+    const { error: bumpErr } = await rpcBumpStudySetContentVersion(
+      supabase,
+      existing.study_set_id,
+    );
+    if (bumpErr && isMissingRpcError(bumpErr)) {
+      const { data: setRow } = await supabase
         .from("study_sets")
-        .update({ content_version: (setRow.content_version ?? 1) + 1 })
-        .eq("id", existing.study_set_id);
+        .select("content_version")
+        .eq("id", existing.study_set_id)
+        .maybeSingle();
+      if (setRow) {
+        await supabase
+          .from("study_sets")
+          .update({ content_version: (setRow.content_version ?? 1) + 1 })
+          .eq("id", existing.study_set_id);
+      }
     }
 
     return apiSuccess({

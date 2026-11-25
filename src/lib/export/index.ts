@@ -5,6 +5,7 @@ import { indexToOptionLabel, sanitizeFileName } from "@/lib/import/text-utils";
 
 export {
   exportStudySetToPdf,
+  formatStructuredExamResponseForPdf,
   type PdfAnswerKeyEntry,
   type PdfEmbeddedImage,
   type PdfExportMode,

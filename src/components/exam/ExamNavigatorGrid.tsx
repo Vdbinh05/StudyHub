@@ -115,16 +115,20 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
     enabled: useVirtual,
   });
 
-  // Auto-scroll active question row into view whenever currentIndex changes
+  const filteredEntriesRef = React.useRef(filteredEntries);
+  filteredEntriesRef.current = filteredEntries;
+
+  // Auto-scroll active question row ONLY when `currentIndex` or active filters change
+  // — NEVER on answerMap / flag updates (fixes PERF-07!)
   React.useEffect(() => {
     if (!useVirtual) return;
-    const posInFiltered = filteredEntries.findIndex(
+    const posInFiltered = filteredEntriesRef.current.findIndex(
       (e) => e.globalIndex === currentIndex,
     );
     if (posInFiltered < 0) return;
     const activeRow = Math.floor(posInFiltered / COLUMNS);
     rowVirtualizer.scrollToIndex(activeRow, { align: "auto" });
-  }, [currentIndex, filteredEntries, rowVirtualizer, useVirtual]);
+  }, [currentIndex, statusFilter, subjectFilter, rowVirtualizer, useVirtual]);
 
   const handleJumpSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -246,7 +250,7 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
           type="button"
           size="sm"
           variant={statusFilter === "all" ? "default" : "outline"}
-          className="min-h-9 px-2 text-xs tabular-nums"
+          className="min-h-11 sm:min-h-9 px-2 text-xs tabular-nums"
           aria-pressed={statusFilter === "all"}
           onClick={() => setStatusFilter("all")}
         >
@@ -256,7 +260,7 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
           type="button"
           size="sm"
           variant={statusFilter === "unanswered" ? "default" : "outline"}
-          className="min-h-9 px-2 text-xs tabular-nums"
+          className="min-h-11 sm:min-h-9 px-2 text-xs tabular-nums"
           aria-pressed={statusFilter === "unanswered"}
           onClick={() => setStatusFilter("unanswered")}
         >
@@ -267,7 +271,7 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
             type="button"
             size="sm"
             variant={statusFilter === "flagged" ? "default" : "outline"}
-            className="min-h-9 px-2 text-xs tabular-nums"
+            className="min-h-11 sm:min-h-9 px-2 text-xs tabular-nums"
             aria-pressed={statusFilter === "flagged"}
             onClick={() => setStatusFilter("flagged")}
           >
@@ -278,7 +282,7 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
             type="button"
             size="sm"
             variant="outline"
-            className="min-h-9 px-2 text-xs"
+            className="min-h-11 sm:min-h-9 px-2 text-xs"
             onClick={() => {
               setStatusFilter("all");
               setSubjectFilter("all");
@@ -332,7 +336,7 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
             type="submit"
             size="sm"
             variant="secondary"
-            className="h-9 shrink-0 px-3 text-xs"
+            className="min-h-11 sm:min-h-9 shrink-0 px-3 text-xs"
             disabled={!jumpDraft.trim()}
           >
             {lText(locale, "Đi", "Go")}
@@ -340,56 +344,72 @@ export const ExamNavigatorGrid = React.memo(function ExamNavigatorGrid({
         </form>
       ) : null}
 
-      {/* Zero-drift Virtualized Question Grid */}
+      {/* Zero-drift Virtualized Question Grid with subtle scroll cue (RU-21) */}
       {filteredEntries.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border py-6 text-center text-xs text-muted-foreground">
           {lText(locale, "Không có câu hỏi nào trong bộ lọc này.", "No questions match this filter.")}
         </p>
       ) : useVirtual ? (
-        <div
-          ref={scrollRef}
-          className="h-[340px] overflow-y-auto pr-1"
-          tabIndex={0}
-        >
+        <div className="relative">
           <div
-            style={{
-              height: `${rowVirtualizer.getTotalSize()}px`,
-              position: "relative",
-              width: "100%",
-            }}
+            ref={scrollRef}
+            className="h-[340px] overflow-y-auto pr-1 pb-4"
+            tabIndex={0}
           >
-            {rowVirtualizer.getVirtualItems().map((vRow) => {
-              const startIdx = vRow.index * COLUMNS;
-              const rowEntries = filteredEntries.slice(
-                startIdx,
-                startIdx + COLUMNS,
-              );
-              return (
-                <div
-                  key={vRow.key}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: `${ROW_HEIGHT_PX}px`,
-                    transform: `translateY(${vRow.start}px)`,
-                  }}
-                  className="grid grid-cols-5 gap-1.5 pb-1.5"
-                >
-                  {rowEntries.map((entry) =>
-                    renderTile(entry.item, entry.globalIndex),
-                  )}
-                </div>
-              );
-            })}
+            <div
+              style={{
+                height: `${rowVirtualizer.getTotalSize()}px`,
+                position: "relative",
+                width: "100%",
+              }}
+            >
+              {rowVirtualizer.getVirtualItems().map((vRow) => {
+                const startIdx = vRow.index * COLUMNS;
+                const rowEntries = filteredEntries.slice(
+                  startIdx,
+                  startIdx + COLUMNS,
+                );
+                return (
+                  <div
+                    key={vRow.key}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: `${ROW_HEIGHT_PX}px`,
+                      transform: `translateY(${vRow.start}px)`,
+                    }}
+                    className="grid grid-cols-5 gap-1.5 pb-1.5"
+                  >
+                    {rowEntries.map((entry) =>
+                      renderTile(entry.item, entry.globalIndex),
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
+          {rowCount > 6 ? (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-md bg-gradient-to-t from-card via-card/75 to-transparent"
+            />
+          ) : null}
         </div>
       ) : (
-        <div className="grid max-h-[340px] grid-cols-5 gap-1.5 overflow-y-auto pr-1">
-          {filteredEntries.map((entry) =>
-            renderTile(entry.item, entry.globalIndex),
-          )}
+        <div className="relative">
+          <div className="grid max-h-[340px] grid-cols-5 gap-1.5 overflow-y-auto pr-1 pb-3">
+            {filteredEntries.map((entry) =>
+              renderTile(entry.item, entry.globalIndex),
+            )}
+          </div>
+          {rowCount > 6 ? (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-md bg-gradient-to-t from-card via-card/75 to-transparent"
+            />
+          ) : null}
         </div>
       )}
 

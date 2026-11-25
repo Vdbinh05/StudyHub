@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -17,7 +18,6 @@ import {
   ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
-import { AudioPlayer } from "@/components/audio/AudioPlayer";
 import { ImageLightbox } from "@/components/media/ImageLightbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,15 +41,31 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
+import { invalidateLearningCaches } from "@/lib/query-keys";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import {
   createStudySession,
-  isEditableEventTarget,
+  deleteCheckpoint,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
+  listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
+  upsertCheckpoint,
+  upsertCheckpointKeepalive,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  formatCorrectAnswerDisplay,
+  isMultiSelectChoiceQuestion,
+} from "@/lib/learning/answer-display";
+import {
+  clearLocalCheckpoint,
+  loadLocalCheckpoint,
+  makeCheckpointSessionKey,
+  pickNewestCheckpoint,
+  saveLocalCheckpoint,
+} from "@/lib/learning/checkpoints";
 import {
   ExamNavigatorGrid,
   type NavigatorQuestionItem,
@@ -66,19 +82,32 @@ import {
   getExpectedWriteAnswers,
   gradeWriteAnswer,
 } from "@/lib/learning/write-grader";
-import type { ConfidenceLevel, Question, QuestionOption } from "@/types/domain";
+import type {
+  ConfidenceLevel,
+  Question,
+  QuestionOption,
+  StructuredAnswerResponse,
+} from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
+import { ResumeSessionBanner } from "./ResumeSessionBanner";
 import { SafeRichText, ZoomableImage } from "./SafeRichText";
 import {
   StudyEmptyState,
   StudyErrorState,
   StudyLoadingSkeleton,
+  useAuthenticatedUserId,
   useStudySetBundle,
 } from "./useStudySetBundle";
+import {
+  gradeStructuredStudyQuestion,
+  isStructuredV3Question,
+  QuestionContextMedia,
+  V3StructuredPracticeControls,
+} from "./V3StructuredPracticeControls";
 
 type PracticeFilterMode = "all" | "unanswered" | "wrong" | "starred";
 
@@ -90,9 +119,21 @@ interface PracticeItem {
 interface PracticeAnswerState {
   selectedOptionIds: string[];
   typedAnswer: string;
+  structuredResponse?: StructuredAnswerResponse | null;
   isSubmitted: boolean;
   isCorrect: boolean;
   confidence: ConfidenceLevel | null;
+}
+
+interface PracticeCheckpointData {
+  questionOrderIds: string[];
+  currentIndex: number;
+  answeredResults: Record<string, PracticeAnswerState>;
+  correctCount: number;
+  totalCount: number;
+  updatedAt: string | null;
+  source: "local" | "remote";
+  removedCount: number;
 }
 
 interface PracticeClientProps {
@@ -116,8 +157,10 @@ function getPracticeDesktopLgServerSnapshot(): boolean {
 }
 
 export function PracticeClient({ setId }: PracticeClientProps) {
+  const queryClient = useQueryClient();
   const { locale, t } = useI18n();
   const { preferences, playFeedbackSound } = useUserPreferences();
+  const authUserId = useAuthenticatedUserId();
   const isDesktopLg = React.useSyncExternalStore(
     subscribePracticeDesktopLg,
     getPracticeDesktopLgSnapshot,
@@ -137,10 +180,20 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const initialFilterParam = searchParams.get("filter");
   const initialChapterParam = searchParams.get("chapter") ?? "all";
   const initialQuestionIdsParam = searchParams.get("questionIds");
+  const wantsManualSetup = searchParams.get("setup") === "1";
+  const wantsFreshStart = searchParams.get("fresh") === "1";
 
-  // Config state (hydrated with user_preferences defaults — SH-032!)
+  const mcPrefs = preferences.mode_preferences?.mc;
+  const shortcutsEnabled = preferences.mode_preferences?.shortcuts?.enabled ?? true;
+  const showExplanationOnCorrect = mcPrefs?.show_explanation_on_correct ?? true;
+  const autoAdvanceDelayMs =
+    typeof mcPrefs?.auto_advance_ms === "number" && mcPrefs.auto_advance_ms > 0
+      ? mcPrefs.auto_advance_ms
+      : 700;
+
+  // Config state (wired to `user_preferences` + `mode_preferences.mc` — FUNC-14!)
   const [phase, setPhase] = React.useState<"config" | "active" | "complete">(
-    "config",
+    wantsManualSetup ? "config" : "active",
   );
   const [filterMode, setFilterMode] = React.useState<PracticeFilterMode>(() => {
     if (initialFilterParam === "mistakes" || initialFilterParam === "wrong") {
@@ -155,34 +208,49 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const [selectedTag, setSelectedTag] = React.useState<string>("all");
   const [countMode, setCountMode] = React.useState<"all" | "custom">("all");
   const [customCountInput, setCustomCountInput] = React.useState<string>("20");
-  const [shuffleQ, setShuffleQ] = React.useState<boolean>(
-    () => preferences.default_shuffle_questions,
+  const [shuffleQOverride, setShuffleQOverride] = React.useState<boolean | null>(
+    null,
   );
-  const [shuffleA, setShuffleA] = React.useState<boolean>(
-    () => preferences.default_shuffle_options,
+  const [shuffleAOverride, setShuffleAOverride] = React.useState<boolean | null>(
+    null,
   );
-  const [autoNext, setAutoNext] = React.useState<boolean>(false);
-  const [showExplanation, setShowExplanation] = React.useState<boolean>(
-    () => preferences.show_instant_feedback,
+  const [autoNextOverride, setAutoNextOverride] = React.useState<boolean | null>(
+    null,
   );
+  const [showExplanationOverride, setShowExplanationOverride] = React.useState<
+    boolean | null
+  >(null);
   const [confidenceOverride, setConfidenceOverride] = React.useState<
     boolean | null
   >(null);
+
+  const shuffleQ = shuffleQOverride ?? preferences.default_shuffle_questions;
+  const shuffleA =
+    shuffleAOverride ??
+    mcPrefs?.shuffle_options ??
+    preferences.default_shuffle_options;
+  const autoNext =
+    autoNextOverride ??
+    Boolean(mcPrefs?.auto_advance_ms && mcPrefs.auto_advance_ms > 0);
+  const showExplanation =
+    showExplanationOverride ??
+    mcPrefs?.instant_feedback ??
+    preferences.show_instant_feedback;
   const confidenceEnabled =
     confidenceOverride ?? Boolean(preferences.confidence_enabled);
 
-  const syncedPrefsRef = React.useRef(false);
-  React.useEffect(() => {
-    if (syncedPrefsRef.current) return;
-    syncedPrefsRef.current = true;
-    setShuffleQ(preferences.default_shuffle_questions);
-    setShuffleA(preferences.default_shuffle_options);
-    setShowExplanation(preferences.show_instant_feedback);
-  }, [
-    preferences.default_shuffle_options,
-    preferences.default_shuffle_questions,
-    preferences.show_instant_feedback,
-  ]);
+  const setShuffleQ = React.useCallback((next: boolean) => {
+    setShuffleQOverride(next);
+  }, []);
+  const setShuffleA = React.useCallback((next: boolean) => {
+    setShuffleAOverride(next);
+  }, []);
+  const setAutoNext = React.useCallback((next: boolean) => {
+    setAutoNextOverride(next);
+  }, []);
+  const setShowExplanation = React.useCallback((next: boolean) => {
+    setShowExplanationOverride(next);
+  }, []);
 
   const customCount = Math.max(1, Number(customCountInput.trim()) || 20);
 
@@ -199,18 +267,82 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     src: string;
     alt: string;
   } | null>(null);
+  const [resumedBanner, setResumedBanner] = React.useState<{
+    currentIndex: number;
+    totalItems: number;
+    progressPercent: number;
+    updatedAt: string | null;
+    source: "local" | "remote";
+    removedCount: number;
+  } | null>(null);
+  const [dismissedRemoteResume, setDismissedRemoteResume] =
+    React.useState(false);
 
   const sessionIdRef = React.useRef<string | null>(null);
+  const sessionNonceRef = React.useRef<number>(0);
   const startedAtRef = React.useRef<number>(0);
   const questionStartRef = React.useRef<number>(0);
   const autoNextTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const checkpointSyncTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const autoLaunchedRef = React.useRef(false);
+  const freshClearedRef = React.useRef(false);
+  const savedOrderIdsRef = React.useRef<string[] | null>(null);
+  const itemsRef = React.useRef<PracticeItem[]>([]);
+  const answersRef = React.useRef<Record<string, PracticeAnswerState>>({});
+  const currentIndexRef = React.useRef<number>(0);
+  const phaseRef = React.useRef<"config" | "active" | "complete">(phase);
+  const totalCountRef = React.useRef<number>(0);
+
+  React.useEffect(() => {
+    itemsRef.current = items;
+    answersRef.current = answers;
+    currentIndexRef.current = currentIndex;
+    phaseRef.current = phase;
+  }, [answers, currentIndex, items, phase]);
+
+  const practiceSessionKey = React.useMemo(
+    () =>
+      makeCheckpointSessionKey(
+        "practice",
+        setId,
+        `${filterMode}_${selectedChapter}_${selectedTag}`,
+      ),
+    [filterMode, selectedChapter, selectedTag, setId],
+  );
+
+  // Remote checkpoint query for cross-device Practice Resume (`RU-01`)
+  const remoteCheckpointQuery = useQuery({
+    queryKey: ["set-checkpoints", setId, "practice", practiceSessionKey],
+    queryFn: () =>
+      listCheckpoints({
+        studySetId: setId,
+        mode: "practice",
+        sessionKey: practiceSessionKey,
+      }),
+    enabled: Boolean(setId) && !wantsFreshStart,
+    staleTime: 15_000,
+  });
+
+  // Honor `?fresh=1` by clearing BOTH local and remote Practice checkpoints immediately (`FUNC-17`)
+  React.useEffect(() => {
+    if (!wantsFreshStart || freshClearedRef.current) return;
+    freshClearedRef.current = true;
+    if (authUserId) {
+      clearLocalCheckpoint(authUserId, practiceSessionKey);
+    }
+    void deleteCheckpoint({ sessionKey: practiceSessionKey }).catch(() => {});
+  }, [authUserId, practiceSessionKey, wantsFreshStart]);
 
   React.useEffect(() => {
     return () => {
       if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
+      if (checkpointSyncTimerRef.current) {
+        clearTimeout(checkpointSyncTimerRef.current);
+      }
     };
   }, []);
 
@@ -274,10 +406,263 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     selectedTag,
   ]);
 
-  const startPracticeSession = React.useCallback(
-    async (sourceQuestions: Question[]) => {
-      if (sourceQuestions.length === 0) return;
+  const buildPracticeItem = React.useCallback(
+    (q: Question): PracticeItem => {
+      const opts = q.options ?? [];
+      const displayedOptions = shuffleA
+        ? shuffleOptions(opts)
+        : withOptionDisplayLabels(opts);
+      return { question: q, displayedOptions };
+    },
+    [shuffleA],
+  );
+
+  // Build durable checkpoint payload from current refs/args (`RU-01` & `FUNC-17`)
+  const buildCheckpointPayload = React.useCallback(
+    (
+      nextItems: PracticeItem[],
+      nextAnswers: Record<string, PracticeAnswerState>,
+      nextIndex: number,
+    ) => {
+      const orderIds =
+        savedOrderIdsRef.current && savedOrderIdsRef.current.length > nextItems.length
+          ? savedOrderIdsRef.current
+          : nextItems.map((it) => it.question.id);
+      const totalCount = Math.max(
+        orderIds.length,
+        totalCountRef.current,
+        nextItems.length,
+      );
+      const submittedEntries = Object.entries(nextAnswers).filter(
+        ([, a]) => a.isSubmitted,
+      );
+      const answeredCount = submittedEntries.length;
+      const correctCount = submittedEntries.filter(([, a]) => a.isCorrect).length;
+      const progressPercent =
+        totalCount > 0 ? Math.min(100, Math.round((answeredCount / totalCount) * 100)) : 0;
+
+      // Persist compact answeredResults map (preserving exact V1/V3 responses)
+      const answeredResults: Record<string, PracticeAnswerState> = {};
+      for (const [qId, st] of submittedEntries) {
+        answeredResults[qId] = st;
+      }
+
+      return {
+        study_set_id: setId,
+        mode: "practice" as const,
+        session_key: practiceSessionKey,
+        current_index: Math.max(0, nextIndex),
+        total_items: totalCount,
+        progress_percent: progressPercent,
+        state_json: {
+          questionOrderIds: orderIds,
+          currentIndex: Math.max(0, nextIndex),
+          answeredResults,
+          correctCount,
+          totalCount,
+          filterMode,
+          selectedChapter,
+          selectedTag,
+        },
+      };
+    },
+    [filterMode, practiceSessionKey, selectedChapter, selectedTag, setId],
+  );
+
+  const persistPracticeCheckpoint = React.useCallback(
+    (
+      nextItems: PracticeItem[],
+      nextAnswers: Record<string, PracticeAnswerState>,
+      nextIndex: number,
+      immediateRemote = false,
+    ) => {
+      if (nextItems.length === 0) return;
+      const submittedCount = Object.values(nextAnswers).filter(
+        (a) => a.isSubmitted,
+      ).length;
+      if (submittedCount === 0 && nextIndex === 0) return;
+
+      const payload = buildCheckpointPayload(nextItems, nextAnswers, nextIndex);
+
+      if (authUserId) {
+        saveLocalCheckpoint({
+          version: 1,
+          userId: authUserId,
+          studySetId: setId,
+          mode: "practice",
+          sessionKey: practiceSessionKey,
+          currentIndex: payload.current_index,
+          totalItems: payload.total_items,
+          progressPercent: payload.progress_percent,
+          stateJson: payload.state_json,
+          committedEventKeys: [],
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      if (immediateRemote) {
+        if (checkpointSyncTimerRef.current) {
+          clearTimeout(checkpointSyncTimerRef.current);
+          checkpointSyncTimerRef.current = null;
+        }
+        upsertCheckpointKeepalive(payload);
+        return;
+      }
+
+      if (checkpointSyncTimerRef.current) {
+        clearTimeout(checkpointSyncTimerRef.current);
+      }
+      checkpointSyncTimerRef.current = setTimeout(() => {
+        checkpointSyncTimerRef.current = null;
+        void upsertCheckpoint(payload).catch(() => {});
+      }, 600);
+    },
+    [authUserId, buildCheckpointPayload, practiceSessionKey, setId],
+  );
+
+  const clearPracticeCheckpoints = React.useCallback(() => {
+    savedOrderIdsRef.current = null;
+    setResumedBanner(null);
+    setDismissedRemoteResume(true);
+    if (checkpointSyncTimerRef.current) {
+      clearTimeout(checkpointSyncTimerRef.current);
+      checkpointSyncTimerRef.current = null;
+    }
+    if (authUserId) {
+      clearLocalCheckpoint(authUserId, practiceSessionKey);
+    }
+    void deleteCheckpoint({ sessionKey: practiceSessionKey }).catch(() => {});
+  }, [authUserId, practiceSessionKey]);
+
+  const parseCheckpointCandidate = React.useCallback(
+    (
+      source: "local" | "remote",
+      currentIdx: number,
+      totalItems: number,
+      stateJson: Record<string, unknown>,
+      updatedAt: string | null,
+    ): PracticeCheckpointData | null => {
+      const rawAnswers =
+        stateJson.answeredResults && typeof stateJson.answeredResults === "object"
+          ? (stateJson.answeredResults as Record<string, PracticeAnswerState>)
+          : {};
+      const answeredCount = Object.values(rawAnswers).filter(
+        (a) => Boolean(a?.isSubmitted),
+      ).length;
+      if (answeredCount === 0 && currentIdx <= 0) return null;
+
+      const orderIds = Array.isArray(stateJson.questionOrderIds)
+        ? stateJson.questionOrderIds.filter((id): id is string => typeof id === "string")
+        : [];
+      const correctCount =
+        typeof stateJson.correctCount === "number"
+          ? stateJson.correctCount
+          : Object.values(rawAnswers).filter((a) => a?.isSubmitted && a?.isCorrect)
+              .length;
+      const totalCount =
+        typeof stateJson.totalCount === "number" && stateJson.totalCount > 0
+          ? stateJson.totalCount
+          : Math.max(totalItems, orderIds.length);
+
+      return {
+        questionOrderIds: orderIds,
+        currentIndex: Math.max(0, currentIdx),
+        answeredResults: rawAnswers,
+        correctCount,
+        totalCount,
+        updatedAt,
+        source,
+        removedCount: 0,
+      };
+    },
+    [],
+  );
+
+  const applyResumedPracticeSession = React.useCallback(
+    (cp: PracticeCheckpointData, sourceQuestions: Question[]) => {
       if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
+      const qMap = new Map(sourceQuestions.map((q) => [q.id, q]));
+
+      const orderedQuestions: Question[] = [];
+      const seen = new Set<string>();
+      for (const id of cp.questionOrderIds) {
+        const q = qMap.get(id);
+        if (q && !seen.has(q.id)) {
+          seen.add(q.id);
+          orderedQuestions.push(q);
+        }
+      }
+      for (const q of sourceQuestions) {
+        if (!seen.has(q.id)) {
+          seen.add(q.id);
+          orderedQuestions.push(q);
+        }
+      }
+
+      if (orderedQuestions.length === 0) return;
+
+      savedOrderIdsRef.current =
+        cp.questionOrderIds.length > 0 ? [...cp.questionOrderIds] : null;
+      const built = orderedQuestions.map(buildPracticeItem);
+      const safeIndex = Math.max(0, Math.min(cp.currentIndex, built.length - 1));
+      const answeredCount = Object.values(cp.answeredResults).filter(
+        (a) => a.isSubmitted,
+      ).length;
+      const effectiveTotal = Math.max(cp.totalCount, built.length);
+      totalCountRef.current = effectiveTotal;
+
+      setItems(built);
+      setAnswers(cp.answeredResults);
+      setCurrentIndex(safeIndex);
+      setPhase("active");
+      setDismissedRemoteResume(true);
+      setResumedBanner({
+        currentIndex: safeIndex,
+        totalItems: effectiveTotal,
+        progressPercent:
+          effectiveTotal > 0
+            ? Math.min(100, Math.round((answeredCount / effectiveTotal) * 100))
+            : 0,
+        updatedAt: cp.updatedAt,
+        source: cp.source,
+        removedCount: cp.removedCount,
+      });
+
+      startedAtRef.current = Date.now();
+      questionStartRef.current = Date.now();
+      const myNonce = ++sessionNonceRef.current;
+      sessionIdRef.current = null;
+
+      void createStudySession({
+        study_set_id: setId,
+        mode: "practice",
+        config: { filterMode, chapter: selectedChapter, resumed: true },
+        total_items: effectiveTotal,
+      })
+        .then((session) => {
+          if (myNonce === sessionNonceRef.current) {
+            sessionIdRef.current = session.id;
+          }
+        })
+        .catch(() => {});
+    },
+    [buildPracticeItem, filterMode, selectedChapter, setId],
+  );
+
+  const startPracticeSession = React.useCallback(
+    async (
+      sourceQuestions: Question[],
+      options?: { clearSavedCheckpoint?: boolean },
+    ) => {
+      if (sourceQuestions.length === 0) return;
+      if (autoNextTimerRef.current) {
+        clearTimeout(autoNextTimerRef.current);
+        autoNextTimerRef.current = null;
+      }
+
+      if (options?.clearSavedCheckpoint) {
+        clearPracticeCheckpoints();
+      }
 
       const ordered = shuffleQ
         ? shuffleQuestions(sourceQuestions)
@@ -287,20 +672,29 @@ export function PracticeClient({ setId }: PracticeClientProps) {
           ? ordered.slice(0, Math.max(1, customCount))
           : ordered;
 
-      const built: PracticeItem[] = limited.map((q) => {
-        const opts = q.options ?? [];
-        const displayedOptions = shuffleA
-          ? shuffleOptions(opts)
-          : withOptionDisplayLabels(opts);
-        return { question: q, displayedOptions };
-      });
+      const built: PracticeItem[] = limited.map(buildPracticeItem);
+      totalCountRef.current =
+        countMode === "all" &&
+        filterMode === "all" &&
+        selectedChapter === "all" &&
+        selectedTag === "all" &&
+        !initialQuestionIdsParam &&
+        bundle
+          ? Math.max(built.length, bundle.totalQuestions)
+          : built.length;
 
+      savedOrderIdsRef.current = null;
+      setResumedBanner(null);
+      setDismissedRemoteResume(true);
       setItems(built);
       setCurrentIndex(0);
       setAnswers({});
       setPhase("active");
       startedAtRef.current = Date.now();
       questionStartRef.current = Date.now();
+
+      // Nonce guard so a slow earlier session creation NEVER overwrites a newer restart (`FUNC-28(2)`)
+      const myNonce = ++sessionNonceRef.current;
       sessionIdRef.current = null;
 
       try {
@@ -314,57 +708,202 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             shuffleA,
             autoNext,
           },
-          total_items: built.length,
+          total_items: totalCountRef.current,
         });
-        sessionIdRef.current = session.id;
+        if (myNonce === sessionNonceRef.current) {
+          sessionIdRef.current = session.id;
+        }
       } catch {
         // Allow practicing smoothly even if session endpoint is offline
       }
     },
     [
       autoNext,
+      buildPracticeItem,
+      bundle,
+      clearPracticeCheckpoints,
       countMode,
       customCount,
       filterMode,
+      initialQuestionIdsParam,
       selectedChapter,
+      selectedTag,
       setId,
       shuffleA,
       shuffleQ,
     ],
   );
 
-  // Direct-Start Practice (UX31-07): immediately launch Q1 with sensible defaults unless `?setup=1` is requested
-  const wantsManualSetup = searchParams.get("setup") === "1";
+  // Direct-Start Practice via microtask (zero `setTimeout(0)` macrotask lag & StrictMode-safe — `PERF-02`, `RU-01`):
+  // Restores local Practice checkpoint if present (unless `?fresh=1`), otherwise starts Q1 from Page 1 immediately!
   React.useEffect(() => {
-    if (
-      !bundle ||
-      autoLaunchedRef.current ||
-      phase !== "config" ||
-      filteredQuestions.length === 0 ||
-      wantsManualSetup
-    ) {
+    if (!bundle || autoLaunchedRef.current || wantsManualSetup) {
       return;
     }
-    autoLaunchedRef.current = true;
-    const timer = setTimeout(() => {
+    if (filteredQuestions.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (cancelled || autoLaunchedRef.current) return;
+      autoLaunchedRef.current = true;
+
+      if (!wantsFreshStart) {
+        const localCp = authUserId
+          ? loadLocalCheckpoint(authUserId, practiceSessionKey)
+          : null;
+        const remoteCp = remoteCheckpointQuery.data?.[0] ?? null;
+        const newest = pickNewestCheckpoint(remoteCp, localCp);
+        if (newest.source !== "none") {
+          const parsed = parseCheckpointCandidate(
+            newest.source,
+            newest.currentIndex,
+            newest.totalItems,
+            newest.stateJson,
+            newest.updatedAt,
+          );
+          if (parsed) {
+            applyResumedPracticeSession(parsed, filteredQuestions);
+            return;
+          }
+        }
+      }
+
       void startPracticeSession(filteredQuestions);
-    }, 0);
-    return () => clearTimeout(timer);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [
+    applyResumedPracticeSession,
+    authUserId,
     bundle,
     filteredQuestions,
-    phase,
+    parseCheckpointCandidate,
+    practiceSessionKey,
+    remoteCheckpointQuery.data,
     startPracticeSession,
+    wantsFreshStart,
     wantsManualSetup,
   ]);
 
+  // Purely derive remote resume banner if a remote checkpoint arrives before the user answers Q1 (zero effect setState)
+  const pendingRemoteResume = React.useMemo<PracticeCheckpointData | null>(() => {
+    if (
+      wantsFreshStart ||
+      wantsManualSetup ||
+      !bundle ||
+      phase !== "active" ||
+      resumedBanner ||
+      dismissedRemoteResume
+    ) {
+      return null;
+    }
+    const answeredSoFar = Object.values(answers).filter(
+      (a) => a.isSubmitted,
+    ).length;
+    if (answeredSoFar > 0) return null;
+
+    const remoteCp = remoteCheckpointQuery.data?.[0];
+    if (!remoteCp) return null;
+    return parseCheckpointCandidate(
+      "remote",
+      remoteCp.current_index,
+      remoteCp.total_items,
+      remoteCp.state_json ?? {},
+      remoteCp.updated_at,
+    );
+  }, [
+    answers,
+    bundle,
+    dismissedRemoteResume,
+    parseCheckpointCandidate,
+    phase,
+    remoteCheckpointQuery.data,
+    resumedBanner,
+    wantsFreshStart,
+    wantsManualSetup,
+  ]);
+
+  // Progressive streaming append: merge Pages 2..N into `items` cleanly without resetting Q1 or shifting answers (`V32-015`)
+  React.useEffect(() => {
+    if (phase !== "active" || itemsRef.current.length === 0 || filteredQuestions.length === 0) {
+      return;
+    }
+    if (countMode === "custom" && itemsRef.current.length >= customCount) {
+      return;
+    }
+    const existingIds = new Set(itemsRef.current.map((it) => it.question.id));
+    const newlyArrived = filteredQuestions.filter((q) => !existingIds.has(q.id));
+    if (newlyArrived.length === 0) return;
+
+    const savedOrder = savedOrderIdsRef.current;
+    let orderedNew: Question[];
+    if (savedOrder && savedOrder.length > 0) {
+      const rank = new Map(savedOrder.map((id, i) => [id, i]));
+      orderedNew = [...newlyArrived].sort((a, b) => {
+        const ra = rank.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+        const rb = rank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+        return ra - rb;
+      });
+    } else {
+      orderedNew = shuffleQ ? shuffleQuestions(newlyArrived) : newlyArrived;
+    }
+
+    const budget =
+      countMode === "custom"
+        ? Math.max(0, customCount - itemsRef.current.length)
+        : orderedNew.length;
+    const toAppend = orderedNew.slice(0, budget).map(buildPracticeItem);
+    if (toAppend.length === 0) return;
+
+    setItems((prev) => {
+      const prevIds = new Set(prev.map((it) => it.question.id));
+      const deduped = toAppend.filter((it) => !prevIds.has(it.question.id));
+      if (deduped.length === 0) return prev;
+      const merged = [...prev, ...deduped];
+      totalCountRef.current = Math.max(totalCountRef.current, merged.length);
+      return merged;
+    });
+  }, [buildPracticeItem, countMode, customCount, filteredQuestions, phase, shuffleQ]);
+
+  // Persist Practice checkpoint synchronously on `pagehide`, `visibilitychange`, and SPA unmount (`RU-01`)
+  React.useEffect(() => {
+    const flushCheckpointNow = () => {
+      if (phaseRef.current !== "active") return;
+      persistPracticeCheckpoint(
+        itemsRef.current,
+        answersRef.current,
+        currentIndexRef.current,
+        true,
+      );
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        flushCheckpointNow();
+      }
+    };
+
+    window.addEventListener("pagehide", flushCheckpointNow);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushCheckpointNow);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      flushCheckpointNow();
+    };
+  }, [persistPracticeCheckpoint]);
+
   const currentItem = items[currentIndex] ?? null;
-  const isCurrentMultiChoice =
-    currentItem?.question.question_type === "multiple_choice" ||
-    (currentItem?.question.type_payload?.type === "image_choice" &&
-      currentItem.question.type_payload.selection_mode === "multiple");
+  const isCurrentMultiChoice = currentItem
+    ? isMultiSelectChoiceQuestion(currentItem.question)
+    : false;
   const isCurrentImageChoice =
     currentItem?.question.question_type === "image_choice";
+  const isCurrentStructuredV3 = currentItem
+    ? isStructuredV3Question(currentItem.question)
+    : false;
   const currentAnswer = React.useMemo<PracticeAnswerState>(() => {
     if (!currentItem) {
       return {
@@ -388,13 +927,17 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
   const finishPractice = React.useCallback(
     (latestAnswers: Record<string, PracticeAnswerState>) => {
-      if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
+      if (autoNextTimerRef.current) {
+        clearTimeout(autoNextTimerRef.current);
+        autoNextTimerRef.current = null;
+      }
       const durationSeconds = Math.max(
         1,
         Math.round((Date.now() - startedAtRef.current) / 1000),
       );
       setCompletedDurationSeconds(durationSeconds);
       setPhase("complete");
+      clearPracticeCheckpoints();
       const submittedList = Object.values(latestAnswers).filter(
         (a) => a.isSubmitted,
       );
@@ -406,10 +949,14 @@ export function PracticeClient({ setId }: PracticeClientProps) {
           completed_items: submittedList.length,
           correct_items: correctCount,
           duration_seconds: durationSeconds,
-        }).catch(() => {});
+        })
+          .then(() => void invalidateLearningCaches(queryClient, setId))
+          .catch(() => {});
+      } else {
+        void invalidateLearningCaches(queryClient, setId);
       }
     },
-    [],
+    [clearPracticeCheckpoints, queryClient, setId],
   );
 
   const persistAnswer = React.useCallback(
@@ -419,6 +966,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       typedAnswer: string | null,
       isCorrect: boolean,
       confidence: ConfidenceLevel | null,
+      structuredResponse?: StructuredAnswerResponse | null,
     ) => {
       if (!bundle) return;
       const responseTimeMs = Math.max(0, Date.now() - questionStartRef.current);
@@ -435,6 +983,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
           question_id: question.id,
           selected_option_ids: selectedOptionIds,
           typed_answer: typedAnswer,
+          structured_response: structuredResponse ?? null,
           confidence,
           is_correct: isCorrect,
           response_time_ms: responseTimeMs,
@@ -495,6 +1044,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       const nextState: PracticeAnswerState = {
         selectedOptionIds: selectedIds,
         typedAnswer: "",
+        structuredResponse: {
+          kind: "options",
+          selected_option_ids: selectedIds,
+        },
         isSubmitted: true,
         isCorrect,
         confidence: submittedConfidence,
@@ -504,6 +1057,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         [currentItem.question.id]: nextState,
       };
       setAnswers(nextAnswers);
+      setDismissedRemoteResume(true);
       playFeedbackSound(isCorrect ? "correct" : "wrong");
       persistAnswer(
         currentItem.question,
@@ -511,22 +1065,27 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         null,
         isCorrect,
         submittedConfidence,
+        nextState.structuredResponse,
       );
+      persistPracticeCheckpoint(items, nextAnswers, currentIndex);
 
       if (autoNext && isCorrect) {
         if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
         autoNextTimerRef.current = setTimeout(() => {
           if (currentIndex + 1 < items.length) {
-            setCurrentIndex((i) => i + 1);
+            const nextIdx = currentIndex + 1;
+            setCurrentIndex(nextIdx);
+            persistPracticeCheckpoint(items, nextAnswers, nextIdx);
             questionStartRef.current = Date.now();
           } else {
             finishPractice(nextAnswers);
           }
-        }, 700);
+        }, autoAdvanceDelayMs);
       }
     },
     [
       answers,
+      autoAdvanceDelayMs,
       autoNext,
       confidenceEnabled,
       currentAnswer.confidence,
@@ -534,8 +1093,9 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       currentIndex,
       currentItem,
       finishPractice,
-      items.length,
+      items,
       persistAnswer,
+      persistPracticeCheckpoint,
       playFeedbackSound,
     ],
   );
@@ -543,10 +1103,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
   const handleOptionClick = React.useCallback(
     (optionId: string) => {
       if (!currentItem || currentAnswer.isSubmitted) return;
-      const isMulti =
-        currentItem.question.question_type === "multiple_choice" ||
-        (currentItem.question.type_payload?.type === "image_choice" &&
-          currentItem.question.type_payload.selection_mode === "multiple");
+      const isMulti = isMultiSelectChoiceQuestion(currentItem.question);
 
       if (isMulti) {
         const exists = currentAnswer.selectedOptionIds.includes(optionId);
@@ -583,6 +1140,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       const nextState: PracticeAnswerState = {
         selectedOptionIds: [],
         typedAnswer: typed,
+        structuredResponse: { kind: "text", value: typed },
         isSubmitted: true,
         isCorrect: graded.isCorrect,
         confidence: submittedConfidence,
@@ -592,6 +1150,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         [currentItem.question.id]: nextState,
       };
       setAnswers(nextAnswers);
+      setDismissedRemoteResume(true);
       playFeedbackSound(graded.isCorrect ? "correct" : "wrong");
       persistAnswer(
         currentItem.question,
@@ -599,37 +1158,102 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         typed,
         graded.isCorrect,
         submittedConfidence,
+        nextState.structuredResponse,
       );
+      persistPracticeCheckpoint(items, nextAnswers, currentIndex);
     },
     [
       answers,
       confidenceEnabled,
       currentAnswer,
+      currentIndex,
       currentItem,
+      items,
       persistAnswer,
+      persistPracticeCheckpoint,
+      playFeedbackSound,
+    ],
+  );
+
+  const handleSubmitStructured = React.useCallback(
+    (response: StructuredAnswerResponse) => {
+      if (!currentItem || currentAnswer.isSubmitted) return;
+      const isCorrect = gradeStructuredStudyQuestion(
+        currentItem.question,
+        response,
+      );
+      const submittedConfidence = confidenceEnabled
+        ? (currentAnswer.confidence ?? null)
+        : null;
+
+      const nextState: PracticeAnswerState = {
+        selectedOptionIds: [],
+        typedAnswer: "",
+        structuredResponse: response,
+        isSubmitted: true,
+        isCorrect,
+        confidence: submittedConfidence,
+      };
+      const nextAnswers = {
+        ...answers,
+        [currentItem.question.id]: nextState,
+      };
+      setAnswers(nextAnswers);
+      setDismissedRemoteResume(true);
+      playFeedbackSound(isCorrect ? "correct" : "wrong");
+      persistAnswer(
+        currentItem.question,
+        [],
+        null,
+        isCorrect,
+        submittedConfidence,
+        response,
+      );
+      persistPracticeCheckpoint(items, nextAnswers, currentIndex);
+    },
+    [
+      answers,
+      confidenceEnabled,
+      currentAnswer.confidence,
+      currentAnswer.isSubmitted,
+      currentIndex,
+      currentItem,
+      items,
+      persistAnswer,
+      persistPracticeCheckpoint,
       playFeedbackSound,
     ],
   );
 
   const handleGoNext = React.useCallback(() => {
-    if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
+    if (autoNextTimerRef.current) {
+      clearTimeout(autoNextTimerRef.current);
+      autoNextTimerRef.current = null;
+    }
     if (currentIndex + 1 < items.length) {
-      setCurrentIndex(currentIndex + 1);
+      const nextIdx = currentIndex + 1;
+      setCurrentIndex(nextIdx);
+      persistPracticeCheckpoint(items, answers, nextIdx);
       questionStartRef.current = Date.now();
     } else {
       finishPractice(answers);
     }
-  }, [answers, currentIndex, finishPractice, items.length]);
+  }, [answers, currentIndex, finishPractice, items, persistPracticeCheckpoint]);
 
   const handleGoPrev = React.useCallback(() => {
-    if (autoNextTimerRef.current) clearTimeout(autoNextTimerRef.current);
+    if (autoNextTimerRef.current) {
+      clearTimeout(autoNextTimerRef.current);
+      autoNextTimerRef.current = null;
+    }
     if (currentIndex > 0) {
-      setCurrentIndex(currentIndex - 1);
+      const nextIdx = currentIndex - 1;
+      setCurrentIndex(nextIdx);
+      persistPracticeCheckpoint(items, answers, nextIdx);
       questionStartRef.current = Date.now();
     }
-  }, [currentIndex]);
+  }, [answers, currentIndex, items, persistPracticeCheckpoint]);
 
-  // Keyboard shortcuts during active practice
+  // Keyboard shortcuts during active practice (guarded by shared modal/IME/shortcutsEnabled helper — V32-023)
   React.useEffect(() => {
     if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
       return;
@@ -637,8 +1261,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditableEventTarget(event.target)) return;
-      if (document.querySelector('[role="dialog"]')) return;
+      if (shouldIgnoreShortcutEvent(event, { shortcutsEnabled })) return;
 
       if (event.key === "ArrowLeft") {
         event.preventDefault();
@@ -662,7 +1285,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         if (currentAnswer.isSubmitted) {
           handleGoNext();
         } else if (
-          currentItem.question.question_type === "multiple_choice" &&
+          isCurrentMultiChoice &&
           currentAnswer.selectedOptionIds.length > 0
         ) {
           submitCurrentChoice(currentAnswer.selectedOptionIds);
@@ -671,7 +1294,11 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       }
 
       // 1-6 or A-F selects option by displayed position
-      if (!currentAnswer.isSubmitted && currentItem.displayedOptions.length > 0) {
+      if (
+        !currentAnswer.isSubmitted &&
+        !isCurrentStructuredV3 &&
+        currentItem.displayedOptions.length > 0
+      ) {
         let idx = -1;
         if (/^[1-6]$/.test(event.key)) {
           idx = Number(event.key) - 1;
@@ -694,9 +1321,12 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     handleGoNext,
     handleGoPrev,
     handleOptionClick,
+    isCurrentMultiChoice,
+    isCurrentStructuredV3,
     navSheetOpen,
     optionLightbox,
     phase,
+    shortcutsEnabled,
     submitCurrentChoice,
     t,
     toggleStar,
@@ -719,16 +1349,20 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     });
   }, [answers, items]);
 
-  const handleSelectNavIndex = React.useCallback((idx: number) => {
-    // Cancel pending autoNext timer when jumping manually via navigator (SH-025 / BUG-020)!
-    if (autoNextTimerRef.current) {
-      clearTimeout(autoNextTimerRef.current);
-      autoNextTimerRef.current = null;
-    }
-    setCurrentIndex(idx);
-    questionStartRef.current = Date.now();
-    setNavSheetOpen(false);
-  }, []);
+  const handleSelectNavIndex = React.useCallback(
+    (idx: number) => {
+      // Cancel pending autoNext timer when jumping manually via navigator (SH-025 / BUG-020)!
+      if (autoNextTimerRef.current) {
+        clearTimeout(autoNextTimerRef.current);
+        autoNextTimerRef.current = null;
+      }
+      setCurrentIndex(idx);
+      persistPracticeCheckpoint(itemsRef.current, answersRef.current, idx);
+      questionStartRef.current = Date.now();
+      setNavSheetOpen(false);
+    },
+    [persistPracticeCheckpoint],
+  );
 
   if (isLoading) {
     return (
@@ -776,13 +1410,34 @@ export function PracticeClient({ setId }: PracticeClientProps) {
     />
   );
 
+  const displayedTotal =
+    countMode === "all" &&
+    filterMode === "all" &&
+    selectedChapter === "all" &&
+    selectedTag === "all" &&
+    !initialQuestionIdsParam
+      ? Math.max(items.length, bundle.totalQuestions)
+      : items.length;
+
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
+      studySetId={setId}
+      activeMode="practice"
+      onBeforeBack={() => {
+        if (phase === "active") {
+          persistPracticeCheckpoint(
+            itemsRef.current,
+            answersRef.current,
+            currentIndexRef.current,
+            true,
+          );
+        }
+      }}
       title={bundle.studySet.title}
       subtitle={lText(locale, "Luyện tập trắc nghiệm", "Multiple Choice Practice")}
       progressCurrent={phase === "active" ? answeredCount : undefined}
-      progressTotal={phase === "active" ? items.length : undefined}
+      progressTotal={phase === "active" ? displayedTotal : undefined}
       headerRight={
         phase === "active" ? (
           <div className="flex items-center gap-1.5">
@@ -790,8 +1445,16 @@ export function PracticeClient({ setId }: PracticeClientProps) {
               type="button"
               variant="ghost"
               size="sm"
-              className="min-h-9 gap-1 px-2 text-xs sm:px-2.5 sm:text-sm"
-              onClick={() => setPhase("config")}
+              className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-0 gap-1 px-2 text-xs sm:px-2.5 sm:text-sm"
+              aria-label={lText(locale, "Tùy chỉnh phiên luyện tập", "Customize practice")}
+              onClick={() => {
+                // Cancel pending auto-advance when entering settings (`FUNC-28(2)`)
+                if (autoNextTimerRef.current) {
+                  clearTimeout(autoNextTimerRef.current);
+                  autoNextTimerRef.current = null;
+                }
+                setPhase("config");
+              }}
             >
               <Settings2 className="size-4 shrink-0" aria-hidden="true" />
               <span className="hidden sm:inline">
@@ -803,7 +1466,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="min-h-9 lg:hidden"
+                  className="min-h-11 sm:min-h-9 lg:hidden"
                 >
                   <Grid2X2 className="size-4" aria-hidden="true" />
                   <span>{lText(locale, "Câu hỏi", "Questions")}</span>
@@ -821,7 +1484,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             <Button
               variant="outline"
               size="sm"
-              className="min-h-9"
+              className="min-h-11 sm:min-h-9"
               onClick={() => finishPractice(answers)}
             >
               {t("common.finish")}
@@ -832,7 +1495,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
             type="button"
             variant="outline"
             size="sm"
-            className="min-h-9"
+            className="min-h-11 sm:min-h-9"
             onClick={() => setPhase("active")}
           >
             {lText(locale, "Quay lại bài làm", "Resume Session")}
@@ -840,12 +1503,12 @@ export function PracticeClient({ setId }: PracticeClientProps) {
         ) : null
       }
     >
-      {phase === "config" &&
-      !wantsManualSetup &&
-      items.length === 0 &&
-      filteredQuestions.length > 0 ? (
+      {phase === "active" && items.length === 0 && filteredQuestions.length > 0 ? (
         <StudyLoadingSkeleton />
-      ) : phase === "config" ? (
+      ) : phase === "config" ||
+        (phase === "active" &&
+          items.length === 0 &&
+          filteredQuestions.length === 0) ? (
         <div className="mx-auto w-full max-w-2xl space-y-6">
           <Card>
             <CardHeader>
@@ -1049,7 +1712,11 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                 size="lg"
                 className="min-h-11 w-full"
                 disabled={filteredQuestions.length === 0}
-                onClick={() => void startPracticeSession(filteredQuestions)}
+                onClick={() =>
+                  void startPracticeSession(filteredQuestions, {
+                    clearSavedCheckpoint: true,
+                  })
+                }
               >
                 <Play className="size-4" aria-hidden="true" />
                 {lText(
@@ -1156,9 +1823,6 @@ export function PracticeClient({ setId }: PracticeClientProps) {
               <CardContent className="space-y-4">
                 {wrongItems.map((item, idx) => {
                   const ans = answers[item.question.id];
-                  const correctOpts = item.displayedOptions.filter(
-                    (o) => o.is_correct,
-                  );
                   const selectedOpts = item.displayedOptions.filter((o) =>
                     ans?.selectedOptionIds.includes(o.id),
                   );
@@ -1200,21 +1864,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                           <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
                           <span>
                             <strong>{t("study.correctAnswer")}:</strong>{" "}
-                            {correctOpts.length > 0
-                              ? correctOpts
-                                  .map(
-                                    (o) =>
-                                      o.content.trim() ||
-                                      lText(
-                                        locale,
-                                        `Phương án ${o.displayLabel}`,
-                                        `Option ${o.displayLabel}`,
-                                      ),
-                                  )
-                                  .join(", ")
-                              : getExpectedWriteAnswers(item.question)
-                                  .map((a) => a.answer_text)
-                                  .join(" / ")}
+                            {formatCorrectAnswerDisplay(item.question, locale) || "—"}
                           </span>
                         </p>
                       </div>
@@ -1241,7 +1891,62 @@ export function PracticeClient({ setId }: PracticeClientProps) {
       ) : !currentItem ? (
         <StudyEmptyState setId={setId} />
       ) : (
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
+        <div className="space-y-4">
+          {resumedBanner ? (
+            <ResumeSessionBanner
+              modeLabel={lText(locale, "Luyện tập trắc nghiệm", "Practice")}
+              currentIndex={resumedBanner.currentIndex}
+              totalItems={resumedBanner.totalItems}
+              progressPercent={resumedBanner.progressPercent}
+              updatedAt={resumedBanner.updatedAt}
+              source={resumedBanner.source}
+              removedQuestionsCount={resumedBanner.removedCount}
+              onContinue={() => setResumedBanner(null)}
+              onRestart={() =>
+                void startPracticeSession(filteredQuestions, {
+                  clearSavedCheckpoint: true,
+                })
+              }
+              onDiscard={() =>
+                void startPracticeSession(filteredQuestions, {
+                  clearSavedCheckpoint: true,
+                })
+              }
+            />
+          ) : pendingRemoteResume ? (
+            <ResumeSessionBanner
+              modeLabel={lText(locale, "Luyện tập trắc nghiệm", "Practice")}
+              currentIndex={pendingRemoteResume.currentIndex}
+              totalItems={pendingRemoteResume.totalCount}
+              progressPercent={
+                pendingRemoteResume.totalCount > 0
+                  ? Math.round(
+                      (Object.values(pendingRemoteResume.answeredResults).filter(
+                        (a) => a.isSubmitted,
+                      ).length /
+                        pendingRemoteResume.totalCount) *
+                        100,
+                    )
+                  : 0
+              }
+              updatedAt={pendingRemoteResume.updatedAt}
+              source="remote"
+              onContinue={() =>
+                applyResumedPracticeSession(
+                  pendingRemoteResume,
+                  filteredQuestions,
+                )
+              }
+              onRestart={() =>
+                void startPracticeSession(filteredQuestions, {
+                  clearSavedCheckpoint: true,
+                })
+              }
+              onDiscard={() => clearPracticeCheckpoints()}
+            />
+          ) : null}
+
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
           {/* Active Question Card (instant 0ms switch — no AnimatePresence mode="wait" delay!) */}
           <div className="mx-auto w-full max-w-3xl space-y-4">
             <div key={currentItem.question.id}>
@@ -1251,17 +1956,14 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline" className="tabular-nums">
                           {lText(locale, "Câu", "Question")} {currentIndex + 1} /{" "}
-                          {items.length}
+                          {displayedTotal}
                         </Badge>
                         {currentItem.question.chapter ? (
                           <Badge variant="secondary">
                             {currentItem.question.chapter}
                           </Badge>
                         ) : null}
-                        {currentItem.question.question_type === "multiple_choice" ||
-                        (currentItem.question.type_payload?.type === "image_choice" &&
-                          currentItem.question.type_payload.selection_mode ===
-                            "multiple") ? (
+                        {isCurrentMultiChoice ? (
                           <Badge variant="accent">
                             {lText(locale, "Chọn nhiều đáp án", "Multiple answers")}
                           </Badge>
@@ -1276,7 +1978,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="min-h-10 min-w-10 shrink-0"
+                        className="min-h-11 min-w-11 sm:min-h-10 sm:min-w-10 shrink-0"
                         aria-pressed={bundle.starredIds.has(currentItem.question.id)}
                         aria-label={
                           bundle.starredIds.has(currentItem.question.id)
@@ -1302,13 +2004,17 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                     </div>
 
                     <div className="space-y-3">
+                      {/* Reading Passage & Listening Audio context (fixes FUNC-08!) */}
+                      <QuestionContextMedia question={currentItem.question} />
+
                       <h2 className="text-lg font-medium leading-relaxed text-foreground">
                         <SafeRichText
                           rich={currentItem.question.prompt_rich}
                           fallbackText={currentItem.question.prompt}
                         />
                       </h2>
-                      {currentItem.question.prompt_image_url ? (
+                      {currentItem.question.prompt_image_url &&
+                      currentItem.question.question_type !== "image_hotspot" ? (
                         <ZoomableImage
                           src={currentItem.question.prompt_image_url}
                           alt={lText(
@@ -1316,14 +2022,6 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             "Hình ảnh câu hỏi",
                             "Question illustration",
                           )}
-                        />
-                      ) : null}
-                      {currentItem.question.audio_url ? (
-                        <AudioPlayer
-                          src={currentItem.question.audio_url}
-                          transcript={currentItem.question.audio_transcript}
-                          compact
-                          preload="metadata"
                         />
                       ) : null}
                     </div>
@@ -1355,8 +2053,24 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                       }
                     />
 
-                    {/* Choice options vs typed fallback */}
-                    {currentItem.displayedOptions.length > 0 ? (
+                    {/* V3 Structured controls vs Choice options vs Typed fallback (`FUNC-08`) */}
+                    {isCurrentStructuredV3 ? (
+                      <V3StructuredPracticeControls
+                        question={currentItem.question}
+                        disabled={currentAnswer.isSubmitted}
+                        value={currentAnswer.structuredResponse ?? null}
+                        onChange={(resp) =>
+                          setAnswers((prev) => ({
+                            ...prev,
+                            [currentItem.question.id]: {
+                              ...currentAnswer,
+                              structuredResponse: resp,
+                            },
+                          }))
+                        }
+                        onSubmit={handleSubmitStructured}
+                      />
+                    ) : currentItem.displayedOptions.length > 0 ? (
                       <div className="space-y-3">
                         <div
                           role={isCurrentMultiChoice ? "group" : "radiogroup"}
@@ -1390,10 +2104,10 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             if (submitted) {
                               if (isCorrectOpt) {
                                 stateStyle =
-                                  "border-success bg-success-subtle text-success-subtle-foreground";
+                                  "border-2 border-success bg-success-subtle text-success-subtle-foreground ring-1 ring-success/30";
                               } else if (isSelected && !isCorrectOpt) {
                                 stateStyle =
-                                  "border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
+                                  "border-2 border-destructive bg-destructive-subtle text-destructive-subtle-foreground";
                               } else {
                                 stateStyle =
                                   "border-border bg-card/60 opacity-75";
@@ -1601,7 +2315,21 @@ export function PracticeClient({ setId }: PracticeClientProps) {
                             </>
                           )}
                         </div>
+                        {!currentAnswer.isCorrect &&
+                        (isCurrentStructuredV3 ||
+                          currentItem.displayedOptions.length === 0) ? (
+                          <div className="text-sm text-foreground/95">
+                            <strong>{t("study.correctAnswer")}: </strong>
+                            <span>
+                              {formatCorrectAnswerDisplay(
+                                currentItem.question,
+                                locale,
+                              ) || "—"}
+                            </span>
+                          </div>
+                        ) : null}
                         {showExplanation &&
+                        (showExplanationOnCorrect || !currentAnswer.isCorrect) &&
                         (currentItem.question.explanation ||
                           currentItem.question.explanation_rich) ? (
                           <div className="text-sm text-foreground/90">
@@ -1659,6 +2387,7 @@ export function PracticeClient({ setId }: PracticeClientProps) {
               {renderNavigatorGrid()}
             </aside>
           ) : null}
+          </div>
         </div>
       )}
 

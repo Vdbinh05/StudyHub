@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   ArrowRight,
@@ -45,6 +46,7 @@ import {
   gradeWriteAnswer,
   isLongOpenAnswer,
 } from "@/lib/learning/write-grader";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import type { Question } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
@@ -63,7 +65,10 @@ interface WriteClientProps {
 
 export function WriteClient({ setId }: WriteClientProps) {
   const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
   const { preferences, playFeedbackSound } = useUserPreferences();
+  const writePrefs = preferences.mode_preferences?.write;
+  const allowOverride = writePrefs?.allow_override !== false;
   const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
     data: bundle,
@@ -77,10 +82,14 @@ export function WriteClient({ setId }: WriteClientProps) {
 
   const [selectedChapter, setSelectedChapter] = React.useState("all");
   const [strictMode, setStrictMode] = React.useState(false);
-  const [ignoreCase, setIgnoreCase] = React.useState(true);
+  const [ignoreCase, setIgnoreCase] = React.useState<boolean>(
+    () => writePrefs?.ignore_case ?? true,
+  );
   const [collapseWhitespace, setCollapseWhitespace] = React.useState(true);
   const [ignorePunctuation, setIgnorePunctuation] = React.useState(true);
-  const [ignoreDiacritics, setIgnoreDiacritics] = React.useState(false);
+  const [ignoreDiacritics, setIgnoreDiacritics] = React.useState<boolean>(
+    () => writePrefs?.ignore_diacritics ?? false,
+  );
 
   const [subsetIds, setSubsetIds] = React.useState<string[] | null>(null);
   const [currentIndex, setCurrentIndex] = React.useState(0);
@@ -106,6 +115,7 @@ export function WriteClient({ setId }: WriteClientProps) {
   const startedAtRef = React.useRef<number>(0);
   const cardStartRef = React.useRef<number>(0);
 
+  // Pure chunk-based deterministic shuffle (50/page) so background Pages 2..N append cleanly without reshuffling Q1 (V32-015)
   const bundleQuestions = bundle?.questions;
   const questions = React.useMemo(() => {
     if (!bundleQuestions) return [];
@@ -118,13 +128,24 @@ export function WriteClient({ setId }: WriteClientProps) {
     } else if (selectedChapter !== "all") {
       list = list.filter((q) => (q.chapter?.trim() || "") === selectedChapter);
     }
-    if (preferences.default_shuffle_questions) {
-      return fisherYatesShuffle(
-        list,
-        createSeededRng(`write:${setId}:${selectedChapter}:${subsetIds?.length ?? 0}`),
+    if (!preferences.default_shuffle_questions) {
+      return list;
+    }
+    const CHUNK_SIZE = 50;
+    const out: Question[] = [];
+    for (let offset = 0; offset < list.length; offset += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(offset / CHUNK_SIZE);
+      const chunk = list.slice(offset, offset + CHUNK_SIZE);
+      out.push(
+        ...fisherYatesShuffle(
+          chunk,
+          createSeededRng(
+            `write:${setId}:${selectedChapter}:${subsetIds ? subsetIds.length : 0}:c${chunkIdx}`,
+          ),
+        ),
       );
     }
-    return list;
+    return out;
   }, [
     bundleQuestions,
     preferences.default_shuffle_questions,
@@ -265,7 +286,11 @@ export function WriteClient({ setId }: WriteClientProps) {
             completed_items: finalCorrect + finalMissed,
             correct_items: finalCorrect,
             duration_seconds: durationSeconds,
-          }).catch(() => {});
+          })
+            .then(() => invalidateLearningCaches(queryClient, setId))
+            .catch(() => {});
+        } else {
+          invalidateLearningCaches(queryClient, setId);
         }
       } else {
         setCurrentIndex((i) => i + 1);
@@ -280,7 +305,9 @@ export function WriteClient({ setId }: WriteClientProps) {
       currentIndex,
       missedIds.size,
       playFeedbackSound,
+      queryClient,
       questions.length,
+      setId,
     ],
   );
 
@@ -432,14 +459,16 @@ export function WriteClient({ setId }: WriteClientProps) {
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
+      studySetId={setId}
+      activeMode="write"
       title={bundle.studySet.title}
-      subtitle={lText(locale, "Chế độ Gõ đáp án", "Write Mode")}
+      subtitle={lText(locale, "Gõ đáp án", "Write Mode")}
       progressCurrent={questions.length > 0 ? Math.min(currentIndex + 1, questions.length) : 0}
       progressTotal={questions.length}
       headerRight={
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="min-h-9">
+            <Button variant="outline" size="sm" className="min-h-11 sm:min-h-9">
               <Settings2 className="size-4" aria-hidden="true" />
               <span>{lText(locale, "Quy tắc chấm", "Grading")}</span>
             </Button>
@@ -873,7 +902,7 @@ export function WriteClient({ setId }: WriteClientProps) {
                               : t("study.nextQuestion")}
                             <ArrowRight className="size-4" aria-hidden="true" />
                           </Button>
-                          {!result.isCorrect && result.userAnswer ? (
+                          {allowOverride && !result.isCorrect && result.userAnswer ? (
                             <Button
                               variant="ghost"
                               size="sm"

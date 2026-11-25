@@ -9,6 +9,7 @@ import {
   type ShortcutBinding,
   type ShortcutScope,
 } from "@/lib/shortcuts";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 
 const GlobalSearchDialog = dynamic(
   () => import("./GlobalSearchDialog").then((mod) => mod.GlobalSearchDialog),
@@ -62,8 +63,19 @@ const enabledListeners = new Set<() => void>();
 
 function subscribeShortcutsEnabled(listener: () => void): () => void {
   enabledListeners.add(listener);
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === SHORTCUTS_ENABLED_STORAGE_KEY || event.key === null) {
+      listener();
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorage);
+  }
   return () => {
     enabledListeners.delete(listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", handleStorage);
+    }
   };
 }
 
@@ -170,7 +182,11 @@ export function ShortcutProvider({
         allowInInput: false,
         allowInModal: false,
         allowInExam: true,
-        handler: () => openHelp(),
+        preventDefault: true,
+        handler: (event) => {
+          event.preventDefault();
+          openHelp();
+        },
       },
     ]);
   }, [registry, openSearch, openHelp]);
@@ -184,6 +200,24 @@ export function ShortcutProvider({
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const isEscape = event.key === "Escape";
+      const isModK =
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        event.key.toLowerCase() === "k";
+
+      if (
+        !isEscape &&
+        shouldIgnoreShortcutEvent(event, {
+          shortcutsEnabled,
+          allowInEditable: isModK,
+          allowInModal: false,
+          lastCompositionEndAt: lastCompositionEndRef.current,
+        })
+      ) {
+        return;
+      }
+
       registry.handleKeyDown(event, {
         pathname,
         lastCompositionEndAt: lastCompositionEndRef.current,

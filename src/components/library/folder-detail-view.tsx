@@ -140,6 +140,32 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     );
   }
 
+  const loadError = foldersQuery.error ?? setsQuery.error;
+  if (loadError) {
+    return (
+      <EmptyState
+        icon={AlertCircle}
+        title={vi ? "Không thể tải thư mục" : "Unable to load folder"}
+        description={getFriendlyErrorMessage(loadError, locale)}
+        action={
+          <Button
+            onClick={() => {
+              void foldersQuery.refetch();
+              void setsQuery.refetch();
+            }}
+          >
+            {t("common.retry")}
+          </Button>
+        }
+        secondaryAction={
+          <Button asChild variant="outline">
+            <Link href="/library">{t("library.title")}</Link>
+          </Button>
+        }
+      />
+    );
+  }
+
   if (!folder) {
     return (
       <EmptyState

@@ -84,6 +84,34 @@ export type SpeakResult =
 export const MIN_TTS_RATE = 0.5;
 export const MAX_TTS_RATE = 2.0;
 
+const VIETNAMESE_DIACRITIC_REGEX =
+  /[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵÀÁẢÃẠẰẮẲẴẶẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ]/;
+const JAPANESE_KANA_REGEX = /[\u3040-\u30FF]/;
+const KOREAN_HANGUL_REGEX = /[\uAC00-\uD7AF\u1100-\u11FF]/;
+const CJK_HAN_REGEX = /[\u4E00-\u9FFF]/;
+const LATIN_LETTER_REGEX = /[A-Za-z]/;
+
+/**
+ * Deterministically detect the spoken language of study text for TTS (`RU-05`).
+ * - Vietnamese diacritics -> `"vi-VN"`
+ * - Japanese / Korean / Chinese scripts -> `"ja-JP"` / `"ko-KR"` / `"zh-CN"`
+ * - Plain Latin text without Vietnamese diacritics (e.g., English vocabulary) -> `"en-US"`
+ * - Symbols/numbers only -> `fallbackLang`
+ */
+export function detectSpeechLanguage(
+  text: string,
+  fallbackLang = "vi-VN",
+): string {
+  const clean = text.trim();
+  if (!clean) return fallbackLang;
+  if (VIETNAMESE_DIACRITIC_REGEX.test(clean)) return "vi-VN";
+  if (JAPANESE_KANA_REGEX.test(clean)) return "ja-JP";
+  if (KOREAN_HANGUL_REGEX.test(clean)) return "ko-KR";
+  if (CJK_HAN_REGEX.test(clean)) return "zh-CN";
+  if (LATIN_LETTER_REGEX.test(clean)) return "en-US";
+  return fallbackLang;
+}
+
 export function clampTtsRate(rate: number): number {
   if (!Number.isFinite(rate)) return 1.0;
   return Math.min(MAX_TTS_RATE, Math.max(MIN_TTS_RATE, Math.round(rate * 100) / 100));
@@ -167,6 +195,9 @@ export class TtsController {
   private activeToken = 0;
   private state: TtsStateSnapshot;
   private readonly stateListeners = new Set<(snapshot: TtsStateSnapshot) => void>();
+  private readonly legacyVoiceListeners = new Set<() => void>();
+  private legacyOriginalOnVoicesChanged: (() => void) | null = null;
+  private legacyHandlerInstalled = false;
 
   constructor(deps?: TtsControllerDependencies) {
     this.synthesis = deps && "synthesis" in deps ? (deps.synthesis ?? null) : getBrowserSynthesis();
@@ -232,14 +263,25 @@ export class TtsController {
       };
     }
 
-    const previous = synth.onvoiceschanged ?? null;
-    synth.onvoiceschanged = () => {
-      previous?.();
-      handler();
-    };
+    // Legacy fallback using a Set registry instead of chained closures (fixes MEM-05)
+    this.legacyVoiceListeners.add(handler);
+    if (!this.legacyHandlerInstalled) {
+      this.legacyOriginalOnVoicesChanged = synth.onvoiceschanged ?? null;
+      this.legacyHandlerInstalled = true;
+      synth.onvoiceschanged = () => {
+        this.legacyOriginalOnVoicesChanged?.();
+        for (const cb of this.legacyVoiceListeners) {
+          cb();
+        }
+      };
+    }
+
     return () => {
-      if (synth.onvoiceschanged) {
-        synth.onvoiceschanged = previous;
+      this.legacyVoiceListeners.delete(handler);
+      if (this.legacyVoiceListeners.size === 0 && this.legacyHandlerInstalled) {
+        synth.onvoiceschanged = this.legacyOriginalOnVoicesChanged;
+        this.legacyOriginalOnVoicesChanged = null;
+        this.legacyHandlerInstalled = false;
       }
     };
   }
@@ -296,6 +338,11 @@ export class TtsController {
     const rawVoices = this.synthesis.getVoices();
     const normalizedVoices = rawVoices.map(normalizeVoiceInfo);
 
+    const resolvedLang =
+      !options.lang || options.lang === "auto"
+        ? detectSpeechLanguage(cleanText)
+        : options.lang;
+
     let chosenInfo: TtsVoiceInfo | null = null;
     if (options.voiceURI) {
       chosenInfo = normalizedVoices.find((v) => v.voiceURI === options.voiceURI) ?? null;
@@ -303,7 +350,7 @@ export class TtsController {
     if (!chosenInfo) {
       chosenInfo = selectBestVoice(
         normalizedVoices,
-        options.lang,
+        resolvedLang,
         options.preferLocal ?? true,
       );
     }
@@ -327,8 +374,8 @@ export class TtsController {
     if (rawMatch) {
       utterance.voice = rawMatch;
       utterance.lang = rawMatch.lang;
-    } else if (options.lang) {
-      utterance.lang = options.lang;
+    } else if (resolvedLang) {
+      utterance.lang = resolvedLang;
     }
 
     utterance.onstart = () => {

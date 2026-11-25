@@ -152,6 +152,48 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const sha256 = computeSha256Hex(bytes);
+
+    // Content-hash deduplication (DB-13 / V32-048): reuse active identical audio blob within the same study set
+    const { data: existingAsset } = await supabase
+      .from("media_assets")
+      .select("id, storage_path, mime_type, size_bytes, duration_ms")
+      .eq("owner_id", user.id)
+      .eq("study_set_id", studySetId)
+      .eq("kind", "audio")
+      .eq("sha256_hash", sha256)
+      .eq("is_orphaned", false)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingAsset?.storage_path) {
+      const { data: existingSigned, error: existingSignErr } = await supabase.storage
+        .from("study-media")
+        .createSignedUrl(existingAsset.storage_path, SIGNED_URL_TTL_SECONDS);
+
+      if (!existingSignErr && existingSigned?.signedUrl) {
+        const proxyUrl = `/api/uploads/signed-url?path=${encodeURIComponent(existingAsset.storage_path)}&redirect=1`;
+        return apiSuccess(
+          {
+            id: existingAsset.id,
+            mediaId: existingAsset.id,
+            kind: "audio" as const,
+            path: existingAsset.storage_path,
+            proxyUrl,
+            signedUrl: existingSigned.signedUrl,
+            expiresIn: SIGNED_URL_TTL_SECONDS,
+            mimeType: existingAsset.mime_type,
+            size: existingAsset.size_bytes,
+            sha256,
+            durationMs: existingAsset.duration_ms ?? durationMs,
+            deduplicated: true,
+          },
+          undefined,
+          { status: 201 },
+        );
+      }
+    }
+
     const storagePath = `${access.studySet.owner_id}/${studySetId}/audio-${randomUUID()}.${validation.extension}`;
 
     const { error: uploadErr } = await supabase.storage

@@ -7,6 +7,10 @@ import {
   fetchQuestionRelationsChunked,
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcGetUserMistakesPage,
+} from "@/lib/supabase/rpc";
 import { listMistakesQuerySchema } from "@/lib/validation/learning";
 
 /**
@@ -34,6 +38,51 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     // 1. Paginate caller's progress rows (allow wrong_count >= 0 if guessCorrectFlag is explicitly requested)
     const minWrong = guessCorrectFlag && !rawParams.minWrongCount ? 0 : query.minWrongCount;
+    const fromOffset = (query.page - 1) * query.pageSize;
+
+    // DB-07 (Migration 0019): Single-RTT SQL RPC executes all 15 filters, sorting, pagination & LATERAL latest wrong answer
+    // cleanly inside PostgreSQL with zero PostgREST 1,000-row truncation
+    const { data: rpcMistakes, error: rpcErr } = await rpcGetUserMistakesPage(
+      supabase,
+      {
+        p_study_set_id: query.studySetId ?? null,
+        p_subject: query.subject ?? null,
+        p_chapter: query.chapter ?? null,
+        p_tag_id: query.tagId ?? null,
+        p_question_type: query.questionType ?? null,
+        p_days: query.days ?? null,
+        p_min_wrong_count: minWrong,
+        p_min_consecutive_wrong: query.minConsecutiveWrong ?? null,
+        p_exam_attempt_id: query.examAttemptId ?? null,
+        p_recent_exam_only: Boolean(query.recentExamOnly),
+        p_confidence: query.confidence ?? null,
+        p_low_confidence: lowConfFlag,
+        p_high_conf_wrong: highConfWrongFlag,
+        p_guess_correct: guessCorrectFlag,
+        p_due_only: Boolean(query.dueOnly),
+        p_starred_only: Boolean(query.starredOnly),
+        p_mastery_level: query.masteryLevel ?? null,
+        p_effective_tab: effectiveTab ?? null,
+        p_include_resolved: Boolean(query.includeResolved),
+        p_sort: query.sort,
+        p_page: query.page,
+        p_page_size: query.pageSize,
+      },
+    );
+
+    if (!rpcErr && rpcMistakes) {
+      const items = Array.isArray(rpcMistakes.items) ? rpcMistakes.items : [];
+      const total = Number(rpcMistakes.total ?? items.length);
+      return apiSuccess(items, {
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: fromOffset + items.length < total,
+      });
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
 
     const allProgress = await fetchAllPages(async (from, to) => {
       let dbQuery = supabase
@@ -361,11 +410,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ),
       fetchInChunks(
         pageQIds,
-        async (chunk) =>
-          supabase
-            .from("exam_attempt_questions")
-            .select("id, attempt_id, question_id")
-            .in("question_id", chunk),
+        async (chunk) => {
+          const allRows = await fetchAllPages(async (f, t) =>
+            supabase
+              .from("exam_attempt_questions")
+              .select("id, attempt_id, question_id")
+              .in("question_id", chunk)
+              .range(f, t),
+          );
+          return { data: allRows, error: null };
+        },
         SAFE_IN_CHUNK_SIZE,
       ),
       fetchInChunks(

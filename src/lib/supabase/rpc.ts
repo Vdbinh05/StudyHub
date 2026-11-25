@@ -247,15 +247,24 @@ export async function rpcIssueCoverageCycleNextExam(
     p_show_review_after_submit?: boolean;
   },
 ): Promise<{
-  data: (ExamAttemptPayload & { cycle_id?: string; sequence_number?: number }) | null;
+  data: (ExamAttemptPayload & {
+    cycle_id?: string;
+    sequence_number?: number;
+    already_completed?: boolean;
+    status?: string;
+  }) | null;
   error: RpcError;
 }> {
   const rpc = getDynamicRpc(supabase);
   const { data, error } = await rpc("issue_coverage_cycle_next_exam", params);
   return {
     data:
-      (data as (ExamAttemptPayload & { cycle_id?: string; sequence_number?: number }) | null) ??
-      null,
+      (data as (ExamAttemptPayload & {
+        cycle_id?: string;
+        sequence_number?: number;
+        already_completed?: boolean;
+        status?: string;
+      }) | null) ?? null,
     error,
   };
 }
@@ -532,6 +541,236 @@ export async function rpcRecordStudySessionAnswer(
             is_correct: boolean;
             progress: Record<string, unknown> | null;
           })
+        : null,
+    error,
+  };
+}
+
+export async function rpcToggleStarredQuestion(
+  supabase: SupabaseClient<Database>,
+  params: { p_question_id: string; p_study_set_id?: string | null },
+): Promise<{
+  data: { starred: boolean; question_id: string } | null;
+  error: RpcError;
+}> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("toggle_starred_question", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as { starred: boolean; question_id: string })
+        : null,
+    error,
+  };
+}
+
+export async function rpcRecordProgressAnswer(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_question_id: string;
+    p_study_set_id?: string | null;
+    p_is_correct: boolean;
+    p_self_rating?: string | null;
+    p_confidence?: ConfidenceLevel | null;
+    p_hint_used?: boolean;
+    p_mode?: string | null;
+    p_response_time_ms?: number | null;
+    p_override_mastery_level?: string | null;
+    p_override_mistake_status?: string | null;
+    p_override_ease_factor?: number | null;
+    p_override_interval_days?: number | null;
+    p_override_repetitions?: number | null;
+    p_override_next_review_at?: string | null;
+    p_has_override_next_review_at?: boolean;
+  },
+): Promise<{ data: Record<string, unknown> | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("record_progress_answer", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null,
+    error,
+  };
+}
+
+export async function rpcBumpStudySetContentVersion(
+  supabase: SupabaseClient<Database>,
+  setId: string,
+): Promise<{ data: number | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("bump_study_set_content_version", {
+    p_set_id: setId,
+  });
+  return {
+    data: typeof data === "number" ? data : null,
+    error,
+  };
+}
+
+export async function rpcAllocateQuestionPosition(
+  supabase: SupabaseClient<Database>,
+  setId: string,
+): Promise<{ data: number | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("allocate_question_position", {
+    p_set_id: setId,
+  });
+  return {
+    data: typeof data === "number" ? data : null,
+    error,
+  };
+}
+
+export async function rpcPatchUserPreferences(
+  supabase: SupabaseClient<Database>,
+  patch: Record<string, unknown>,
+): Promise<{ data: Record<string, unknown> | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("patch_user_preferences", {
+    p_patch: patch,
+  });
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null,
+    error,
+  };
+}
+
+export async function rpcSaveDiagramPatch(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_diagram_id: string;
+    p_patch: Record<string, unknown>;
+    p_hotspots?: Array<Record<string, unknown>> | null;
+    p_replace_hotspots?: boolean;
+  },
+): Promise<{ data: { diagram: Record<string, unknown> } | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("save_diagram_patch", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as { diagram: Record<string, unknown> })
+        : null,
+    error,
+  };
+}
+
+export async function rpcListAccessibleStudySets(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_scope: string;
+    p_search?: string | null;
+    p_folder_id?: string | null;
+    p_set_type?: string | null;
+    p_visibility?: string | null;
+    p_include_archived?: boolean;
+    p_favorites_only?: boolean;
+    p_sort?: string;
+    p_page?: number;
+    p_page_size?: number;
+  },
+): Promise<{
+  data: { items: Array<Record<string, unknown>>; total: number } | null;
+  error: RpcError;
+}> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("list_accessible_study_sets", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as { items: Array<Record<string, unknown>>; total: number })
+        : null,
+    error,
+  };
+}
+
+export async function rpcGetStudySetQuestionsPage(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_set_id: string;
+    p_fields?: string;
+    p_chapter?: string | null;
+    p_difficulty?: string | null;
+    p_question_type?: string | null;
+    p_search?: string | null;
+    p_starred_only?: boolean;
+    p_tag_id?: string | null;
+    p_page?: number;
+    p_page_size?: number;
+  },
+): Promise<{
+  data: { items: Array<Record<string, unknown>>; total: number } | null;
+  error: RpcError;
+}> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("get_study_set_questions_page", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as { items: Array<Record<string, unknown>>; total: number })
+        : null,
+    error,
+  };
+}
+
+export async function rpcGetUserStatisticsSummary(
+  supabase: SupabaseClient<Database>,
+  days: number,
+): Promise<{ data: Record<string, unknown> | null; error: RpcError }> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("get_user_statistics_summary", {
+    p_days: days,
+  });
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null,
+    error,
+  };
+}
+
+export async function rpcGetUserMistakesPage(
+  supabase: SupabaseClient<Database>,
+  params: {
+    p_study_set_id?: string | null;
+    p_subject?: string | null;
+    p_chapter?: string | null;
+    p_tag_id?: string | null;
+    p_question_type?: string | null;
+    p_days?: number | null;
+    p_min_wrong_count?: number;
+    p_min_consecutive_wrong?: number | null;
+    p_exam_attempt_id?: string | null;
+    p_recent_exam_only?: boolean;
+    p_confidence?: string | null;
+    p_low_confidence?: boolean;
+    p_high_conf_wrong?: boolean;
+    p_guess_correct?: boolean;
+    p_due_only?: boolean;
+    p_starred_only?: boolean;
+    p_mastery_level?: string | null;
+    p_effective_tab?: string | null;
+    p_include_resolved?: boolean;
+    p_sort?: string;
+    p_page?: number;
+    p_page_size?: number;
+  },
+): Promise<{
+  data: { items: Array<Record<string, unknown>>; total: number } | null;
+  error: RpcError;
+}> {
+  const rpc = getDynamicRpc(supabase);
+  const { data, error } = await rpc("get_user_mistakes_page", params);
+  return {
+    data:
+      data && typeof data === "object"
+        ? (data as { items: Array<Record<string, unknown>>; total: number })
         : null,
     error,
   };

@@ -11,6 +11,7 @@ import {
   RATE_LIMITS,
 } from "@/lib/security/rate-limit";
 import {
+  computeLiveCoverageMetrics,
   fetchCycleSubjectProgress,
   fetchCyclesSubjectProgressBatch,
   issueNextExamForCycle,
@@ -87,31 +88,37 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       cycleRows.map((c) => c.id),
     );
 
-    const enriched: CoverageCycle[] = cycleRows.map((c) => {
-      const subjectProgress = progressByCycle.get(c.id) ?? [];
-      const remainingCount = Math.max(
-        0,
-        c.total_questions - c.completed_count - c.assigned_count,
-      );
-      const progressPercent =
-        c.total_questions > 0
-          ? Math.round((c.completed_count / c.total_questions) * 10000) / 100
-          : 0;
-
-      return {
-        ...c,
-        source_snapshot: (Array.isArray(c.source_snapshot)
-          ? c.source_snapshot
-          : []) as CoverageCycle["source_snapshot"],
-        filter_snapshot: (c.filter_snapshot ?? {}) as Record<string, unknown>,
-        remaining_count: remainingCount,
-        progress_percent: progressPercent,
-        subject_progress: subjectProgress,
-        active_attempt: c.active_attempt_id
+    const enriched: CoverageCycle[] = await Promise.all(
+      cycleRows.map(async (c) => {
+        const subjectProgress = progressByCycle.get(c.id) ?? [];
+        const activeAttempt = c.active_attempt_id
           ? (activeAttemptMap.get(c.active_attempt_id) ?? null)
-          : null,
-      };
-    });
+          : null;
+        const live = await computeLiveCoverageMetrics(
+          supabase,
+          user.id,
+          c,
+          subjectProgress,
+          Boolean(activeAttempt && activeAttempt.status === "in_progress"),
+        );
+
+        return {
+          ...c,
+          status: live.status,
+          completed_at: live.completed_at,
+          assigned_count: live.assigned_count,
+          active_attempt_id: live.active_attempt_id,
+          source_snapshot: (Array.isArray(c.source_snapshot)
+            ? c.source_snapshot
+            : []) as CoverageCycle["source_snapshot"],
+          filter_snapshot: (c.filter_snapshot ?? {}) as Record<string, unknown>,
+          remaining_count: live.remaining_count,
+          progress_percent: live.progress_percent,
+          subject_progress: subjectProgress,
+          active_attempt: live.active_attempt_id ? activeAttempt : null,
+        };
+      }),
+    );
 
     const total = count ?? enriched.length;
     return apiSuccess(enriched, {

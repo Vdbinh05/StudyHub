@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import type {
@@ -1007,13 +1007,18 @@ export async function computeExamPreview(params: {
   return { pool, preview };
 }
 
+function deterministicHashKey(seed: string, id: string): string {
+  return createHash("md5").update(`${seed}:${id}`).digest("hex");
+}
+
 /**
- * Defense-in-depth mirror of PostgreSQL `sanitize_pre_submit_type_payload()`.
+ * Defense-in-depth mirror of PostgreSQL `sanitize_pre_submit_type_payload_seeded()`.
  * Strips every answer-revealing field from V3 structured question payloads while in_progress.
  */
 export function sanitizePreSubmitTypePayload(
   questionType: string,
   rawPayload: QuestionTypePayload | Record<string, unknown> | null | undefined,
+  seed: string = "",
 ): Record<string, unknown> | null {
   if (!rawPayload || typeof rawPayload !== "object") return null;
   const payload = rawPayload as Record<string, unknown>;
@@ -1034,12 +1039,21 @@ export function sanitizePreSubmitTypePayload(
         }),
       };
     }
-    case "numerical":
-      return {
-        type: "numerical",
-        unit_required: Boolean(payload.unit_required),
-        significant_figures: payload.significant_figures ?? null,
-      };
+    case "numerical": {
+      const unitRequired = Boolean(payload.unit_required);
+      return unitRequired
+        ? {
+            type: "numerical",
+            unit_required: true,
+            significant_figures: payload.significant_figures ?? null,
+          }
+        : {
+            type: "numerical",
+            unit_required: false,
+            unit: payload.unit ?? null,
+            significant_figures: payload.significant_figures ?? null,
+          };
+    }
     case "ordering": {
       const rawItems = Array.isArray(payload.items) ? payload.items : [];
       const items = rawItems
@@ -1053,7 +1067,12 @@ export function sanitizePreSubmitTypePayload(
             media_id: rec.media_id ?? null,
           };
         })
-        .sort((a, b) => a.id.localeCompare(b.id));
+        .sort(
+          (a, b) =>
+            deterministicHashKey(seed, a.id).localeCompare(
+              deterministicHashKey(seed, b.id),
+            ) || a.id.localeCompare(b.id),
+        );
       return {
         type: "ordering",
         allow_partial_credit: Boolean(payload.allow_partial_credit),
@@ -1098,7 +1117,12 @@ export function sanitizePreSubmitTypePayload(
             right_image_url: rec.right_image_url ?? null,
           };
         }),
-      ].sort((a, b) => a.right_id.localeCompare(b.right_id));
+      ].sort(
+        (a, b) =>
+          deterministicHashKey(seed, a.right_id).localeCompare(
+            deterministicHashKey(seed, b.right_id),
+          ) || a.right_id.localeCompare(b.right_id),
+      );
       return { type: "matching", left_items, right_items };
     }
     case "image_hotspot": {
@@ -1202,6 +1226,7 @@ export function stripPreSubmitQuestions(
       base.type_payload_snapshot = sanitizePreSubmitTypePayload(
         q.question_type,
         q.type_payload_snapshot,
+        q.id,
       ) as QuestionTypePayload | null;
     }
     if (q.media_snapshot !== undefined) {

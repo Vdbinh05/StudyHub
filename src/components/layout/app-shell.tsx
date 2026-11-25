@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart3,
@@ -54,6 +54,7 @@ import {
 } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useI18n } from "@/lib/i18n";
+import { purgeAllUserClientState } from "@/lib/auth/client-session-cleanup";
 import { useUserPreferences } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 import type { Locale, Profile, ThemePreference, UserPreferences } from "@/types/domain";
@@ -245,10 +246,15 @@ interface ProfileBundle {
   preferences?: UserPreferences | null;
 }
 
-function AppShellInner({ children }: { children: React.ReactNode }) {
+function AppShellInner({
+  children,
+  initialUserId = null,
+}: {
+  children: React.ReactNode;
+  initialUserId?: string | null;
+}) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const router = useRouter();
   const queryClient = useQueryClient();
   const { locale, t } = useI18n();
   const vi = locale === "vi";
@@ -299,12 +305,27 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
   const handleSignOut = async () => {
     setSigningOut(true);
+    const activeUserId =
+      profileData?.profile?.id ?? pwa?.activeUserId ?? initialUserId ?? null;
     try {
-      await clearOfflineDataForLogout(profileData?.profile?.id);
-      await fetch("/auth/signout", { method: "POST", credentials: "same-origin" });
-      queryClient.clear();
-      router.push("/login");
-      router.refresh();
+      await queryClient.cancelQueries();
+      const response = await fetch("/auth/signout", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        toast.error(
+          vi
+            ? "Không thể đăng xuất lúc này. Vui lòng thử lại."
+            : "Unable to sign out right now. Please try again.",
+        );
+        return;
+      }
+      await clearOfflineDataForLogout(activeUserId);
+      await purgeAllUserClientState(queryClient, activeUserId, {
+        broadcast: "logout",
+      });
+      window.location.replace(new URL("/login", window.location.origin).toString());
     } catch {
       toast.error(
         vi
@@ -493,7 +514,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         >
           <Link
             href="/dashboard"
-            className="focus-visible:ring-ring flex items-center rounded-md focus-visible:ring-2"
+            prefetch={false}
+            className="focus-visible:ring-ring flex min-h-11 items-center rounded-md focus-visible:ring-2"
             aria-label="StudyHub"
           >
             <BrandLogo collapsed={collapsed} />
@@ -553,7 +575,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <Link
               href="/dashboard"
-              className="flex shrink-0 items-center lg:hidden"
+              prefetch={false}
+              className="flex min-h-11 shrink-0 items-center lg:hidden"
               aria-label="StudyHub"
             >
               <BrandLogo />
@@ -580,6 +603,18 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
+            {!isExamRoute && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={openSearch}
+                aria-label={t("search.dialogTitle")}
+                className="hidden min-h-11 min-w-11 min-[380px]:inline-flex sm:hidden"
+              >
+                <Search className="size-4" aria-hidden="true" />
+              </Button>
+            )}
             {/* Online / Offline / Sync Status Pill (desktop/tablet) */}
             <Link
               href={isOnline ? "/settings?tab=offline" : "/offline"}
@@ -684,7 +719,15 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
             />
 
             {/* User Menu or Sign-In Link */}
-            {!profile && !profileLoading ? (
+            {profileLoading && !profile ? (
+              <div
+                aria-hidden="true"
+                className="flex min-h-11 items-center gap-2 px-1.5 sm:min-h-9"
+              >
+                <span className="bg-muted size-7 animate-pulse rounded-full" />
+                <span className="bg-muted hidden h-3.5 w-16 animate-pulse rounded lg:inline-block" />
+              </div>
+            ) : !profile ? (
               <Button asChild size="sm" variant="ghost" className="min-h-11 sm:min-h-9">
                 <Link href="/login" prefetch={false}>
                   <LogIn className="size-4" aria-hidden="true" />
@@ -944,14 +987,20 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  initialUserId = null,
+}: {
+  children: React.ReactNode;
+  initialUserId?: string | null;
+}) {
   return (
     <React.Suspense
       fallback={
         <div className="bg-background min-h-dvh w-full" aria-busy="true" />
       }
     >
-      <AppShellInner>{children}</AppShellInner>
+      <AppShellInner initialUserId={initialUserId}>{children}</AppShellInner>
     </React.Suspense>
   );
 }

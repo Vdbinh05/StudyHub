@@ -43,10 +43,47 @@ import type {
 const MAX_SYNC_BATCH_SIZE = 100;
 const BASE_RETRY_BACKOFF_MS = 2_000;
 const MAX_RETRY_BACKOFF_MS = 5 * 60_000;
+const MAX_AUTO_RETRY_ATTEMPTS = 8;
+const DEFAULT_SYNC_TIMEOUT_MS = 20_000;
 const MAX_STORED_NOTICES = 30;
 
 const inFlightByUser = new Map<string, Promise<SyncRunOutcome>>();
 let localEnqueueSeq = 0;
+
+/**
+ * Compute bounded exponential retry backoff (respecting HTTP `Retry-After` if present).
+ * Never returns < BASE_RETRY_BACKOFF_MS or > MAX_RETRY_BACKOFF_MS.
+ */
+export function computeSyncRetryDelayMs(
+  attemptCount: number,
+  retryAfterHeader?: string | null,
+  nowMs: number = Date.now(),
+): number {
+  const safeAttempt = Math.max(1, Math.floor(attemptCount));
+  const expDelay = Math.min(
+    MAX_RETRY_BACKOFF_MS,
+    BASE_RETRY_BACKOFF_MS * Math.pow(2, Math.min(8, safeAttempt - 1)),
+  );
+
+  let retryAfterMs = 0;
+  if (retryAfterHeader && retryAfterHeader.trim().length > 0) {
+    const trimmed = retryAfterHeader.trim();
+    const numericSeconds = Number(trimmed);
+    if (Number.isFinite(numericSeconds) && numericSeconds > 0) {
+      retryAfterMs = numericSeconds * 1000;
+    } else {
+      const parsedDate = Date.parse(trimmed);
+      if (!Number.isNaN(parsedDate) && parsedDate > nowMs) {
+        retryAfterMs = parsedDate - nowMs;
+      }
+    }
+  }
+
+  return Math.max(
+    BASE_RETRY_BACKOFF_MS,
+    Math.min(MAX_RETRY_BACKOFF_MS, Math.max(expDelay, retryAfterMs)),
+  );
+}
 
 export interface EnqueueOfflineEventInput {
   event_id?: string;
@@ -67,6 +104,7 @@ export interface SyncRunOutcome {
   staleResetCount: number;
   revokedCount: number;
   deletedCount: number;
+  inaccessibleCount: number;
   conflictCount: number;
   invalidCount: number;
   remainingPendingCount: number;
@@ -184,9 +222,13 @@ function parseSyncResponsePayload(raw: unknown): LearningSyncResponse {
 
 async function runSyncOnce(
   userId: string,
-  options: { fetcher?: FetchLike; force?: boolean } = {},
+  options: { fetcher?: FetchLike; force?: boolean; timeoutMs?: number } = {},
 ): Promise<SyncRunOutcome> {
   const fetcher: FetchLike = options.fetcher ?? ((i, init) => fetch(i, init));
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && options.timeoutMs > 0
+      ? options.timeoutMs
+      : DEFAULT_SYNC_TIMEOUT_MS;
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
@@ -194,28 +236,45 @@ async function runSyncOnce(
   const eligible = allQueued.filter((item) => {
     if (item.queue_status === "conflict_hold") return false;
     if (options.force) return true;
-    if (item.queue_status === "retry_wait" && item.next_retry_at) {
-      const retryMs = Date.parse(item.next_retry_at);
-      if (!Number.isNaN(retryMs) && retryMs > nowMs) {
+    // Pause gracefully on expired auth until user signs in again or explicitly forces retry
+    if (item.queue_status === "auth_required") return false;
+    if (item.queue_status === "retry_wait") {
+      if (item.attempt_count >= MAX_AUTO_RETRY_ATTEMPTS) {
         return false;
+      }
+      if (item.next_retry_at) {
+        const retryMs = Date.parse(item.next_retry_at);
+        if (!Number.isNaN(retryMs) && retryMs > nowMs) {
+          return false;
+        }
       }
     }
     return true;
   });
 
   if (eligible.length === 0) {
-    const remaining = allQueued.filter((q) => q.queue_status !== "conflict_hold").length;
+    const remainingItems = allQueued.filter(
+      (q) => q.queue_status !== "conflict_hold",
+    );
+    const hasAuthRequired = remainingItems.some(
+      (q) => q.queue_status === "auth_required",
+    );
     return {
-      status: "idle",
+      status: hasAuthRequired && !options.force ? "auth_required" : "idle",
       processedCount: 0,
       appliedCount: 0,
       duplicateCount: 0,
       staleResetCount: 0,
       revokedCount: 0,
       deletedCount: 0,
+      inaccessibleCount: 0,
       conflictCount: 0,
       invalidCount: 0,
-      remainingPendingCount: remaining,
+      remainingPendingCount: remainingItems.length,
+      errorMessage:
+        hasAuthRequired && !options.force
+          ? "Session expired. Sign in again to sync your offline study progress."
+          : undefined,
     };
   }
 
@@ -235,6 +294,7 @@ async function runSyncOnce(
     staleResetCount: 0,
     revokedCount: 0,
     deletedCount: 0,
+    inaccessibleCount: 0,
     conflictCount: 0,
     invalidCount: 0,
     remainingPendingCount: eligible.length,
@@ -245,17 +305,32 @@ async function runSyncOnce(
     const byId = new Map(batch.map((ev) => [ev.event_id, ev]));
 
     let response: Response;
+    const abortController =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timedOut = false;
+    const timeoutHandle =
+      abortController !== null
+        ? setTimeout(() => {
+            timedOut = true;
+            abortController.abort();
+          }, timeoutMs)
+        : null;
+
     try {
       response = await fetcher("/api/sync/events", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ events: batch.map(toWireEvent) }),
+        signal: abortController?.signal,
       });
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Network connection unavailable.";
-      await markBatchRetryWait(userId, batch, msg, nowMs);
+      const msg = timedOut
+        ? "Sync request timed out. Will retry automatically with backoff."
+        : err instanceof Error
+          ? err.message
+          : "Network connection unavailable.";
+      await markBatchRetryWait(userId, batch, msg, Date.now(), null);
       meta = {
         ...meta,
         last_sync_status: "offline",
@@ -271,16 +346,22 @@ async function runSyncOnce(
         ).length,
         errorMessage: msg,
       };
+    } finally {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
     }
 
     // CRITICAL: Preserve pending queue intact when auth session expired (401)
     if (response.status === 401) {
       const msg = "Session expired. Sign in again to sync your offline study progress.";
-      for (const item of batch) {
+      const remainingEligible = eligible.slice(offset);
+      for (const item of remainingEligible) {
         await putSyncQueueItem(userId, {
           ...item,
           queue_status: "auth_required",
           last_attempt_at: nowIso,
+          next_retry_at: null,
           last_error: msg,
         });
       }
@@ -303,7 +384,11 @@ async function runSyncOnce(
 
     if (!response.ok) {
       const msg = `Sync endpoint returned HTTP ${response.status}.`;
-      await markBatchRetryWait(userId, batch, msg, nowMs);
+      const retryAfterHeader =
+        response.status === 429 || response.status === 503
+          ? response.headers?.get("retry-after") ?? null
+          : null;
+      await markBatchRetryWait(userId, batch, msg, Date.now(), retryAfterHeader);
       meta = {
         ...meta,
         last_sync_status: "error",
@@ -384,19 +469,25 @@ async function runSyncOnce(
         continue;
       }
 
-      if (bucket === "revoked") {
-        outcome.revokedCount += 1;
+      if (bucket === "revoked" || bucket === "inaccessible") {
+        if (bucket === "revoked") {
+          outcome.revokedCount += 1;
+        } else {
+          outcome.inaccessibleCount += 1;
+        }
         await deleteSyncQueueItem(userId, event.event_id);
         meta = {
           ...meta,
           revoked_set_notices: appendBoundedNotice(meta.revoked_set_notices, {
-            id: `revoked-${event.event_id}`,
+            id: `${bucket}-${event.event_id}`,
             event_id: event.event_id,
             study_set_id: event.study_set_id,
             question_id: event.question_id,
             message:
               result.message ||
-              "Access to this shared study set was revoked. Local cached content has been removed.",
+              (bucket === "inaccessible"
+                ? "This study set or item is no longer accessible (access revoked or removed). Local cached content has been cleared."
+                : "Access to this shared study set was revoked. Local cached content has been removed."),
             occurred_at: serverNow,
           }),
         };
@@ -413,7 +504,10 @@ async function runSyncOnce(
               estimated_total_bytes: 0,
               status: "revoked",
               last_error:
-                result.message || "Access revoked by study set owner.",
+                result.message ||
+                (bucket === "inaccessible"
+                  ? "Study set is no longer accessible."
+                  : "Access revoked by study set owner."),
               passages: [],
             });
           }
@@ -516,13 +610,15 @@ async function markBatchRetryWait(
   batch: readonly OfflineSyncQueueRecord[],
   errorMessage: string,
   nowMs: number,
+  retryAfterHeader: string | null = null,
 ): Promise<void> {
   const nowIso = new Date(nowMs).toISOString();
   for (const item of batch) {
     const nextAttempt = item.attempt_count + 1;
-    const delayMs = Math.min(
-      MAX_RETRY_BACKOFF_MS,
-      BASE_RETRY_BACKOFF_MS * Math.pow(2, Math.min(8, nextAttempt - 1)),
+    const delayMs = computeSyncRetryDelayMs(
+      nextAttempt,
+      retryAfterHeader,
+      nowMs,
     );
     await putSyncQueueItem(userId, {
       ...item,
@@ -541,7 +637,7 @@ async function markBatchRetryWait(
  */
 export async function syncPendingEvents(
   userId: string,
-  options: { fetcher?: FetchLike; force?: boolean } = {},
+  options: { fetcher?: FetchLike; force?: boolean; timeoutMs?: number } = {},
 ): Promise<SyncRunOutcome> {
   const existing = inFlightByUser.get(userId);
   if (existing) {

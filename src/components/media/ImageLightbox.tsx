@@ -5,6 +5,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import {
   ChevronLeft,
   ChevronRight,
+  ImageOff,
   Maximize2,
   Minimize2,
   RotateCcw,
@@ -12,6 +13,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { useResilientImage } from "@/components/media/use-resilient-image";
 import { Button } from "@/components/ui/button";
 import {
   clampViewportTransform,
@@ -169,6 +171,7 @@ export function ImageLightbox({
   }, []);
 
   const currentItem = items[activeIndex] ?? items[0] ?? null;
+  const stageImage = useResilientImage(currentItem?.src ?? "");
 
   const getStageBounds = React.useCallback(() => {
     const rect = stageRef.current?.getBoundingClientRect();
@@ -499,13 +502,43 @@ export function ImageLightbox({
                     }}
                     className="flex h-full w-full items-center justify-center p-4"
                   >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={currentItem.src}
-                      alt={currentItem.alt ?? ""}
-                      draggable={false}
-                      className="max-h-full max-w-full object-contain pointer-events-none"
-                    />
+                    {stageImage.hasError ? (
+                      <div
+                        role="status"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        className="flex max-w-sm flex-col items-center justify-center gap-3 rounded-xl border border-destructive/30 bg-card/95 px-6 py-6 text-center shadow-sm"
+                      >
+                        <ImageOff className="size-8 text-destructive/80" aria-hidden="true" />
+                        <p className="text-sm font-medium text-foreground">
+                          {vi ? "Không thể tải hình ảnh" : "Unable to load image"}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {vi
+                            ? "Liên kết ảnh có thể đã hết hạn hoặc mất kết nối tạm thời."
+                            : "The image link may have expired or encountered a temporary network issue."}
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={stageImage.retry}
+                        >
+                          <RotateCcw className="size-3.5" aria-hidden="true" />
+                          <span>{vi ? "Thử lại" : "Retry"}</span>
+                        </Button>
+                      </div>
+                    ) : (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={stageImage.resolvedSrc}
+                        alt={currentItem.alt ?? ""}
+                        draggable={false}
+                        onLoad={stageImage.handleLoad}
+                        onError={stageImage.handleError}
+                        className="max-h-full max-w-full object-contain pointer-events-none"
+                      />
+                    )}
                   </div>
 
                   {items.length > 1 && (
@@ -570,6 +603,7 @@ export function ZoomableImage({
   const [open, setOpen] = React.useState(false);
   const i18n = useOptionalI18n();
   const vi = (i18n?.locale ?? "vi") === "vi";
+  const imageState = useResilientImage(src);
 
   if (!isRenderableImageUrl(src)) {
     return null;
@@ -577,32 +611,56 @@ export function ZoomableImage({
 
   return (
     <figure className={cn("inline-flex max-w-full flex-col gap-1.5", className)}>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-label={
-          vi
-            ? `Phóng to ảnh${alt ? `: ${alt}` : ""}`
-            : `Enlarge image${alt ? `: ${alt}` : ""}`
-        }
-        className="group relative inline-flex max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={src}
-          alt={alt}
-          loading="lazy"
-          decoding="async"
-          className={cn("max-w-full object-contain", aspectClassName, imgClassName)}
-        />
-        <span
-          aria-hidden="true"
-          className="absolute right-2 bottom-2 inline-flex items-center gap-1 rounded-md bg-background/90 px-2 py-1 text-xs font-medium text-foreground shadow-sm border border-border opacity-90 transition-opacity group-hover:opacity-100"
+      {imageState.hasError ? (
+        <div
+          role="status"
+          className="inline-flex min-h-28 min-w-44 flex-col items-center justify-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-center"
         >
-          <ZoomIn className="size-3.5" />
-          <span className="hidden sm:inline">{vi ? "Phóng to" : "Zoom"}</span>
-        </span>
-      </button>
+          <ImageOff className="size-5 text-destructive/80" aria-hidden="true" />
+          <span className="text-xs font-medium text-foreground">
+            {vi ? "Không thể tải hình ảnh" : "Unable to load image"}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={imageState.retry}
+          >
+            <RotateCcw className="size-3.5" aria-hidden="true" />
+            <span>{vi ? "Thử lại" : "Retry"}</span>
+          </Button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label={
+            vi
+              ? `Phóng to ảnh${alt ? `: ${alt}` : ""}`
+              : `Enlarge image${alt ? `: ${alt}` : ""}`
+          }
+          className="group relative inline-flex max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageState.resolvedSrc}
+            alt={alt}
+            loading="lazy"
+            decoding="async"
+            onLoad={imageState.handleLoad}
+            onError={imageState.handleError}
+            className={cn("max-w-full object-contain", aspectClassName, imgClassName)}
+          />
+          <span
+            aria-hidden="true"
+            className="absolute right-2 bottom-2 inline-flex items-center gap-1 rounded-md bg-background/90 px-2 py-1 text-xs font-medium text-foreground shadow-sm border border-border opacity-90 transition-opacity group-hover:opacity-100"
+          >
+            <ZoomIn className="size-3.5" />
+            <span className="hidden sm:inline">{vi ? "Phóng to" : "Zoom"}</span>
+          </span>
+        </button>
+      )}
       {caption && (
         <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>
       )}

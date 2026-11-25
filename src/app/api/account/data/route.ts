@@ -5,6 +5,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { streamJsonResponse } from "@/lib/security/stream-response";
 import { tryCreateAdminClient } from "@/lib/supabase/admin";
 import {
@@ -13,6 +17,7 @@ import {
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
 import { rpcGetMyProfile } from "@/lib/supabase/rpc";
+import { V3_BACKUP_SCOPE } from "@/lib/supabase/backup-scope";
 import { TEMP_STORAGE_BUCKET } from "@/lib/supabase/temp-storage";
 import { deleteAccountDataSchema } from "@/lib/validation/profile";
 import type { Database } from "@/types/database";
@@ -21,13 +26,21 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * Exports all personal StudyHub data belonging to the authenticated user as JSON.
+ * Exports all personal StudyHub V3 data belonging to the authenticated user as JSON (`studyhub-v3`).
  * Paginated cleanly across all tables so large accounts (10,000+ Qs) are never truncated,
  * and streamed without `Content-Length` to bypass Vercel Hobby's 4.5 MB buffered response cap.
  */
-export async function GET(): Promise<Response> {
+export async function GET(request?: NextRequest): Promise<Response> {
   try {
     const { supabase, user } = await requireAuth();
+    const rateLimitReq =
+      request ?? new Request("https://studyhub.local/api/account/data");
+    const limited = await enforceDistributedRateLimit(
+      rateLimitReq,
+      RATE_LIMITS.ACCOUNT_DATA,
+      user.id,
+    );
+    if (limited) return limited;
 
     const [
       { data: profile },
@@ -43,6 +56,11 @@ export async function GET(): Promise<Response> {
       tags,
       presets,
       cycles,
+      userNotes,
+      mediaAssets,
+      checkpoints,
+      confidenceEvents,
+      questionReports,
     ] = await Promise.all([
       rpcGetMyProfile(supabase),
       supabase
@@ -119,6 +137,43 @@ export async function GET(): Promise<Response> {
           .eq("user_id", user.id)
           .range(from, to),
       ),
+      fetchAllPages(async (from, to) =>
+        supabase
+          .from("user_question_notes")
+          .select("*")
+          .eq("user_id", user.id)
+          .range(from, to),
+      ),
+      fetchAllPages(async (from, to) =>
+        supabase
+          .from("media_assets")
+          .select(
+            "id, study_set_id, kind, storage_bucket, storage_path, mime_type, file_name, size_bytes, sha256_hash, width, height, duration_ms, alt_text, caption, created_at, updated_at",
+          )
+          .eq("owner_id", user.id)
+          .range(from, to),
+      ),
+      fetchAllPages(async (from, to) =>
+        supabase
+          .from("learning_session_checkpoints")
+          .select("*")
+          .eq("user_id", user.id)
+          .range(from, to),
+      ),
+      fetchAllPages(async (from, to) =>
+        supabase
+          .from("learning_confidence_events")
+          .select("*")
+          .eq("user_id", user.id)
+          .range(from, to),
+      ),
+      fetchAllPages(async (from, to) =>
+        supabase
+          .from("question_reports")
+          .select("*")
+          .eq("reporter_id", user.id)
+          .range(from, to),
+      ),
     ]);
 
     const ownedSetIds = studySets.map((s) => s.id);
@@ -138,10 +193,10 @@ export async function GET(): Promise<Response> {
     }
 
     const questionIds = questions.map((q) => q.id);
-    const [options, accepted, questionTags] =
-      questionIds.length > 0
-        ? await Promise.all([
-            fetchInChunks(
+    const [options, accepted, questionTags, sharedPassages, diagramSets] =
+      await Promise.all([
+        questionIds.length > 0
+          ? fetchInChunks(
               questionIds,
               async (chunk) =>
                 supabase
@@ -150,8 +205,10 @@ export async function GET(): Promise<Response> {
                   .in("question_id", chunk)
                   .order("position", { ascending: true }),
               SAFE_IN_CHUNK_SIZE,
-            ),
-            fetchInChunks(
+            )
+          : Promise.resolve([]),
+        questionIds.length > 0
+          ? fetchInChunks(
               questionIds,
               async (chunk) =>
                 supabase
@@ -159,8 +216,10 @@ export async function GET(): Promise<Response> {
                   .select("*")
                   .in("question_id", chunk),
               SAFE_IN_CHUNK_SIZE,
-            ),
-            fetchInChunks(
+            )
+          : Promise.resolve([]),
+        questionIds.length > 0
+          ? fetchInChunks(
               questionIds,
               async (chunk) =>
                 supabase
@@ -168,14 +227,51 @@ export async function GET(): Promise<Response> {
                   .select("*")
                   .in("question_id", chunk),
               SAFE_IN_CHUNK_SIZE,
-            ),
-          ])
-        : [[], [], []];
+            )
+          : Promise.resolve([]),
+        ownedSetIds.length > 0
+          ? fetchInChunks(
+              ownedSetIds,
+              async (chunk) =>
+                supabase
+                  .from("shared_passages")
+                  .select("*")
+                  .in("study_set_id", chunk)
+                  .order("sort_order", { ascending: true }),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+        ownedSetIds.length > 0
+          ? fetchInChunks(
+              ownedSetIds,
+              async (chunk) =>
+                supabase
+                  .from("diagram_sets")
+                  .select("*")
+                  .in("study_set_id", chunk)
+                  .order("created_at", { ascending: true }),
+              SAFE_IN_CHUNK_SIZE,
+            )
+          : Promise.resolve([]),
+      ]);
 
+    const diagramIds = diagramSets.map((d) => d.id);
     const presetIds = presets.map((p) => p.id);
-    const presetSources =
+    const [diagramHotspots, presetSources] = await Promise.all([
+      diagramIds.length > 0
+        ? fetchInChunks(
+            diagramIds,
+            async (chunk) =>
+              supabase
+                .from("diagram_hotspots")
+                .select("*")
+                .in("diagram_id", chunk)
+                .order("sort_order", { ascending: true }),
+            SAFE_IN_CHUNK_SIZE,
+          )
+        : Promise.resolve([]),
       presetIds.length > 0
-        ? await fetchInChunks(
+        ? fetchInChunks(
             presetIds,
             async (chunk) =>
               supabase
@@ -184,20 +280,30 @@ export async function GET(): Promise<Response> {
                 .in("preset_id", chunk),
             SAFE_IN_CHUNK_SIZE,
           )
-        : [];
+        : Promise.resolve([]),
+    ]);
 
     const exportPayload = {
       exported_at: new Date().toISOString(),
-      schema_version: "studyhub-v2",
+      schema_version: "studyhub-v3",
+      backup_scope: V3_BACKUP_SCOPE,
       profile: profile ? { ...profile, email: profile.email || user.email || "" } : null,
       preferences: preferences ?? null,
       folders,
       study_sets: studySets,
+      shared_passages: sharedPassages,
+      diagram_sets: diagramSets,
+      diagram_hotspots: diagramHotspots,
       questions,
       question_options: options,
       question_accepted_answers: accepted,
       tags,
       question_tags: questionTags,
+      user_question_notes: userNotes,
+      media_assets: mediaAssets,
+      learning_session_checkpoints: checkpoints,
+      learning_confidence_events: confidenceEvents,
+      question_reports: questionReports,
       progress,
       starred_questions: starred,
       study_sessions: sessions,
@@ -213,7 +319,8 @@ export async function GET(): Promise<Response> {
       status: 200,
       headers: {
         "Content-Disposition": `attachment; filename="studyhub-export-${new Date().toISOString().slice(0, 10)}.json"`,
-        "Cache-Control": "no-store",
+        "Cache-Control": "private, no-store",
+        Vary: "Cookie",
       },
     });
   } catch (err) {
@@ -224,6 +331,7 @@ export async function GET(): Promise<Response> {
 async function purgeUserStorageFolder(
   storage: ReturnType<NonNullable<ReturnType<typeof tryCreateAdminClient>>["storage"]["from"]>,
   prefix: string,
+  protectedPaths?: ReadonlySet<string>,
 ): Promise<void> {
   const { data: items } = await storage.list(prefix, { limit: 1000 });
   if (!items || items.length === 0) return;
@@ -232,9 +340,8 @@ async function purgeUserStorageFolder(
   for (const item of items) {
     const fullPath = `${prefix}/${item.name}`;
     if (item.id === null) {
-      // Nested folder (e.g. {userId}/{studySetId})
-      await purgeUserStorageFolder(storage, fullPath);
-    } else {
+      await purgeUserStorageFolder(storage, fullPath, protectedPaths);
+    } else if (!protectedPaths || !protectedPaths.has(fullPath)) {
       filePaths.push(fullPath);
     }
   }
@@ -245,11 +352,19 @@ async function purgeUserStorageFolder(
 
 /**
  * Deletes the authenticated user's study data (or full auth account if `scope === "account"`
- * and server admin client is configured). Checks every deletion error strictly (SH-043 / SEC-020).
+ * and server admin client is configured). Checks every deletion error strictly (SH-043 / SEC-020)
+ * and NEVER deletes Storage blobs or media relations pinned by other users' exam snapshots or clones (V32-009 / SEC-05).
  */
 export async function DELETE(request: NextRequest): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.ACCOUNT_DATA,
+      user.id,
+    );
+    if (limited) return limited;
+
     const body = await parseJsonBody(request);
     const input = deleteAccountDataSchema.parse(body);
 
@@ -294,19 +409,78 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       if (res.error) throw res.error;
     }
 
-    // After sets/questions/exams are deleted (polymorphic triggers clean content_media_relations),
-    // clean up user's unreferenced media_assets rows
-    await supabase.from("media_assets").delete().eq("owner_id", user.id);
+    const admin = tryCreateAdminClient();
+    const protectedStoragePaths = new Set<string>();
+    const unreferencedMediaIds: string[] = [];
+    const unreferencedStoragePaths: string[] = [];
+
+    // V32-009 / SEC-05: Query caller's media_assets and check cross-tenant content_media_relations
+    // BEFORE removing any Storage object or media_assets row!
+    if (admin) {
+      const ownedMedia = await fetchAllPages(async (from, to) =>
+        admin
+          .from("media_assets")
+          .select("id, storage_bucket, storage_path")
+          .eq("owner_id", user.id)
+          .range(from, to),
+      );
+
+      if (ownedMedia.length > 0) {
+        const mediaIds = ownedMedia.map((m) => m.id);
+        const remainingRelations = await fetchInChunks(
+          mediaIds,
+          async (chunk) =>
+            admin
+              .from("content_media_relations")
+              .select("media_id")
+              .in("media_id", chunk),
+          SAFE_IN_CHUNK_SIZE,
+        );
+        const pinnedIds = new Set(remainingRelations.map((r) => r.media_id));
+
+        for (const asset of ownedMedia) {
+          if (pinnedIds.has(asset.id)) {
+            protectedStoragePaths.add(asset.storage_path);
+          } else {
+            unreferencedMediaIds.push(asset.id);
+            if (asset.storage_bucket === "study-media") {
+              unreferencedStoragePaths.push(asset.storage_path);
+            }
+          }
+        }
+
+        if (unreferencedMediaIds.length > 0) {
+          for (let i = 0; i < unreferencedMediaIds.length; i += SAFE_IN_CHUNK_SIZE) {
+            const chunk = unreferencedMediaIds.slice(i, i + SAFE_IN_CHUNK_SIZE);
+            await admin
+              .from("media_assets")
+              .delete()
+              .eq("owner_id", user.id)
+              .in("id", chunk);
+          }
+        }
+      }
+    } else {
+      // Without admin client, rely strictly on DB ON DELETE RESTRICT for unreferenced rows only
+      await supabase.from("media_assets").delete().eq("owner_id", user.id);
+    }
 
     let accountDeleted = false;
     let storagePurged = false;
     if (input.scope === "account") {
-      const admin = tryCreateAdminClient();
       if (admin) {
         try {
           const bucket = admin.storage.from("study-media");
           await purgeUserStorageFolder(bucket, `avatars/${user.id}`);
-          await purgeUserStorageFolder(bucket, user.id);
+          if (unreferencedStoragePaths.length > 0) {
+            for (let i = 0; i < unreferencedStoragePaths.length; i += SAFE_IN_CHUNK_SIZE) {
+              await bucket.remove(
+                unreferencedStoragePaths.slice(i, i + SAFE_IN_CHUNK_SIZE),
+              );
+            }
+          }
+          // Walk legacy/unindexed objects under {user.id}/* while strictly skipping any protected pinned paths!
+          await purgeUserStorageFolder(bucket, user.id, protectedStoragePaths);
           const tempBucket = admin.storage.from(TEMP_STORAGE_BUCKET);
           await purgeUserStorageFolder(tempBucket, user.id);
           storagePurged = true;
@@ -318,6 +492,17 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
         accountDeleted = true;
       }
       await supabase.auth.signOut();
+    } else if (admin && unreferencedStoragePaths.length > 0) {
+      try {
+        const bucket = admin.storage.from("study-media");
+        for (let i = 0; i < unreferencedStoragePaths.length; i += SAFE_IN_CHUNK_SIZE) {
+          await bucket.remove(
+            unreferencedStoragePaths.slice(i, i + SAFE_IN_CHUNK_SIZE),
+          );
+        }
+      } catch {
+        // Non-fatal storage cleanup
+      }
     }
 
     return apiSuccess({
@@ -325,6 +510,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       scope: input.scope,
       account_deleted: accountDeleted,
       storage_purged: storagePurged,
+      preserved_shared_media_count: protectedStoragePaths.size,
     });
   } catch (err) {
     return handleApiError(err);

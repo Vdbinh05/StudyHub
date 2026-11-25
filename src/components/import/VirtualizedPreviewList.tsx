@@ -28,6 +28,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { stripLeadingOptionPrefix } from "@/lib/import/text-utils";
 import { cn } from "@/lib/utils";
 import type { Locale } from "@/types/domain";
 import type {
@@ -589,42 +590,28 @@ export function VirtualizedPreviewList({
                                           : "bg-muted text-muted-foreground",
                                       )}
                                     >
-                                      {opt.isCorrect ? (
-                                        <Check className="size-3" aria-hidden="true" />
-                                      ) : (
-                                        opt.label
-                                      )}
+                                      {opt.label}
                                     </span>
                                     <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                                      {opt.label}.{" "}
-                                      {opt.content ||
+                                      {stripLeadingOptionPrefix(opt.content) ||
                                         ((opt.media?.length ?? 0) > 0
                                           ? locale === "en"
                                             ? "(Image option)"
                                             : "(Đáp án hình ảnh)"
                                           : "")}
                                     </span>
+                                    {opt.isCorrect && (
+                                      <Check
+                                        className="mt-0.5 size-3.5 shrink-0 text-success"
+                                        aria-hidden="true"
+                                      />
+                                    )}
                                   </div>
                                   {opt.media && opt.media.length > 0 && (
                                     <div className="flex flex-wrap gap-1.5 pl-7">
-                                      {opt.media.map((m) =>
-                                        m.dataUrl ? (
-                                          // eslint-disable-next-line @next/next/no-img-element
-                                          <img
-                                            key={m.id}
-                                            src={m.dataUrl}
-                                            alt={m.alt ?? m.fileName}
-                                            loading="lazy"
-                                            decoding="async"
-                                            className="h-14 max-w-[120px] rounded border border-border object-contain bg-background"
-                                          />
-                                        ) : (
-                                          <Badge key={m.id} variant="outline" className="text-[10px]">
-                                            <ImageIcon className="mr-1 size-3" aria-hidden="true" />
-                                            {m.fileName}
-                                          </Badge>
-                                        ),
-                                      )}
+                                      {opt.media.map((m) => (
+                                        <PreviewOptionThumbnail key={m.id} media={m} />
+                                      ))}
                                     </div>
                                   )}
                                 </button>
@@ -699,6 +686,55 @@ interface InlineDraft {
 
 const INLINE_EDIT_DEBOUNCE_MS = 220;
 
+type PreviewAttachmentWithSignedUrl = ParsedMediaAttachment & {
+  previewUrl?: string;
+};
+
+function isRenderablePreviewSrc(url: string | undefined): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  return (
+    trimmed.startsWith("data:image/") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("/api/uploads/") ||
+    trimmed.startsWith("blob:")
+  );
+}
+
+function getPreviewThumbSrc(media: ParsedMediaAttachment): string | null {
+  const withSigned = media as PreviewAttachmentWithSignedUrl;
+  if (isRenderablePreviewSrc(withSigned.dataUrl)) return withSigned.dataUrl!;
+  if (isRenderablePreviewSrc(withSigned.previewUrl)) return withSigned.previewUrl!;
+  if (isRenderablePreviewSrc(withSigned.previewPath)) return withSigned.previewPath;
+  return null;
+}
+
+function PreviewOptionThumbnail({ media }: { media: ParsedMediaAttachment }) {
+  const src = getPreviewThumbSrc(media);
+  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+  const canShowImg = Boolean(src && failedSrc !== src);
+
+  if (canShowImg && src) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={src}
+        alt={media.alt ?? media.fileName}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailedSrc(src)}
+        className="h-14 max-w-[120px] rounded border border-border object-contain bg-background"
+      />
+    );
+  }
+  return (
+    <Badge variant="outline" className="text-[10px]">
+      <ImageIcon className="mr-1 size-3" aria-hidden="true" />
+      {media.fileName}
+    </Badge>
+  );
+}
+
 function MediaPreviewChip({
   locale,
   media,
@@ -718,6 +754,10 @@ function MediaPreviewChip({
   onRemove: () => void;
   onConfirmPlacement?: () => void;
 }) {
+  const thumbSrc = getPreviewThumbSrc(media);
+  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+  const canRenderImg = Boolean(thumbSrc && failedSrc !== thumbSrc);
+
   return (
     <div
       className={cn(
@@ -727,13 +767,14 @@ function MediaPreviewChip({
           : "border-border bg-muted/30",
       )}
     >
-      {media.dataUrl ? (
+      {canRenderImg && thumbSrc ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={media.dataUrl}
+          src={thumbSrc}
           alt={media.alt ?? media.fileName}
           loading="lazy"
           decoding="async"
+          onError={() => setFailedSrc(thumbSrc)}
           className="h-20 max-w-[160px] rounded object-contain bg-background"
         />
       ) : (
@@ -1014,18 +1055,21 @@ function InlineQuestionEditor({
                 key={media.id}
                 className="flex flex-wrap items-center gap-2 rounded-md border border-border/70 bg-muted/20 p-1.5 text-xs"
               >
-                {media.dataUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={media.dataUrl}
-                    alt={media.alt ?? media.fileName}
-                    loading="lazy"
-                    decoding="async"
-                    className="h-10 w-14 rounded border border-border object-contain bg-background"
-                  />
-                ) : (
-                  <ImageIcon className="size-4 text-muted-foreground" />
-                )}
+                {(() => {
+                  const inlineThumbSrc = getPreviewThumbSrc(media);
+                  return inlineThumbSrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={inlineThumbSrc}
+                      alt={media.alt ?? media.fileName}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-10 w-14 rounded border border-border object-contain bg-background"
+                    />
+                  ) : (
+                    <ImageIcon className="size-4 text-muted-foreground" />
+                  );
+                })()}
                 <span className="max-w-[130px] truncate font-medium">{media.fileName}</span>
                 <Badge variant="outline" className="text-[10px]">
                   {slotLabel}
@@ -1090,31 +1134,14 @@ function InlineQuestionEditor({
                   ))}
                 </select>
                 {onMoveMediaToQuestion && totalQuestions > 1 && (
-                  <select
-                    aria-label={locale === "en" ? "Move image to question" : "Chuyển ảnh sang câu khác"}
-                    defaultValue=""
-                    onChange={(e) => {
-                      const idxVal = Number.parseInt(e.target.value, 10);
-                      if (!Number.isNaN(idxVal) && idxVal !== question.index) {
-                        onMoveMediaToQuestion(question.tempId, media.id, slot, idxVal);
-                      }
-                    }}
-                    className="h-7 rounded border border-input bg-background px-1.5 text-xs"
-                  >
-                    <option value="">
-                      {locale === "en" ? "Move to Q#…" : "Chuyển sang câu…"}
-                    </option>
-                    {Array.from(
-                      { length: Math.min(totalQuestions, 200) },
-                      (_, i) => i,
-                    )
-                      .filter((i) => i !== question.index)
-                      .map((i) => (
-                        <option key={i} value={i}>
-                          #{i + 1}
-                        </option>
-                      ))}
-                  </select>
+                  <MoveMediaToQuestionControl
+                    locale={locale}
+                    currentQuestionIndex={question.index}
+                    totalQuestions={totalQuestions}
+                    onMove={(targetIdx) =>
+                      onMoveMediaToQuestion(question.tempId, media.id, slot, targetIdx)
+                    }
+                  />
                 )}
                 <Button
                   type="button"
@@ -1231,6 +1258,97 @@ function InlineQuestionEditor({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function MoveMediaToQuestionControl({
+  locale,
+  currentQuestionIndex,
+  totalQuestions,
+  onMove,
+}: {
+  locale: Locale;
+  currentQuestionIndex: number;
+  totalQuestions: number;
+  onMove: (targetQuestionIndex: number) => void;
+}) {
+  const [targetInput, setTargetInput] = React.useState("");
+
+  // For <= 200 questions, a native <select> gives instant one-click reassignment;
+  // for > 200 questions (e.g. 250–10,000Q banks), a numeric Q# input lifts the 200 cap
+  // with O(1) DOM nodes (FUNC-27(2)).
+  if (totalQuestions <= 200) {
+    return (
+      <select
+        aria-label={locale === "en" ? "Move image to question" : "Chuyển ảnh sang câu khác"}
+        defaultValue=""
+        onChange={(e) => {
+          const idxVal = Number.parseInt(e.target.value, 10);
+          if (!Number.isNaN(idxVal) && idxVal !== currentQuestionIndex) {
+            onMove(idxVal);
+          }
+        }}
+        className="h-7 rounded border border-input bg-background px-1.5 text-xs"
+      >
+        <option value="">
+          {locale === "en" ? "Move to Q#…" : "Chuyển sang câu…"}
+        </option>
+        {Array.from({ length: totalQuestions }, (_, i) => i)
+          .filter((i) => i !== currentQuestionIndex)
+          .map((i) => (
+            <option key={i} value={i}>
+              #{i + 1}
+            </option>
+          ))}
+      </select>
+    );
+  }
+
+  const parsedNum = Number.parseInt(targetInput, 10);
+  const canMove =
+    Number.isFinite(parsedNum) &&
+    parsedNum >= 1 &&
+    parsedNum <= totalQuestions &&
+    parsedNum - 1 !== currentQuestionIndex;
+
+  const commitMove = () => {
+    if (!canMove) return;
+    onMove(parsedNum - 1);
+    setTargetInput("");
+  };
+
+  return (
+    <div className="inline-flex items-center gap-1">
+      <input
+        type="number"
+        inputMode="numeric"
+        min={1}
+        max={totalQuestions}
+        value={targetInput}
+        onChange={(e) => setTargetInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commitMove();
+          }
+        }}
+        placeholder={
+          locale === "en" ? `Q# (1-${totalQuestions})` : `Câu # (1-${totalQuestions})`
+        }
+        aria-label={locale === "en" ? "Move image to question number" : "Chuyển ảnh sang số câu"}
+        className="h-7 w-28 rounded border border-input bg-background px-1.5 text-xs tabular-nums"
+      />
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={!canMove}
+        onClick={commitMove}
+        className="h-7 px-2 text-xs"
+      >
+        {locale === "en" ? "Move" : "Chuyển"}
+      </Button>
     </div>
   );
 }

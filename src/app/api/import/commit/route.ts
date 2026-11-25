@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   chunkArray,
+  mapWithConcurrency,
   normalizeForComparison,
   sanitizeFileName,
 } from "@/lib/import/text-utils";
@@ -32,6 +33,7 @@ import {
 import {
   cleanupTempObjects,
   consumeTempUploadBytes,
+  isOwnedTempStoragePath,
 } from "@/lib/supabase/temp-storage";
 import type { Database, Json } from "@/types/database";
 import type { ParsedQuestion } from "@/types/import";
@@ -47,6 +49,9 @@ const NEW_IMPORT_JOB_RATE_LIMIT = {
   windowMs: 5 * 60 * 1000,
 } as const;
 const IN_DELETE_CHUNK_SIZE = 120;
+const SUB_BATCH_SIZE = 500;
+const MEDIA_CONCURRENCY = 6;
+const MEDIA_LOOKUP_CHUNK_SIZE = 120;
 
 const CommitMediaAttachmentSchema = z.object({
   id: z.string().max(128).optional(),
@@ -55,7 +60,8 @@ const CommitMediaAttachmentSchema = z.object({
   mimeType: z.string().max(64).optional(),
   ext: z.string().max(16).optional(),
   byteLength: z.number().int().min(0).max(5 * 1024 * 1024).optional(),
-  previewPath: z.string().max(512).optional(),
+  previewPath: z.string().max(2048).optional(),
+  previewUrl: z.string().max(2048).optional(),
   dataUrl: z.string().max(7_000_000).optional(),
   tempStoragePath: z.string().max(320).optional(),
   anchorType: z.enum(["inline", "floating"]).default("inline"),
@@ -152,6 +158,7 @@ const ImportCommitBodySchema = z.object({
   importJobId: z.string().uuid().optional(),
   isFirstChunk: z.boolean().default(true),
   isFinalChunk: z.boolean().default(true),
+  tempMediaPathsToCleanup: z.array(z.string().max(320)).max(2000).optional(),
   sourceFormat: z
     .enum([
       "eduquiz_txt",
@@ -178,6 +185,16 @@ const ImportCommitBodySchema = z.object({
   totalDetectedOverall: z.number().int().min(0).optional(),
   questions: z.array(CommitQuestionSchema).min(1).max(2500),
 });
+
+function buildSubBatchIdempotencyKey(baseKey: string, subBatchIndex: number): string {
+  return subBatchIndex === 0 ? baseKey : `${baseKey}:sub-${subBatchIndex}`;
+}
+
+function extractStoredImportJobId(meta: unknown): string | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const candidate = (meta as Record<string, unknown>).import_job_id;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+}
 
 function safeUrlOrNull(url: string | null | undefined): string | null {
   if (!url) return null;
@@ -220,7 +237,8 @@ function decodeSafeRasterDataUrl(
 
 export async function POST(request: Request) {
   let supabaseRef: Awaited<ReturnType<typeof requireAuth>>["supabase"] | null = null;
-  const tempMediaPathsToCleanup: string[] = [];
+  const tempMediaPathsToCleanup = new Set<string>();
+  let shouldCleanupTempMedia = false;
   try {
     const { supabase, user } = await requireAuth();
     supabaseRef = supabase;
@@ -244,6 +262,15 @@ export async function POST(request: Request) {
       "edit",
     );
     const mediaOwnerId = access.studySet.owner_id || user.id;
+
+    // Collect validated owned temp media paths from final chunk cleanup list (SEC-12)
+    if (body.isFinalChunk && body.tempMediaPathsToCleanup?.length) {
+      for (const p of body.tempMediaPathsToCleanup) {
+        if (isOwnedTempStoragePath(p, user.id, "import-media")) {
+          tempMediaPathsToCleanup.add(p.trim());
+        }
+      }
+    }
 
     // Enforce stricter job-start rate limit on new imports, and verify active job ownership on continuation chunks
     if (body.isFirstChunk || !body.importJobId) {
@@ -272,31 +299,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // 1. Idempotency check: if this chunk's idempotencyKey already committed rows, replay cleanly!
-    const { data: existingIdemRows } = await supabase
-      .from("questions")
-      .select("id")
-      .eq("study_set_id", body.studySetId)
-      .contains("source_metadata", { import_idempotency_key: body.idempotencyKey })
-      .limit(1);
-
-    if (existingIdemRows && existingIdemRows.length > 0) {
-      const { count: totalSetQuestions } = await supabase
-        .from("questions")
-        .select("id", { count: "exact", head: true })
-        .eq("study_set_id", body.studySetId);
-
-      return apiSuccess({
-        importJobId: body.importJobId ?? null,
-        importedCount: 0,
-        skippedCount: body.questions.length,
-        replacedCount: 0,
-        totalSetQuestions: totalSetQuestions ?? 0,
-        idempotentReplay: true,
-      });
-    }
-
-    // 2. Server-side re-validation (Commit Integrity Rule: never insert broken rows)
+    // 1. Server-side re-validation first (pure CPU) so sub-batch count is exact for DB-05 / FUNC-13
     const activeIncoming = body.questions.filter((q) => !q.excluded);
     const validatedList: ParsedQuestion[] = activeIncoming.map((q, idx) =>
       validateParsedQuestion(
@@ -382,8 +385,97 @@ export async function POST(request: Request) {
       (q) => !q.issues.some((i) => i.severity === "error"),
     );
 
-    // 3. Create or fetch import_jobs audit record
-    let importJobId = body.importJobId ?? null;
+    // 2. Indexed per-sub-batch idempotency check (DB-05 + FUNC-13)
+    // Uses `source_metadata->>import_idempotency_key` matching Migration 0019's partial index,
+    // scopes keys per <=500-row sub-batch so sub-batch 2+ is never dropped on retry,
+    // and recovers stored `importJobId` on idempotentReplay so subsequent chunks finalize cleanly!
+    const validSubBatches = chunkArray(validQuestions, SUB_BATCH_SIZE);
+    const subBatchKeysToCheck =
+      validSubBatches.length > 0
+        ? validSubBatches.map((_, idx) =>
+            buildSubBatchIdempotencyKey(body.idempotencyKey, idx),
+          )
+        : [body.idempotencyKey];
+
+    const subBatchChecks = await Promise.all(
+      subBatchKeysToCheck.map(async (subKey) => {
+        const { data: rows } = await supabase
+          .from("questions")
+          .select("id, source_metadata")
+          .eq("study_set_id", body.studySetId)
+          .eq("source_metadata->>import_idempotency_key", subKey)
+          .limit(1);
+        const first = rows && rows.length > 0 ? rows[0] : null;
+        return {
+          subKey,
+          exists: Boolean(first),
+          importJobId: first ? extractStoredImportJobId(first.source_metadata) : null,
+        };
+      }),
+    );
+
+    const committedSubKeySet = new Set(
+      subBatchChecks.filter((c) => c.exists).map((c) => c.subKey),
+    );
+    const recoveredImportJobId =
+      subBatchChecks.find((c) => c.importJobId)?.importJobId ?? null;
+    const allSubBatchesCommitted =
+      subBatchChecks.length > 0 && subBatchChecks.every((c) => c.exists);
+
+    if (allSubBatchesCommitted) {
+      const resolvedImportJobId = body.importJobId ?? recoveredImportJobId ?? null;
+
+      if (body.isFinalChunk && resolvedImportJobId) {
+        await supabase
+          .from("import_jobs")
+          .update({
+            status: "completed",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", resolvedImportJobId)
+          .eq("user_id", user.id)
+          .eq("study_set_id", body.studySetId)
+          .eq("status", "importing");
+      }
+
+      const { count: totalSetQuestions } = await supabase
+        .from("questions")
+        .select("id", { count: "exact", head: true })
+        .eq("study_set_id", body.studySetId);
+
+      // Collect any chunk temp media paths for final cleanup
+      if (body.isFinalChunk) {
+        for (const q of body.questions) {
+          for (const m of q.promptMedia ?? []) {
+            if (m.tempStoragePath && isOwnedTempStoragePath(m.tempStoragePath, user.id, "import-media")) {
+              tempMediaPathsToCleanup.add(m.tempStoragePath.trim());
+            }
+          }
+          for (const o of q.options) {
+            for (const m of o.media ?? []) {
+              if (m.tempStoragePath && isOwnedTempStoragePath(m.tempStoragePath, user.id, "import-media")) {
+                tempMediaPathsToCleanup.add(m.tempStoragePath.trim());
+              }
+            }
+          }
+        }
+        shouldCleanupTempMedia = true;
+      }
+
+      return apiSuccess({
+        importJobId: resolvedImportJobId,
+        importedCount: 0,
+        skippedCount: body.questions.length,
+        replacedCount: 0,
+        totalSetQuestions: totalSetQuestions ?? 0,
+        idempotentReplay: true,
+      });
+    }
+
+    const isPartialSubBatchRetry = committedSubKeySet.size > 0;
+
+    // 3. Create or reuse import_jobs audit record
+    let importJobId = body.importJobId ?? recoveredImportJobId ?? null;
     if (body.isFirstChunk && !importJobId) {
       const { data: jobRow, error: jobErr } = await supabase
         .from("import_jobs")
@@ -411,8 +503,8 @@ export async function POST(request: Request) {
       importJobId = jobRow.id;
     }
 
-    // 4. Handle mode === "replace" (on first chunk only)
-    if (body.mode === "replace" && body.isFirstChunk) {
+    // 4. Handle mode === "replace" (on first chunk only, NEVER on partial sub-batch retry!)
+    if (body.mode === "replace" && body.isFirstChunk && !isPartialSubBatchRetry) {
       const { error: delErr } = await supabase
         .from("questions")
         .delete()
@@ -420,15 +512,29 @@ export async function POST(request: Request) {
       if (delErr) throw delErr;
     }
 
-    // 5. Handle duplicate policy ("skip" | "keep_both" | "replace") using paginated,
-    // chunked full-fingerprint matching (prompt + sorted options + correct answers) (SH-005 & SH-017)
-    let questionsToInsert = validQuestions;
+    // Filter down to only uncommitted sub-batches while preserving each question's deterministic sub-batch key
+    const uncommittedSubBatches: Array<{
+      subKey: string;
+      questions: ParsedQuestion[];
+    }> = [];
     let skippedCount = body.questions.length - validQuestions.length;
+
+    for (let sIdx = 0; sIdx < validSubBatches.length; sIdx += 1) {
+      const subKey = buildSubBatchIdempotencyKey(body.idempotencyKey, sIdx);
+      if (committedSubKeySet.has(subKey)) {
+        skippedCount += validSubBatches[sIdx].length;
+        continue;
+      }
+      uncommittedSubBatches.push({ subKey, questions: validSubBatches[sIdx] });
+    }
+
+    // 5. Handle duplicate policy ("skip" | "keep_both" | "replace") across uncommitted questions
+    const remainingValidQuestions = uncommittedSubBatches.flatMap((b) => b.questions);
     let replacedCount = 0;
 
-    if (body.duplicatePolicy !== "keep_both" && validQuestions.length > 0) {
+    if (body.duplicatePolicy !== "keep_both" && remainingValidQuestions.length > 0) {
       const candidateNormalizedPrompts = new Set(
-        validQuestions
+        remainingValidQuestions
           .map((q) => normalizeForComparison(q.prompt))
           .filter(Boolean),
       );
@@ -441,25 +547,27 @@ export async function POST(request: Request) {
 
       if (body.duplicatePolicy === "skip") {
         const seenBatch = new Set<string>();
-        const filtered: ParsedQuestion[] = [];
-        for (const q of validQuestions) {
-          const fp = computeQuestionDuplicateFingerprint({
-            prompt: q.prompt,
-            backText: q.backText,
-            options: q.options,
-            acceptedAnswers: q.acceptedAnswers,
-          });
-          if (fp && (existingMap.has(fp) || seenBatch.has(fp))) {
-            skippedCount += 1;
-            continue;
+        for (const batch of uncommittedSubBatches) {
+          const filtered: ParsedQuestion[] = [];
+          for (const q of batch.questions) {
+            const fp = computeQuestionDuplicateFingerprint({
+              prompt: q.prompt,
+              backText: q.backText,
+              options: q.options,
+              acceptedAnswers: q.acceptedAnswers,
+            });
+            if (fp && (existingMap.has(fp) || seenBatch.has(fp))) {
+              skippedCount += 1;
+              continue;
+            }
+            if (fp) seenBatch.add(fp);
+            filtered.push(q);
           }
-          if (fp) seenBatch.add(fp);
-          filtered.push(q);
+          batch.questions = filtered;
         }
-        questionsToInsert = filtered;
       } else if (body.duplicatePolicy === "replace") {
         const idsToDelete: string[] = [];
-        for (const q of validQuestions) {
+        for (const q of remainingValidQuestions) {
           const fp = computeQuestionDuplicateFingerprint({
             prompt: q.prompt,
             backText: q.backText,
@@ -486,8 +594,29 @@ export async function POST(request: Request) {
       }
     }
 
-    // 6. Determine starting position for appended rows
-    const { data: maxPosRow } = await supabase
+    const questionsToInsert = uncommittedSubBatches.flatMap((b) => b.questions);
+
+    // 6, 7 & 7b. Run max-position lookup, batch tag upsert, and bounded-concurrent deduplicated
+    // media staging/upload in parallel (PERF-05 + DB-10) so 133Q+ multimedia DOCX imports finish fast!
+    type RawImportAttachment = NonNullable<ParsedQuestion["promptMedia"]>[number];
+
+    const allTagNames = Array.from(
+      new Set(questionsToInsert.flatMap((q) => q.tags).filter(Boolean)),
+    );
+    const tagSlugToId = new Map<string, string>();
+    const uploadedByHash = new Map<string, UploadedImportMedia>();
+    const sha256ByTempPath = new Map<string, string>();
+    const sha256ByDataUrl = new Map<string, string>();
+
+    const allAttachments: RawImportAttachment[] = [];
+    for (const q of questionsToInsert) {
+      for (const att of q.promptMedia ?? []) allAttachments.push(att);
+      for (const opt of q.options) {
+        for (const att of opt.media ?? []) allAttachments.push(att);
+      }
+    }
+
+    const fetchMaxPosPromise = supabase
       .from("questions")
       .select("position")
       .eq("study_set_id", body.studySetId)
@@ -495,26 +624,16 @@ export async function POST(request: Request) {
       .limit(1)
       .maybeSingle();
 
-    let nextPosition = maxPosRow ? maxPosRow.position + 1 : 0;
-
-    // 7. Upsert unique tags for owner in batch
-    const allTagNames = Array.from(
-      new Set(questionsToInsert.flatMap((q) => q.tags).filter(Boolean)),
-    );
-    const tagSlugToId = new Map<string, string>();
-
-    if (allTagNames.length > 0) {
+    const upsertTagsPromise = (async (): Promise<void> => {
+      if (allTagNames.length === 0) return;
       const tagInserts = allTagNames.map((name) => ({
         owner_id: user.id,
         name,
         slug: slugifyTag(name),
       }));
-
-      // Deduplicate by slug
       const uniqueTagRows = Array.from(
         new Map(tagInserts.map((t) => [t.slug, t])).values(),
       );
-
       const { data: upsertedTags, error: tagErr } = await supabase
         .from("tags")
         .upsert(uniqueTagRows, { onConflict: "owner_id,slug" })
@@ -524,130 +643,248 @@ export async function POST(request: Request) {
       for (const row of upsertedTags ?? []) {
         tagSlugToId.set(row.slug, row.id);
       }
-    }
+    })();
 
-    // 7b. Deduplicated upload of validated V3 DOCX raster media attachments to private `study-media`
-    // Supports BOTH inline `dataUrl` and staged `study-temp` `tempStoragePath` (cleaned up in `finally`).
-    const uploadedByHash = new Map<string, UploadedImportMedia>();
-    const uploadedByTempPath = new Map<string, UploadedImportMedia | null>();
+    const processUniqueMediaPromise = (async (): Promise<void> => {
+      if (allAttachments.length === 0) return;
 
-    const uploadAttachmentIfNeeded = async (
-      att: NonNullable<ParsedQuestion["promptMedia"]>[number],
-    ): Promise<UploadedImportMedia | null> => {
-      let decoded: { bytes: Uint8Array; mime: string; ext: string } | null = null;
+      interface DecodedUniqueMedia {
+        sha256: string;
+        bytes: Uint8Array;
+        mime: string;
+        ext: string;
+        fileName: string;
+        alt?: string;
+        storagePath: string;
+        proxyUrl: string;
+      }
 
-      if (att.tempStoragePath) {
-        if (uploadedByTempPath.has(att.tempStoragePath)) {
-          const cachedTemp = uploadedByTempPath.get(att.tempStoragePath) ?? null;
-          return cachedTemp ? { ...cachedTemp, alt: att.alt ?? cachedTemp.alt } : null;
-        }
-        try {
-          const consumed = await consumeTempUploadBytes(supabase, {
-            userId: user.id,
-            storagePath: att.tempStoragePath,
-            expectedPurpose: "import-media",
-            maxBytes: MAX_IMAGE_FILE_BYTES,
-          });
-          tempMediaPathsToCleanup.push(att.tempStoragePath);
-          const inspected = inspectRasterImageBytes(consumed.bytes);
-          if (inspected.valid && inspected.mime && inspected.ext) {
-            decoded = {
-              bytes: consumed.bytes,
-              mime: inspected.mime,
-              ext: inspected.ext,
-            };
-          } else {
-            uploadedByTempPath.set(att.tempStoragePath, null);
-            return null;
+      const decodedBySha256 = new Map<string, DecodedUniqueMedia>();
+      const uniqueTempEntries = new Map<string, { fileName: string; alt?: string }>();
+
+      // Phase A: Decode inline base64 dataUrls synchronously & collect unique tempStoragePaths
+      for (const att of allAttachments) {
+        if (att.tempStoragePath) {
+          const cleanPath = att.tempStoragePath.trim();
+          if (cleanPath && !uniqueTempEntries.has(cleanPath)) {
+            uniqueTempEntries.set(cleanPath, {
+              fileName: sanitizeFileName(att.fileName),
+              alt: att.alt,
+            });
           }
-        } catch {
-          uploadedByTempPath.set(att.tempStoragePath, null);
-          return null;
+          continue;
         }
-      } else if (att.dataUrl) {
-        decoded = decodeSafeRasterDataUrl(att.dataUrl);
+        if (att.dataUrl) {
+          if (sha256ByDataUrl.has(att.dataUrl)) continue;
+          const decoded = decodeSafeRasterDataUrl(att.dataUrl);
+          if (!decoded) continue;
+          const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
+          sha256ByDataUrl.set(att.dataUrl, sha256);
+          if (!decodedBySha256.has(sha256)) {
+            const storagePath = `${mediaOwnerId}/${body.studySetId}/import-${sha256.slice(0, 24)}.${decoded.ext}`;
+            decodedBySha256.set(sha256, {
+              sha256,
+              bytes: decoded.bytes,
+              mime: decoded.mime,
+              ext: decoded.ext,
+              fileName: sanitizeFileName(att.fileName),
+              alt: att.alt,
+              storagePath,
+              proxyUrl: `/api/uploads/signed-url?path=${encodeURIComponent(storagePath)}&redirect=1`,
+            });
+          }
+        }
       }
 
-      if (!decoded) return null;
-
-      const sha256 = crypto.createHash("sha256").update(decoded.bytes).digest("hex");
-      const cached = uploadedByHash.get(sha256);
-      if (cached) {
-        if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, cached);
-        return { ...cached, alt: att.alt ?? cached.alt };
-      }
-
-      // Store under study-set owner namespace (`access.studySet.owner_id`) so shared editors
-      // satisfy `can_access_study_media_path` RLS cleanly (#197).
-      const storagePath = `${mediaOwnerId}/${body.studySetId}/import-${sha256.slice(0, 24)}.${decoded.ext}`;
-      const { error: uploadErr } = await supabase.storage
-        .from("study-media")
-        .upload(storagePath, decoded.bytes, {
-          contentType: decoded.mime,
-          upsert: true,
+      // Phase B: Download unique staged `study-temp` images concurrently (concurrency = 6)
+      const tempList = Array.from(uniqueTempEntries.entries());
+      if (tempList.length > 0) {
+        await mapWithConcurrency(tempList, MEDIA_CONCURRENCY, async ([tempPath, meta]) => {
+          try {
+            const consumed = await consumeTempUploadBytes(supabase, {
+              userId: user.id,
+              storagePath: tempPath,
+              expectedPurpose: "import-media",
+              maxBytes: MAX_IMAGE_FILE_BYTES,
+            });
+            tempMediaPathsToCleanup.add(tempPath);
+            const inspected = inspectRasterImageBytes(consumed.bytes);
+            if (!inspected.valid || !inspected.mime || !inspected.ext) return;
+            const sha256 = crypto.createHash("sha256").update(consumed.bytes).digest("hex");
+            sha256ByTempPath.set(tempPath, sha256);
+            if (!decodedBySha256.has(sha256)) {
+              const storagePath = `${mediaOwnerId}/${body.studySetId}/import-${sha256.slice(0, 24)}.${inspected.ext}`;
+              decodedBySha256.set(sha256, {
+                sha256,
+                bytes: consumed.bytes,
+                mime: inspected.mime,
+                ext: inspected.ext,
+                fileName: meta.fileName,
+                alt: meta.alt,
+                storagePath,
+                proxyUrl: `/api/uploads/signed-url?path=${encodeURIComponent(storagePath)}&redirect=1`,
+              });
+            }
+          } catch {
+            // Skip unreadable temp media cleanly
+          }
         });
-      if (uploadErr) {
-        if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, null);
-        return null;
       }
 
-      const proxyUrl = `/api/uploads/signed-url?path=${encodeURIComponent(storagePath)}&redirect=1`;
-      let mediaId: string | null = null;
+      const uniqueItems = Array.from(decodedBySha256.values());
+      if (uniqueItems.length === 0) return;
 
-      // Best-effort V3 `media_assets` registry write (graceful if migration 0013 is not applied yet)
+      // Phase C: Single batched `media_assets` lookup across all unique content-addressed storage paths
+      const existingAssetsByPath = new Map<string, { id: string; isOrphaned: boolean }>();
       try {
-        const { data: existingAsset } = await supabase
-          .from("media_assets")
-          .select("id")
-          .eq("owner_id", user.id)
-          .eq("storage_path", storagePath)
-          .maybeSingle();
+        const pathChunks = chunkArray(
+          uniqueItems.map((u) => u.storagePath),
+          MEDIA_LOOKUP_CHUNK_SIZE,
+        );
+        const lookupResults = await mapWithConcurrency(
+          pathChunks,
+          MEDIA_CONCURRENCY,
+          async (paths) => {
+            const { data } = await supabase
+              .from("media_assets")
+              .select("id, storage_path, is_orphaned")
+              .eq("owner_id", user.id)
+              .in("storage_path", paths);
+            return data ?? [];
+          },
+        );
+        for (const rows of lookupResults) {
+          for (const row of rows) {
+            existingAssetsByPath.set(row.storage_path, {
+              id: row.id,
+              isOrphaned: Boolean(row.is_orphaned),
+            });
+          }
+        }
+      } catch {
+        // Best-effort registry lookup (graceful if media_assets is unavailable)
+      }
 
-        if (existingAsset?.id) {
-          mediaId = existingAsset.id;
-        } else {
-          const { data: insertedAsset } = await supabase
-            .from("media_assets")
-            .insert({
+      // Phase D: Bounded-concurrent Storage uploads (concurrency = 6) for unique media not yet active
+      const uploadedItems: DecodedUniqueMedia[] = [];
+      await mapWithConcurrency(uniqueItems, MEDIA_CONCURRENCY, async (item) => {
+        const existing = existingAssetsByPath.get(item.storagePath);
+        if (existing && !existing.isOrphaned) {
+          uploadedItems.push(item);
+          return;
+        }
+        const { error: uploadErr } = await supabase.storage
+          .from("study-media")
+          .upload(item.storagePath, item.bytes, {
+            contentType: item.mime,
+            upsert: true,
+          });
+        if (!uploadErr) {
+          uploadedItems.push(item);
+        }
+      });
+
+      // Phase E: Single batched `media_assets` insert for newly uploaded unique assets
+      const newlyUploadedForRegistry = uploadedItems.filter(
+        (item) => !existingAssetsByPath.has(item.storagePath),
+      );
+      if (newlyUploadedForRegistry.length > 0) {
+        try {
+          const assetInsertRows: Database["public"]["Tables"]["media_assets"]["Insert"][] =
+            newlyUploadedForRegistry.map((item) => ({
               owner_id: user.id,
               study_set_id: body.studySetId,
               kind: "image",
               storage_bucket: "study-media",
-              storage_path: storagePath,
-              mime_type: decoded.mime,
-              file_name: sanitizeFileName(att.fileName),
-              size_bytes: decoded.bytes.byteLength,
-              sha256_hash: sha256,
-              alt_text: att.alt ?? null,
+              storage_path: item.storagePath,
+              mime_type: item.mime,
+              file_name: item.fileName,
+              size_bytes: item.bytes.byteLength,
+              sha256_hash: item.sha256,
+              alt_text: item.alt ?? null,
               is_orphaned: false,
-            })
-            .select("id")
-            .single();
-          mediaId = insertedAsset?.id ?? null;
+            }));
+
+          const insertChunks = chunkArray(assetInsertRows, MEDIA_LOOKUP_CHUNK_SIZE);
+          const insertedResults = await mapWithConcurrency(
+            insertChunks,
+            MEDIA_CONCURRENCY,
+            async (rowsChunk) => {
+              const { data, error } = await supabase
+                .from("media_assets")
+                .insert(rowsChunk)
+                .select("id, storage_path");
+              if (error) {
+                // Concurrent race fallback: re-select already inserted rows
+                const { data: fallbackRows } = await supabase
+                  .from("media_assets")
+                  .select("id, storage_path")
+                  .eq("owner_id", user.id)
+                  .in(
+                    "storage_path",
+                    rowsChunk.map((r) => r.storage_path),
+                  );
+                return fallbackRows ?? [];
+              }
+              return data ?? [];
+            },
+          );
+          for (const rows of insertedResults) {
+            for (const row of rows) {
+              existingAssetsByPath.set(row.storage_path, {
+                id: row.id,
+                isOrphaned: false,
+              });
+            }
+          }
+        } catch {
+          // Graceful fallback if media_assets write fails
         }
-      } catch {
-        mediaId = null;
       }
 
-      const record: UploadedImportMedia = {
-        mediaId,
-        storagePath,
-        proxyUrl,
-        fileName: sanitizeFileName(att.fileName),
-        mimeType: decoded.mime,
-        sizeBytes: decoded.bytes.byteLength,
-        sha256,
-        alt: att.alt,
-      };
-      uploadedByHash.set(sha256, record);
-      if (att.tempStoragePath) uploadedByTempPath.set(att.tempStoragePath, record);
-      return record;
+      for (const item of uploadedItems) {
+        const assetEntry = existingAssetsByPath.get(item.storagePath);
+        uploadedByHash.set(item.sha256, {
+          mediaId: assetEntry?.id ?? null,
+          storagePath: item.storagePath,
+          proxyUrl: item.proxyUrl,
+          fileName: item.fileName,
+          mimeType: item.mime,
+          sizeBytes: item.bytes.byteLength,
+          sha256: item.sha256,
+          alt: item.alt,
+        });
+      }
+    })();
+
+    const [{ data: maxPosRow }] = await Promise.all([
+      fetchMaxPosPromise,
+      upsertTagsPromise,
+      processUniqueMediaPromise,
+    ]);
+
+    let nextPosition = maxPosRow ? maxPosRow.position + 1 : 0;
+
+    const resolveUploadedAttachment = (
+      att: RawImportAttachment,
+    ): UploadedImportMedia | null => {
+      const sha256 = att.tempStoragePath
+        ? sha256ByTempPath.get(att.tempStoragePath.trim())
+        : att.dataUrl
+          ? sha256ByDataUrl.get(att.dataUrl)
+          : undefined;
+      if (!sha256) return null;
+      const uploaded = uploadedByHash.get(sha256);
+      if (!uploaded) return null;
+      return { ...uploaded, alt: att.alt ?? uploaded.alt };
     };
 
-    // 8. Chunked 500-row batch inserts into questions, question_options, question_accepted_answers, question_tags
+    // 8. Sub-batch <=500-row inserts into questions, followed by CONCURRENT child table inserts (PERF-05)
     let importedCount = 0;
 
-    for (const qChunk of chunkArray(questionsToInsert, 500)) {
+    for (const { subKey, questions: qChunk } of uncommittedSubBatches) {
+      if (qChunk.length === 0) continue;
+
       const questionRows: Database["public"]["Tables"]["questions"]["Insert"][] = [];
       const optionRows: Database["public"]["Tables"]["question_options"]["Insert"][] = [];
       const acceptedRows: Database["public"]["Tables"]["question_accepted_answers"]["Insert"][] = [];
@@ -658,7 +895,7 @@ export async function POST(request: Request) {
         const questionId = crypto.randomUUID();
         const uploadedPromptMedia: UploadedImportMedia[] = [];
         for (const att of q.promptMedia ?? []) {
-          const uploaded = await uploadAttachmentIfNeeded(att);
+          const uploaded = resolveUploadedAttachment(att);
           if (uploaded) uploadedPromptMedia.push(uploaded);
         }
 
@@ -693,7 +930,7 @@ export async function POST(request: Request) {
           difficulty: q.difficulty,
           source_metadata: {
             import_job_id: importJobId,
-            import_idempotency_key: body.idempotencyKey,
+            import_idempotency_key: subKey,
             source_format: body.sourceFormat,
             detected_by: q.detectedBy,
             ...(uploadedPromptMedia.length > 0
@@ -710,7 +947,7 @@ export async function POST(request: Request) {
           const optionId = crypto.randomUUID();
           const uploadedOptMedia: UploadedImportMedia[] = [];
           for (const att of opt.media ?? []) {
-            const uploaded = await uploadAttachmentIfNeeded(att);
+            const uploaded = resolveUploadedAttachment(att);
             if (uploaded) uploadedOptMedia.push(uploaded);
           }
 
@@ -778,42 +1015,43 @@ export async function POST(request: Request) {
         .insert(questionRows);
       if (qErr) throw qErr;
 
-      if (optionRows.length > 0) {
-        for (const optChunk of chunkArray(optionRows, 1000)) {
-          const { error: optErr } = await supabase
-            .from("question_options")
-            .insert(optChunk);
-          if (optErr) throw optErr;
-        }
-      }
-
-      if (acceptedRows.length > 0) {
-        for (const accChunk of chunkArray(acceptedRows, 1000)) {
-          const { error: accErr } = await supabase
-            .from("question_accepted_answers")
-            .insert(accChunk);
-          if (accErr) throw accErr;
-        }
-      }
-
-      if (questionTagRows.length > 0) {
-        for (const qtChunk of chunkArray(questionTagRows, 1000)) {
-          const { error: qtErr } = await supabase
-            .from("question_tags")
-            .insert(qtChunk);
-          if (qtErr) throw qtErr;
-        }
-      }
-
-      if (mediaRelationRows.length > 0) {
-        try {
-          for (const mrChunk of chunkArray(mediaRelationRows, 500)) {
-            await supabase.from("content_media_relations").insert(mrChunk);
+      // Insert independent child tables concurrently via Promise.all after questions succeed
+      await Promise.all([
+        (async () => {
+          for (const optChunk of chunkArray(optionRows, 1000)) {
+            const { error: optErr } = await supabase
+              .from("question_options")
+              .insert(optChunk);
+            if (optErr) throw optErr;
           }
-        } catch {
-          // Graceful fallback if content_media_relations is unavailable
-        }
-      }
+        })(),
+        (async () => {
+          for (const accChunk of chunkArray(acceptedRows, 1000)) {
+            const { error: accErr } = await supabase
+              .from("question_accepted_answers")
+              .insert(accChunk);
+            if (accErr) throw accErr;
+          }
+        })(),
+        (async () => {
+          for (const qtChunk of chunkArray(questionTagRows, 1000)) {
+            const { error: qtErr } = await supabase
+              .from("question_tags")
+              .insert(qtChunk);
+            if (qtErr) throw qtErr;
+          }
+        })(),
+        (async () => {
+          if (mediaRelationRows.length === 0) return;
+          try {
+            for (const mrChunk of chunkArray(mediaRelationRows, 500)) {
+              await supabase.from("content_media_relations").insert(mrChunk);
+            }
+          } catch {
+            // Graceful fallback if content_media_relations is unavailable
+          }
+        })(),
+      ]);
 
       importedCount += questionRows.length;
     }
@@ -847,6 +1085,9 @@ export async function POST(request: Request) {
         .eq("study_set_id", body.studySetId);
     }
 
+    // SEC-12: Only delete shared staged `tempStoragePath` objects when the FINAL chunk succeeds!
+    shouldCleanupTempMedia = body.isFinalChunk;
+
     return apiSuccess({
       importJobId,
       importedCount,
@@ -858,8 +1099,8 @@ export async function POST(request: Request) {
   } catch (err) {
     return handleApiError(err);
   } finally {
-    if (supabaseRef && tempMediaPathsToCleanup.length > 0) {
-      await cleanupTempObjects(supabaseRef, tempMediaPathsToCleanup);
+    if (supabaseRef && shouldCleanupTempMedia && tempMediaPathsToCleanup.size > 0) {
+      await cleanupTempObjects(supabaseRef, Array.from(tempMediaPathsToCleanup));
     }
   }
 }

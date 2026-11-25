@@ -55,7 +55,13 @@ export function TestHubClient({ setId }: TestHubClientProps) {
   });
 
   if (activeAttemptId) {
-    return <LiveExamRunner setId={setId} attemptId={activeAttemptId} />;
+    return (
+      <LiveExamRunner
+        key={activeAttemptId}
+        setId={setId}
+        attemptId={activeAttemptId}
+      />
+    );
   }
 
   const activeResumeAttempts = (inProgressQuery.data ?? []).filter((att) => {
@@ -99,7 +105,7 @@ export function TestHubClient({ setId }: TestHubClientProps) {
               </div>
               <Button
                 type="button"
-                className="min-h-10 shrink-0"
+                className="min-h-11 shrink-0"
                 onClick={() => {
                   const id = activeResumeAttempts[0].id;
                   setManualAttemptId(id);

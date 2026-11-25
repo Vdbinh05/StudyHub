@@ -74,6 +74,8 @@ export function QuestionNotesAndReportBar({
   const [draft, setDraft] = React.useState(initialNote?.content_text ?? "");
   const [loadingNote, setLoadingNote] = React.useState(false);
   const [savingNote, setSavingNote] = React.useState(false);
+  const [justSavedOptimistic, setJustSavedOptimistic] = React.useState(false);
+  const saveGenRef = React.useRef(0);
 
   const [reportOpen, setReportOpen] = React.useState(false);
   const [reportCategory, setReportCategory] =
@@ -104,28 +106,58 @@ export function QuestionNotesAndReportBar({
     }
   };
 
+  // Optimistic Save Note feedback (fixes PERF-07 323ms blocking save!)
   const handleSaveNote = async () => {
     const trimmed = draft.trim();
     if (!trimmed) return;
+
+    const gen = ++saveGenRef.current;
+    const previousNote = note;
+    const nowIso = new Date().toISOString();
+    const optimisticNote: UserQuestionNote = {
+      id: previousNote?.id ?? `optimistic-${questionId}`,
+      user_id: previousNote?.user_id ?? "",
+      study_set_id: studySetId,
+      question_id: questionId,
+      content_text: trimmed,
+      content_rich: previousNote?.content_rich ?? null,
+      version: (previousNote?.version ?? 0) + 1,
+      created_at: previousNote?.created_at ?? nowIso,
+      updated_at: nowIso,
+    };
+
+    // Instant optimistic UI state + toast without blocking the user
+    setNote(optimisticNote);
+    setDraft(trimmed);
+    setJustSavedOptimistic(true);
     setSavingNote(true);
+    toast.success(lText(locale, "Đã lưu ghi chú cá nhân.", "Personal note saved."));
+
     try {
       const saved = await upsertQuestionNote({
         study_set_id: studySetId,
         question_id: questionId,
         content_text: trimmed,
-        base_version: note?.version ?? null,
+        base_version: previousNote?.version ?? null,
       });
-      setNote(saved);
-      setDraft(saved.content_text);
-      toast.success(lText(locale, "Đã lưu ghi chú cá nhân.", "Personal note saved."));
+      if (gen === saveGenRef.current) {
+        setNote(saved);
+        setDraft(saved.content_text);
+      }
     } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? err.message
-          : lText(locale, "Không thể lưu ghi chú.", "Failed to save note."),
-      );
+      if (gen === saveGenRef.current) {
+        setNote(previousNote);
+        setJustSavedOptimistic(false);
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : lText(locale, "Không thể lưu ghi chú.", "Failed to save note."),
+        );
+      }
     } finally {
-      setSavingNote(false);
+      if (gen === saveGenRef.current) {
+        setSavingNote(false);
+      }
     }
   };
 
@@ -195,7 +227,7 @@ export function QuestionNotesAndReportBar({
           type="button"
           size="sm"
           variant={note?.content_text ? "secondary" : "ghost"}
-          className={compact ? "h-8 px-2 text-xs" : "min-h-9 text-xs"}
+          className={compact ? "min-h-11 sm:min-h-8 px-2.5 text-xs" : "min-h-11 sm:min-h-9 text-xs"}
           aria-expanded={noteOpen}
           onClick={() => void handleToggleNote()}
         >
@@ -212,8 +244,8 @@ export function QuestionNotesAndReportBar({
             variant="ghost"
             className={
               compact
-                ? "h-8 px-2 text-xs text-muted-foreground"
-                : "min-h-9 text-xs text-muted-foreground"
+                ? "min-h-11 sm:min-h-8 px-2.5 text-xs text-muted-foreground"
+                : "min-h-11 sm:min-h-9 text-xs text-muted-foreground"
             }
             onClick={() => setReportOpen(true)}
           >
@@ -280,16 +312,14 @@ export function QuestionNotesAndReportBar({
             <Button
               type="button"
               size="sm"
-              className="h-8 text-xs"
-              disabled={savingNote || !draft.trim()}
+              className="min-h-11 sm:min-h-8 text-xs"
+              disabled={!draft.trim()}
               onClick={() => void handleSaveNote()}
             >
-              {savingNote ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-              ) : (
-                <Save className="size-3.5" aria-hidden="true" />
-              )}
-              {lText(locale, "Lưu ghi chú", "Save Note")}
+              <Save className="size-3.5" aria-hidden="true" />
+              {justSavedOptimistic && note?.content_text === draft.trim()
+                ? lText(locale, "Đã lưu ghi chú", "Note Saved")
+                : lText(locale, "Lưu ghi chú", "Save Note")}
             </Button>
           </div>
         </div>

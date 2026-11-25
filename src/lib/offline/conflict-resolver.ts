@@ -48,10 +48,18 @@ export type SyncResultBucket =
   | "stale_reset"
   | "revoked"
   | "deleted"
+  | "inaccessible"
   | "conflict"
   | "invalid";
 
-export function classifySyncEventStatus(status: SyncEventStatus): SyncResultBucket {
+export type ExtendedSyncEventStatus =
+  | SyncEventStatus
+  | "rejected_inaccessible"
+  | (string & {});
+
+export function classifySyncEventStatus(
+  status: ExtendedSyncEventStatus,
+): SyncResultBucket {
   switch (status) {
     case "applied":
       return "applied";
@@ -63,6 +71,8 @@ export function classifySyncEventStatus(status: SyncEventStatus): SyncResultBuck
       return "revoked";
     case "rejected_deleted":
       return "deleted";
+    case "rejected_inaccessible":
+      return "inaccessible";
     case "conflict":
       return "conflict";
     case "invalid":
@@ -71,7 +81,11 @@ export function classifySyncEventStatus(status: SyncEventStatus): SyncResultBuck
   }
 }
 
-export function classifySyncResult(result: LearningSyncEventResult): SyncResultBucket {
+export function classifySyncResult(
+  result: Omit<LearningSyncEventResult, "status"> & {
+    status: ExtendedSyncEventStatus;
+  },
+): SyncResultBucket {
   return classifySyncEventStatus(result.status);
 }
 

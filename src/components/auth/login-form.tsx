@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   getFriendlyErrorMessage,
+  isServiceUnavailableError,
   isSupabaseConfiguredClient,
 } from "@/components/layout/api-client";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  broadcastAuthEvent,
+  purgeAllUserClientState,
+} from "@/lib/auth/client-session-cleanup";
 import { useI18n } from "@/lib/i18n";
+import type { Locale } from "@/types/domain";
 
 function sanitizeNextPath(raw: string | null): string {
   if (!raw) return "/dashboard";
@@ -70,13 +76,125 @@ function mapCallbackError(
     : "Sign-in failed. Please try again.";
 }
 
+function extractAuthErrorDetails(err: unknown): {
+  code: string;
+  message: string;
+  status: number | null;
+} {
+  if (typeof err === "object" && err !== null) {
+    const record = err as Record<string, unknown>;
+    const code = typeof record.code === "string" ? record.code.toLowerCase() : "";
+    const message =
+      typeof record.message === "string"
+        ? record.message
+        : err instanceof Error
+          ? err.message
+          : "";
+    const status = typeof record.status === "number" ? record.status : null;
+    return { code, message, status };
+  }
+  if (typeof err === "string") {
+    return { code: "", message: err, status: null };
+  }
+  return { code: "", message: "", status: null };
+}
+
+/**
+ * Translates all Supabase Auth / GoTrue / network sign-in errors into calm,
+ * student-friendly Vietnamese or English copy (`V32-040`).
+ */
+export function mapLoginAuthError(
+  err: unknown,
+  locale: Locale,
+  fallback?: string,
+): string {
+  if (isServiceUnavailableError(err)) {
+    return getFriendlyErrorMessage(err, locale, fallback);
+  }
+
+  const vi = locale === "vi";
+  const { code, message, status } = extractAuthErrorDetails(err);
+  const msg = message.toLowerCase();
+
+  if (
+    code === "invalid_credentials" ||
+    msg.includes("invalid login credentials") ||
+    msg.includes("invalid email or password")
+  ) {
+    return vi
+      ? "Email hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại."
+      : "Invalid email or password. Please check and try again.";
+  }
+
+  if (
+    code === "email_not_confirmed" ||
+    msg.includes("email not confirmed") ||
+    msg.includes("confirm your email")
+  ) {
+    return vi
+      ? "Email của bạn chưa được xác nhận. Vui lòng kiểm tra hộp thư để kích hoạt tài khoản."
+      : "Your email address has not been confirmed yet. Please check your inbox to verify your account.";
+  }
+
+  if (
+    status === 429 ||
+    code === "over_request_rate_limit" ||
+    code === "over_email_send_rate_limit" ||
+    msg.includes("too many requests") ||
+    msg.includes("rate limit")
+  ) {
+    return vi
+      ? "Bạn thao tác quá nhanh. Vui lòng đợi một lát rồi thử lại."
+      : "Too many sign-in attempts. Please wait a moment and try again.";
+  }
+
+  if (
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("load failed") ||
+    msg.includes("network request failed") ||
+    msg.includes("fetch failed")
+  ) {
+    return vi
+      ? "Không thể kết nối đến máy chủ. Vui lòng kiểm tra kết nối mạng và thử lại."
+      : "Unable to reach the server. Please check your network connection and try again.";
+  }
+
+  if (code === "user_banned" || msg.includes("user is banned")) {
+    return vi
+      ? "Tài khoản này hiện tạm khóa quyền đăng nhập. Vui lòng liên hệ quản trị viên."
+      : "This account is currently restricted from signing in.";
+  }
+
+  if (
+    code === "provider_disabled" ||
+    code === "email_provider_disabled" ||
+    msg.includes("email logins are disabled") ||
+    msg.includes("provider is not enabled")
+  ) {
+    return vi
+      ? "Phương thức đăng nhập này hiện chưa được kích hoạt."
+      : "This sign-in method is currently unavailable.";
+  }
+
+  return (
+    fallback ||
+    (vi
+      ? "Đăng nhập không thành công. Vui lòng kiểm tra lại thông tin và thử lại."
+      : "Sign-in failed. Please check your details and try again.")
+  );
+}
+
 const GOOGLE_OAUTH_ENABLED =
   process.env.NEXT_PUBLIC_ENABLE_GOOGLE_OAUTH === "true";
+
+type LoginErrorState =
+  | { kind: "service_unavailable" }
+  | { kind: "auth_error"; error: unknown };
 
 function LoginFormInner() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
-  const router = useRouter();
   const searchParams = useSearchParams();
 
   const [email, setEmail] = React.useState("");
@@ -89,7 +207,9 @@ function LoginFormInner() {
   const [submitted, setSubmitted] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [oauthLoading, setOauthLoading] = React.useState(false);
-  const [formError, setFormError] = React.useState<string | null>(null);
+  const [formErrorState, setFormErrorState] = React.useState<LoginErrorState | null>(
+    null,
+  );
 
   const emailInputRef = React.useRef<HTMLInputElement>(null);
   const passwordInputRef = React.useRef<HTMLInputElement>(null);
@@ -101,6 +221,15 @@ function LoginFormInner() {
     searchParams.get("error_description"),
     vi,
   );
+
+  const formError = React.useMemo(() => {
+    if (!formErrorState) return null;
+    if (formErrorState.kind === "service_unavailable") {
+      return t("common.serviceUnavailableDesc");
+    }
+    return mapLoginAuthError(formErrorState.error, locale);
+  }, [formErrorState, locale, t]);
+
   const activeError = formError ?? callbackError;
 
   const emailInvalid =
@@ -111,7 +240,7 @@ function LoginFormInner() {
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitted(true);
-    setFormError(null);
+    setFormErrorState(null);
 
     const trimmedEmail = email.trim();
     if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
@@ -128,44 +257,42 @@ function LoginFormInner() {
       const { tryCreateClient } = await import("@/lib/supabase/client");
       const supabase = tryCreateClient();
       if (!supabase) {
-        setFormError(t("common.serviceUnavailableDesc"));
+        setFormErrorState({ kind: "service_unavailable" });
         return;
       }
 
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
         password,
       });
 
       if (error) {
-        setFormError(
-          error.message === "Invalid login credentials"
-            ? vi
-              ? "Email hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại."
-              : "Invalid email or password. Please check and try again."
-            : getFriendlyErrorMessage(error, locale),
-        );
+        setFormErrorState({ kind: "auth_error", error });
         return;
       }
 
+      // Purge any stale prior-account client caches before entering the authenticated shell (`SEC-01`/`SEC-02`)
+      const nextUserId = data.user?.id ?? null;
+      await purgeAllUserClientState(null, nextUserId, { broadcast: false });
+      broadcastAuthEvent("account-switch", nextUserId);
+
       toast.success(vi ? "Đăng nhập thành công." : "Signed in successfully.");
-      router.push(nextPath);
-      router.refresh();
+      window.location.assign(nextPath);
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
+      setFormErrorState({ kind: "auth_error", error: err });
     } finally {
       setLoading(false);
     }
   };
 
   const handleGoogleSignIn = async () => {
-    setFormError(null);
+    setFormErrorState(null);
     setOauthLoading(true);
     try {
       const { tryCreateClient } = await import("@/lib/supabase/client");
       const supabase = tryCreateClient();
       if (!supabase) {
-        setFormError(t("common.serviceUnavailableDesc"));
+        setFormErrorState({ kind: "service_unavailable" });
         setOauthLoading(false);
         return;
       }
@@ -177,11 +304,11 @@ function LoginFormInner() {
         },
       });
       if (error) {
-        setFormError(getFriendlyErrorMessage(error, locale));
+        setFormErrorState({ kind: "auth_error", error });
         setOauthLoading(false);
       }
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err, locale, t("common.errorGeneric")));
+      setFormErrorState({ kind: "auth_error", error: err });
       setOauthLoading(false);
     }
   };
@@ -251,6 +378,7 @@ function LoginFormInner() {
               <Label htmlFor="login-password">{t("auth.password")}</Label>
               <Link
                 href="/forgot-password"
+                prefetch={false}
                 className="text-primary inline-flex min-h-11 items-center px-1 text-xs font-medium hover:underline sm:min-h-0 sm:px-0"
               >
                 {t("auth.forgotPassword")}
@@ -358,7 +486,11 @@ function LoginFormInner() {
       <CardFooter className="justify-center border-t pt-4">
         <p className="text-muted-foreground text-sm">
           {t("auth.noAccount")}{" "}
-          <Link href="/register" className="text-primary font-semibold hover:underline">
+          <Link
+            href="/register"
+            prefetch={false}
+            className="text-primary font-semibold hover:underline"
+          >
             {t("nav.signUp")}
           </Link>
         </p>

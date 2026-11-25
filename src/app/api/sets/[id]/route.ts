@@ -6,7 +6,12 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
-import { fetchAllPages } from "@/lib/supabase/query-helpers";
+import { tryCreateAdminClient } from "@/lib/supabase/admin";
+import {
+  fetchAllPages,
+  fetchInChunks,
+  SAFE_IN_CHUNK_SIZE,
+} from "@/lib/supabase/query-helpers";
 import {
   isMissingRpcError,
   rpcGetStudySetSummary,
@@ -57,7 +62,7 @@ export async function GET(
         fetchAllPages(async (from, to) =>
           supabase
             .from("user_question_progress")
-            .select("mastery_level, wrong_count, next_review_at")
+            .select("mastery_level, wrong_count, next_review_at, mistake_status")
             .eq("user_id", user.id)
             .eq("study_set_id", setId)
             .range(from, to),
@@ -99,7 +104,11 @@ export async function GET(
       if (p.next_review_at && p.next_review_at <= nowIso) {
         mastery.due += 1;
       }
-      if (p.wrong_count > 0 && p.mastery_level !== "mastered") {
+      if (
+        p.wrong_count > 0 &&
+        p.mastery_level !== "mastered" &&
+        (p.mistake_status ?? "active") !== "resolved"
+      ) {
         mastery.mistakes += 1;
       }
     }
@@ -194,6 +203,19 @@ export async function DELETE(
 
     await requireStudySetAccess(supabase, setId, user.id, "owner");
 
+    // DB-14: Capture owner media_assets belonging to this set before deleting so we can safely mark/reap unpinned orphans
+    const admin = tryCreateAdminClient();
+    const candidateMedia = admin
+      ? await fetchAllPages(async (from, to) =>
+          admin
+            .from("media_assets")
+            .select("id, storage_bucket, storage_path")
+            .eq("study_set_id", setId)
+            .eq("owner_id", user.id)
+            .range(from, to),
+        )
+      : [];
+
     const { error } = await supabase
       .from("study_sets")
       .delete()
@@ -201,6 +223,49 @@ export async function DELETE(
       .eq("owner_id", user.id);
 
     if (error) throw error;
+
+    // Safely mark & reap ONLY media_assets with ZERO remaining content_media_relations (preserving exam snapshots!)
+    if (admin && candidateMedia.length > 0) {
+      try {
+        const candidateIds = candidateMedia.map((m) => m.id);
+        const stillPinned = await fetchInChunks(
+          candidateIds,
+          async (chunk) =>
+            admin
+              .from("content_media_relations")
+              .select("media_id")
+              .in("media_id", chunk),
+          SAFE_IN_CHUNK_SIZE,
+        );
+        const pinnedSet = new Set(stillPinned.map((r) => r.media_id));
+        const unpinnedIds = candidateIds.filter((mid) => !pinnedSet.has(mid));
+
+        if (unpinnedIds.length > 0) {
+          for (let i = 0; i < unpinnedIds.length; i += SAFE_IN_CHUNK_SIZE) {
+            const chunk = unpinnedIds.slice(i, i + SAFE_IN_CHUNK_SIZE);
+            await admin
+              .from("media_assets")
+              .update({ is_orphaned: true })
+              .in("id", chunk);
+
+            const { data: deletedAssets } = await admin
+              .from("media_assets")
+              .delete()
+              .in("id", chunk)
+              .select("storage_bucket, storage_path");
+
+            const storagePaths = (deletedAssets ?? [])
+              .filter((a) => a.storage_bucket === "study-media")
+              .map((a) => a.storage_path);
+            if (storagePaths.length > 0) {
+              await admin.storage.from("study-media").remove(storagePaths);
+            }
+          }
+        }
+      } catch {
+        // Non-fatal orphan cleanup — study set deletion already succeeded cleanly
+      }
+    }
 
     return apiSuccess({ deleted: true, id: setId });
   } catch (err) {

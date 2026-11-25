@@ -279,40 +279,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // If shuffle_options is ON, compute cryptographic option UUID orders in chunks (<= 100 Qs)
-    // Actual option text & is_correct are resolved EXCLUSIVELY inside PostgreSQL (SH-013 / SEC-004)!
-    const selectedIds = chosen.map((c) => c.id);
-    const optionOrderByQ = new Map<string, string[]>();
-
-    if (input.shuffle_options) {
-      const optRows = await fetchInChunks(
-        selectedIds,
-        async (chunk) =>
-          supabase
-            .from("question_options")
-            .select("id, question_id, position")
-            .in("question_id", chunk)
-            .order("position", { ascending: true }),
-        SAFE_IN_CHUNK_SIZE,
-      );
-
-      const grouped = new Map<string, string[]>();
-      for (const row of optRows) {
-        const arr = grouped.get(row.question_id) ?? [];
-        arr.push(row.id);
-        grouped.set(row.question_id, arr);
-      }
-
-      for (const [qId, optIds] of grouped.entries()) {
-        optionOrderByQ.set(qId, cryptoShuffle(optIds));
-      }
-    }
-
+    // DB-10 (Migration 0019): Option shuffling runs directly inside PostgreSQL create_exam_attempt_v2
+    // reading p_config->>'shuffle_options' (18-arg backward-compatible signature, zero extra question_options RTTs!)
     const selectedItemsPayload = chosen.map((q) => ({
       question_id: q.id,
-      ...(optionOrderByQ.has(q.id)
-        ? { option_ids_order: optionOrderByQ.get(q.id) }
-        : {}),
     }));
 
     const sourcesPayload = orderedSubjects.map((s) => {

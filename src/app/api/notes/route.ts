@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
+import { requireAuth } from "@/lib/security/authz";
 import {
   apiSuccess,
   AppError,
@@ -81,8 +81,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    await requireStudySetAccess(supabase, qRow.study_set_id, user.id, "read");
-
+    // DB-02: RLS on `questions` SELECT already verified caller read access to qRow.study_set_id
     const { data: existing, error: fetchErr } = await supabase
       .from("user_question_notes")
       .select("*")
@@ -154,7 +153,25 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       .select("*")
       .single();
 
-    if (insErr) throw insErr;
+    if (insErr) {
+      // DB-02: Handle concurrent first-time note creation race (23505) with 409 NOTE_CONFLICT + server_note
+      if (insErr.code === "23505") {
+        const { data: serverNote } = await supabase
+          .from("user_question_notes")
+          .select("*")
+          .eq("user_id", user.id)
+          .eq("question_id", body.question_id)
+          .maybeSingle();
+
+        throw new AppError(
+          "NOTE_CONFLICT",
+          "This personal note was created concurrently on another device. Review both versions before saving.",
+          409,
+          { server_note: serverNote ?? null },
+        );
+      }
+      throw insErr;
+    }
     return apiSuccess(created, undefined, { status: 201 });
   } catch (err) {
     return handleApiError(err);

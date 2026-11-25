@@ -1,6 +1,8 @@
 import type { LearningSessionCheckpoint, V3StudyMode } from "@/types/domain";
 
 const LOCAL_CHECKPOINT_PREFIX = "studyhub-v3-checkpoint";
+const LOCAL_CHECKPOINT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const LOCAL_CHECKPOINT_MAX_PER_USER = 30;
 
 export interface LocalCheckpointEnvelope {
   version: 1;
@@ -165,6 +167,61 @@ function buildLocalStorageKey(userId: string, sessionKey: string): string {
   return `${LOCAL_CHECKPOINT_PREFIX}:${safeUser}:${sessionKey}`;
 }
 
+export function pruneLocalCheckpointsForUser(
+  userId: string,
+  nowMs: number = Date.now(),
+  maxAgeMs: number = LOCAL_CHECKPOINT_TTL_MS,
+  maxEntries: number = LOCAL_CHECKPOINT_MAX_PER_USER,
+): number {
+  if (typeof window === "undefined") return 0;
+  const prefix = `${LOCAL_CHECKPOINT_PREFIX}:${userId.trim() || "anon"}:`;
+  let removed = 0;
+  try {
+    const valid: Array<{ key: string; updatedMs: number }> = [];
+    const keysToDelete: string[] = [];
+
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const k = window.localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const raw = window.localStorage.getItem(k);
+      if (!raw) {
+        keysToDelete.push(k);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(raw) as Partial<LocalCheckpointEnvelope>;
+        const updatedMs = parsed.updatedAt ? Date.parse(parsed.updatedAt) : Number.NaN;
+        if (
+          parsed.version !== 1 ||
+          Number.isNaN(updatedMs) ||
+          nowMs - updatedMs > maxAgeMs
+        ) {
+          keysToDelete.push(k);
+        } else {
+          valid.push({ key: k, updatedMs });
+        }
+      } catch {
+        keysToDelete.push(k);
+      }
+    }
+
+    if (valid.length > maxEntries) {
+      valid.sort((a, b) => b.updatedMs - a.updatedMs);
+      for (const overflow of valid.slice(maxEntries)) {
+        keysToDelete.push(overflow.key);
+      }
+    }
+
+    for (const k of keysToDelete) {
+      window.localStorage.removeItem(k);
+      removed += 1;
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return removed;
+}
+
 export function saveLocalCheckpoint(envelope: LocalCheckpointEnvelope): void {
   if (typeof window === "undefined") return;
   try {
@@ -174,6 +231,7 @@ export function saveLocalCheckpoint(envelope: LocalCheckpointEnvelope): void {
       key,
       JSON.stringify({ ...envelope, committedEventKeys: trimmedEvents }),
     );
+    pruneLocalCheckpointsForUser(envelope.userId);
   } catch {
     // Ignore storage quota / private-browsing errors
   }

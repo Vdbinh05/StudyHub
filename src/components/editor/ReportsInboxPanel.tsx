@@ -2,7 +2,16 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Edit3, Flag, Inbox, Loader2, XCircle } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Edit3,
+  Flag,
+  Inbox,
+  Loader2,
+  RotateCcw,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import { apiFetch, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { Badge } from "@/components/ui/badge";
@@ -118,6 +127,29 @@ export function ReportsInboxPanel({
       <CardContent className="space-y-3">
         {reportsQuery.isLoading ? (
           <Skeleton className="h-36 w-full rounded-lg" />
+        ) : reportsQuery.isError ? (
+          <div
+            role="alert"
+            className="flex flex-col items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-8 text-center"
+          >
+            <AlertCircle className="mb-2 size-7 text-destructive" aria-hidden="true" />
+            <p className="text-sm font-medium text-foreground">
+              {isVi ? "Không thể tải danh sách báo lỗi" : "Could not load issue reports"}
+            </p>
+            <p className="mt-1 max-w-md text-xs text-muted-foreground">
+              {getFriendlyErrorMessage(reportsQuery.error, locale)}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3 min-h-11 gap-1.5 sm:min-h-9"
+              onClick={() => void reportsQuery.refetch()}
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              {isVi ? "Thử lại" : "Retry"}
+            </Button>
+          </div>
         ) : reports.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-10 text-center">
             <Inbox className="mb-2 size-7 text-muted-foreground" aria-hidden="true" />

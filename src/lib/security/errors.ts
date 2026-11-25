@@ -12,6 +12,7 @@ export type ApiErrorCode =
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "CONFLICT"
+  | "NOTE_CONFLICT"
   | "PAYLOAD_TOO_LARGE"
   | "UNSUPPORTED_MEDIA_TYPE"
   | "RATE_LIMITED"
@@ -62,13 +63,30 @@ export class AppError extends Error {
   }
 }
 
+function applyPrivateCacheDefaults(input?: HeadersInit): Headers {
+  const headers = new Headers(input);
+  if (!headers.has("cache-control")) {
+    headers.set("Cache-Control", "private, no-store");
+  }
+  if (!headers.has("vary")) {
+    headers.set("Vary", "Cookie");
+  } else {
+    const existingVary = headers.get("vary") ?? "";
+    if (!/\bcookie\b/i.test(existingVary) && existingVary.trim() !== "*") {
+      headers.set("Vary", `${existingVary}, Cookie`);
+    }
+  }
+  return headers;
+}
+
 export function apiSuccess<T>(
   data: T,
   meta?: ApiMeta,
   init?: ResponseInit,
 ): NextResponse<ApiSuccessEnvelope<T>> {
   const body: ApiSuccessEnvelope<T> = meta ? { data, meta } : { data };
-  return NextResponse.json(body, init);
+  const headers = applyPrivateCacheDefaults(init?.headers);
+  return NextResponse.json(body, { ...init, headers });
 }
 
 export function apiError(
@@ -81,7 +99,8 @@ export function apiError(
   const body: ApiErrorEnvelope = {
     error: details !== undefined ? { code, message, details } : { code, message },
   };
-  return NextResponse.json(body, { status, headers });
+  const resolvedHeaders = applyPrivateCacheDefaults(headers);
+  return NextResponse.json(body, { status, headers: resolvedHeaders });
 }
 
 export function supabaseNotConfiguredResponse(): NextResponse<ApiErrorEnvelope> {

@@ -22,6 +22,31 @@ export function buildSignedProxyUrl(storagePath: string): string {
 }
 
 /**
+ * Appends or replaces a cache-busting `_r=<timestamp>` query param on safe HTTP or
+ * relative proxy URLs so expired signed-URL redirects can recover cleanly on retry (`FUNC-25`, `FUNC-31`).
+ */
+export function appendMediaRetryParam(
+  url: string,
+  retryToken: number = Date.now(),
+): string {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.startsWith("blob:") || trimmed.startsWith("data:")) {
+    return trimmed;
+  }
+  try {
+    const isRelative = trimmed.startsWith("/");
+    const parsed = new URL(trimmed, "https://studyhub.local");
+    parsed.searchParams.set("_r", String(retryToken));
+    return isRelative
+      ? `${parsed.pathname}${parsed.search}${parsed.hash}`
+      : parsed.toString();
+  } catch {
+    const sep = trimmed.includes("?") ? "&" : "?";
+    return `${trimmed}${sep}_r=${retryToken}`;
+  }
+}
+
+/**
  * Resolves a safe, renderable URL for a private `study-media` asset, relation, or raw URL.
  * Rejects unsafe schemes (`javascript:`, `data:text/html`, etc.) and never uses public bucket URLs.
  */

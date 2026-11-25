@@ -3,7 +3,7 @@
 import * as React from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -76,6 +76,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
+import { clearLocalCheckpoint } from "@/lib/learning/checkpoints";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import {
   getCompatibleModesForQuestion,
   QUESTION_TYPE_REGISTRY,
@@ -136,7 +138,50 @@ const ReportsInboxPanel = dynamic(
   },
 );
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
+
+const MATH_DELIMITER_RE =
+  /\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]/;
+
+/**
+ * Lightweight preview text renderer for Set Hub cards:
+ * bypasses heavy TipTap/KaTeX component subtrees for plain-text prompts/options
+ * (keeping `/sets/[id]` DOM < 1,000 nodes & Heap < 11 MB) while delegating any
+ * rich AST or LaTeX math syntax to `RichContentRenderer`.
+ */
+function CompactPreviewContent({
+  richDoc,
+  plainText,
+  inline = false,
+}: {
+  richDoc?: Question["prompt_rich"];
+  plainText?: string | null;
+  inline?: boolean;
+}) {
+  const hasRich =
+    Boolean(richDoc) &&
+    typeof richDoc === "object" &&
+    Array.isArray((richDoc as { content?: unknown[] }).content) &&
+    ((richDoc as { content?: unknown[] }).content?.length ?? 0) > 0;
+  const text = plainText ?? "";
+
+  if (hasRich || MATH_DELIMITER_RE.test(text)) {
+    return (
+      <RichContentRenderer
+        richDoc={richDoc}
+        plainText={text}
+        inline={inline}
+        enableMathInPlainText
+      />
+    );
+  }
+
+  return (
+    <span className={inline ? "break-words" : "whitespace-pre-wrap break-words"}>
+      {text}
+    </span>
+  );
+}
 
 interface StudySetDetailResponse extends StudySet {
   role?: MemberRole;
@@ -201,13 +246,17 @@ function resolveSetCheckpointHref(
   return `/sets/${setId}/${checkpoint.mode}${qs}`;
 }
 
-export function StudySetHub({ setId }: { setId: string }) {
+function StudySetHubInner({ setId }: { setId: string }) {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const configured = isSupabaseConfiguredClient();
   const pwa = useOptionalPwa();
+
+  const urlChapter = searchParams.get("chapter");
+  const focusedQuestionId = searchParams.get("q");
 
   const [shareOpen, setShareOpen] = React.useState(false);
   const [pdfExportOpen, setPdfExportOpen] = React.useState(false);
@@ -216,7 +265,18 @@ export function StudySetHub({ setId }: { setId: string }) {
 
   const [search, setSearch] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
-  const [chapterFilter, setChapterFilter] = React.useState("all");
+  const [chapterOverride, setChapterOverride] = React.useState<{
+    baseUrl: string | null;
+    value: string;
+  } | null>(null);
+  const chapterFilter =
+    chapterOverride && chapterOverride.baseUrl === urlChapter
+      ? chapterOverride.value
+      : (urlChapter || "all");
+  const setChapterFilter = React.useCallback(
+    (value: string) => setChapterOverride({ baseUrl: urlChapter, value }),
+    [urlChapter],
+  );
   const [starredOnly, setStarredOnly] = React.useState(false);
   const [showAnswers, setShowAnswers] = React.useState(true);
   const [page, setPage] = React.useState(1);
@@ -432,6 +492,16 @@ export function StudySetHub({ setId }: { setId: string }) {
     () => checkpointsQuery.data ?? [],
     [checkpointsQuery.data],
   );
+
+  // Smoothly scroll deep-linked `?q=<questionId>` into view when present on the page
+  React.useEffect(() => {
+    if (!focusedQuestionId || questions.length === 0) return;
+    if (!questions.some((q) => q.id === focusedQuestionId)) return;
+    const target = document.getElementById(`question-preview-${focusedQuestionId}`);
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focusedQuestionId, questions]);
 
   const isFiltered =
     Boolean(debouncedSearch) || chapterFilter !== "all" || starredOnly;
@@ -815,7 +885,7 @@ export function StudySetHub({ setId }: { setId: string }) {
           <Link
             href="/library"
             prefetch={false}
-            className="hover:text-foreground transition-colors"
+            className="hover:text-foreground inline-flex min-h-11 items-center transition-colors sm:min-h-0"
           >
             {t("library.title")}
           </Link>
@@ -1036,12 +1106,34 @@ export function StudySetHub({ setId }: { setId: string }) {
                 router.push(resolveSetCheckpointHref(setId, cp, false))
               }
               onRestart={async () => {
+                const activeUserId = pwa?.activeUserId;
+                if (activeUserId) {
+                  clearLocalCheckpoint(activeUserId, cp.session_key);
+                }
+                if (cp.user_id && cp.user_id !== activeUserId) {
+                  clearLocalCheckpoint(cp.user_id, cp.session_key);
+                }
+                if (studySet.owner_id && studySet.owner_id !== activeUserId) {
+                  clearLocalCheckpoint(studySet.owner_id, cp.session_key);
+                }
                 await discardCheckpointMutation
                   .mutateAsync(cp.id)
                   .catch(() => {});
                 router.push(resolveSetCheckpointHref(setId, cp, true));
               }}
-              onDiscard={() => discardCheckpointMutation.mutate(cp.id)}
+              onDiscard={() => {
+                const activeUserId = pwa?.activeUserId;
+                if (activeUserId) {
+                  clearLocalCheckpoint(activeUserId, cp.session_key);
+                }
+                if (cp.user_id && cp.user_id !== activeUserId) {
+                  clearLocalCheckpoint(cp.user_id, cp.session_key);
+                }
+                if (studySet.owner_id && studySet.owner_id !== activeUserId) {
+                  clearLocalCheckpoint(studySet.owner_id, cp.session_key);
+                }
+                discardCheckpointMutation.mutate(cp.id);
+              }}
             />
           ))}
         </div>
@@ -1418,13 +1510,25 @@ export function StudySetHub({ setId }: { setId: string }) {
                 {questions.map((q, index) => {
                   const isStarred = Boolean(q.is_starred);
                   const globalIdx = (page - 1) * PAGE_SIZE + index + 1;
+                  const isFocused = Boolean(
+                    focusedQuestionId && q.id === focusedQuestionId,
+                  );
 
                   return (
                     <li
                       key={q.id}
+                      id={`question-preview-${q.id}`}
+                      style={
+                        index >= 4
+                          ? {
+                              contentVisibility: "auto",
+                              containIntrinsicSize: "auto 120px",
+                            }
+                          : undefined
+                      }
                       className={cn(
                         "border-border bg-background rounded-xl border p-3.5 sm:p-4",
-                        index >= 6 && "cv-auto",
+                        isFocused && "border-primary ring-primary/25 ring-2",
                       )}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -1445,10 +1549,9 @@ export function StudySetHub({ setId }: { setId: string }) {
                           </div>
                           {(q.prompt || q.prompt_rich) && (
                             <div className="text-foreground text-sm leading-relaxed font-medium">
-                              <RichContentRenderer
+                              <CompactPreviewContent
                                 richDoc={q.prompt_rich}
                                 plainText={q.prompt}
-                                enableMathInPlainText
                               />
                             </div>
                           )}
@@ -1483,6 +1586,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                         <Button
                           variant="ghost"
                           size="icon-sm"
+                          className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
                           aria-label={
                             isStarred
                               ? `${t("study.unstarQuestion")} #${globalIdx}`
@@ -1526,11 +1630,10 @@ export function StudySetHub({ setId }: { setId: string }) {
                                 </span>
                                 <span className="min-w-0 flex-1 space-y-1.5">
                                   {(opt.content || opt.content_rich) && (
-                                    <RichContentRenderer
+                                    <CompactPreviewContent
                                       richDoc={opt.content_rich}
                                       plainText={opt.content}
                                       inline
-                                      enableMathInPlainText
                                     />
                                   )}
                                   {opt.image_url && (
@@ -1561,10 +1664,9 @@ export function StudySetHub({ setId }: { setId: string }) {
                         showAnswers ? (
                         <div className="border-success/30 bg-success-subtle text-success-subtle-foreground mt-3 space-y-2 rounded-lg border px-3 py-2 text-xs leading-relaxed">
                           {(q.back_text || q.back_rich) && (
-                            <RichContentRenderer
+                            <CompactPreviewContent
                               richDoc={q.back_rich}
                               plainText={q.back_text ?? ""}
-                              enableMathInPlainText
                             />
                           )}
                           {q.back_image_url && (
@@ -1586,11 +1688,10 @@ export function StudySetHub({ setId }: { setId: string }) {
                           <span className="text-foreground font-semibold">
                             {t("study.explanation")}:{" "}
                           </span>
-                          <RichContentRenderer
+                          <CompactPreviewContent
                             richDoc={q.explanation_rich}
                             plainText={q.explanation ?? ""}
                             inline
-                            enableMathInPlainText
                           />
                         </div>
                       )}
@@ -1610,6 +1711,7 @@ export function StudySetHub({ setId }: { setId: string }) {
                     <Button
                       size="sm"
                       variant="outline"
+                      className="min-h-11 sm:min-h-8"
                       disabled={page <= 1}
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
                     >
@@ -1618,10 +1720,11 @@ export function StudySetHub({ setId }: { setId: string }) {
                     <Button
                       size="sm"
                       variant="outline"
+                      className="min-h-11 sm:min-h-8"
                       disabled={page >= totalPages}
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                     >
-                      {t("common.next")}
+                      {vi ? "Xem thêm →" : "Next →"}
                     </Button>
                   </div>
                 </div>
@@ -1661,17 +1764,14 @@ export function StudySetHub({ setId }: { setId: string }) {
           allowedScopes={
             chapters.length > 0 ? ["study_set", "chapter"] : ["study_set"]
           }
+          userId={pwa?.activeUserId ?? undefined}
           studySetId={setId}
           studySetTitle={studySet.title}
           subject={studySet.subject ?? undefined}
           chapters={chapters}
           pendingOfflineEventsCount={pwa?.syncSummary?.pendingCount ?? 0}
           onResetComplete={() => {
-            queryClient.invalidateQueries({ queryKey: ["study-set", setId] });
-            queryClient.invalidateQueries({
-              queryKey: ["set-checkpoints", setId],
-            });
-            queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+            void invalidateLearningCaches(queryClient, setId);
           }}
         />
       )}
@@ -1702,5 +1802,25 @@ export function StudySetHub({ setId }: { setId: string }) {
         </Dialog>
       )}
     </div>
+  );
+}
+
+export function StudySetHub({ setId }: { setId: string }) {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="space-y-5" aria-busy="true">
+          <Skeleton className="h-24 w-full rounded-xl" />
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-[6.75rem] rounded-xl" />
+            ))}
+          </div>
+          <Skeleton className="h-96 w-full rounded-xl" />
+        </div>
+      }
+    >
+      <StudySetHubInner setId={setId} />
+    </React.Suspense>
   );
 }

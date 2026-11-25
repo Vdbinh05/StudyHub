@@ -64,6 +64,11 @@ export interface UpdatePreferencesOptions {
   throwOnError?: boolean;
 }
 
+export interface PlayFeedbackSoundOptions {
+  /** Bypass stale React state check (e.g., immediate preview on first enable). */
+  force?: boolean;
+}
+
 export interface PreferencesContextValue {
   preferences: StudyHubPreferences;
   isLoading: boolean;
@@ -74,7 +79,10 @@ export interface PreferencesContextValue {
     options?: UpdatePreferencesOptions,
   ) => Promise<StudyHubPreferences>;
   refreshPreferences: () => Promise<void>;
-  playFeedbackSound: (kind: FeedbackSoundKind) => void;
+  playFeedbackSound: (
+    kind: FeedbackSoundKind,
+    options?: PlayFeedbackSoundOptions,
+  ) => void;
 }
 
 export const DEFAULT_MODE_PREFERENCES: ModePreferences = {
@@ -240,10 +248,28 @@ function emitPrefsChange(): void {
   }
 }
 
+/**
+ * Purges module-level preference singletons and local storage preference keys.
+ * Invoked during logout and account-switch cleanup to prevent cross-account bleed.
+ */
+export function resetLocalPreferencesCache(): void {
+  cachedRawPrefs = undefined;
+  cachedParsedPrefs = DEFAULT_USER_PREFERENCES;
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(SHORTCUTS_ENABLED_KEY);
+    } catch {
+      // Ignore private-mode storage errors
+    }
+  }
+  emitPrefsChange();
+}
+
 function subscribeLocalPreferences(listener: () => void): () => void {
   prefsListeners.add(listener);
   const handleStorage = (event: StorageEvent) => {
-    if (event.key === STORAGE_KEY) {
+    if (event.key === STORAGE_KEY || event.key === null) {
       cachedRawPrefs = undefined;
       listener();
     }
@@ -402,11 +428,52 @@ export function PreferencesProvider({
   );
   const [isSaving, setIsSaving] = React.useState(false);
 
+  // Monotonic mutation sequence guard & live ref to prevent stale closures / out-of-order overwrites
+  const mutationSeqRef = React.useRef(0);
+  const inFlightCountRef = React.useRef(0);
+  const latestPrefsRef = React.useRef<StudyHubPreferences>(preferences);
+  const lastSyncedServerSigRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
-    if (!initialPreferences) return;
-    const merged = normalizePreferences(initialPreferences, DEFAULT_USER_PREFERENCES);
-    writeLocalPreferences(merged);
-  }, [initialPreferences]);
+    latestPrefsRef.current = preferences;
+  }, [preferences]);
+
+  const applyServerPreferences = React.useCallback(
+    (serverPrefs: UserPreferences | null | undefined) => {
+      if (!serverPrefs) return;
+      const sig = JSON.stringify(serverPrefs);
+      if (sig === lastSyncedServerSigRef.current) return;
+      // Do not clobber optimistic local toggles if a user mutation is currently in flight
+      if (inFlightCountRef.current > 0) return;
+
+      lastSyncedServerSigRef.current = sig;
+      const merged = normalizePreferences(serverPrefs, DEFAULT_USER_PREFERENCES);
+      latestPrefsRef.current = merged;
+      writeLocalPreferences(merged);
+
+      // Sync persisted account language, theme & shortcut flag on fresh browser login
+      setLocale(merged.language);
+      setTheme(merged.theme);
+      if (
+        merged.mode_preferences?.shortcuts?.enabled !== undefined &&
+        typeof window !== "undefined"
+      ) {
+        try {
+          window.localStorage.setItem(
+            SHORTCUTS_ENABLED_KEY,
+            merged.mode_preferences.shortcuts.enabled ? "true" : "false",
+          );
+        } catch {
+          // Ignore storage errors
+        }
+      }
+    },
+    [setLocale, setTheme],
+  );
+
+  React.useEffect(() => {
+    applyServerPreferences(initialPreferences);
+  }, [initialPreferences, applyServerPreferences]);
 
   const shouldFetchRemote =
     !deferRemoteFetch &&
@@ -423,8 +490,7 @@ export function PreferencesProvider({
       try {
         const res = await apiFetch<UserPreferences>("/api/preferences");
         if (res.data) {
-          const merged = normalizePreferences(res.data, DEFAULT_USER_PREFERENCES);
-          writeLocalPreferences(merged);
+          applyServerPreferences(res.data);
         }
         return res.data;
       } catch (err) {
@@ -477,7 +543,13 @@ export function PreferencesProvider({
       patch: UpdateUserPreferencesInput,
       options?: UpdatePreferencesOptions,
     ): Promise<StudyHubPreferences> => {
-      const next = normalizePreferences(patch, preferences);
+      // Read live synchronous snapshot rather than stale React render closure
+      const currentBase =
+        typeof window !== "undefined"
+          ? getLocalPreferencesSnapshot()
+          : latestPrefsRef.current;
+      const next = normalizePreferences(patch, currentBase);
+      latestPrefsRef.current = next;
       writeLocalPreferences(next);
 
       if (patch.language) {
@@ -500,10 +572,13 @@ export function PreferencesProvider({
         }
       }
 
+      const seq = ++mutationSeqRef.current;
+
       if (options?.persistRemote === false || !isSupabaseConfiguredClient()) {
         return next;
       }
 
+      inFlightCountRef.current += 1;
       setIsSaving(true);
       try {
         const payload: Record<string, unknown> = {};
@@ -541,20 +616,41 @@ export function PreferencesProvider({
           method: "PATCH",
           body: JSON.stringify(payload),
         });
+
+        // Monotonic guard: ignore stale server response if a newer toggle already ran
+        if (seq !== mutationSeqRef.current) {
+          return latestPrefsRef.current;
+        }
+
         const synced = normalizePreferences(res.data, next);
+        lastSyncedServerSigRef.current = res.data ? JSON.stringify(res.data) : null;
+        latestPrefsRef.current = synced;
         writeLocalPreferences(synced);
         queryClient.setQueryData(["user-preferences"], res.data);
+        queryClient.setQueryData(
+          ["current-profile"],
+          (prev: unknown) => {
+            if (prev && typeof prev === "object" && "profile" in prev) {
+              return {
+                ...(prev as Record<string, unknown>),
+                preferences: res.data,
+              };
+            }
+            return prev;
+          },
+        );
         return synced;
       } catch (err) {
         if (options?.throwOnError) {
           throw err;
         }
-        return next;
+        return latestPrefsRef.current;
       } finally {
-        setIsSaving(false);
+        inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+        setIsSaving(inFlightCountRef.current > 0);
       }
     },
-    [preferences, queryClient, setLocale, setTheme],
+    [queryClient, setLocale, setTheme],
   );
 
   const refreshPreferences = React.useCallback(async () => {
@@ -567,11 +663,11 @@ export function PreferencesProvider({
   }, [deferRemoteFetch, queryClient]);
 
   const playFeedbackSound = React.useCallback(
-    (kind: FeedbackSoundKind) => {
-      if (!preferences.sound_effects) return;
+    (kind: FeedbackSoundKind, options?: PlayFeedbackSoundOptions) => {
+      if (!options?.force && !latestPrefsRef.current.sound_effects) return;
       playDeterministicTone(kind);
     },
-    [preferences.sound_effects],
+    [],
   );
 
   const value = React.useMemo<PreferencesContextValue>(

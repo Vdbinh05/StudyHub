@@ -192,6 +192,111 @@ export function isChoiceCapableDraft(draft: QuestionDraft): boolean {
   return false;
 }
 
+export function parseCommaSeparatedAcceptedAnswers(raw: string): string[] {
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return parts.length > 0 ? parts : [""];
+}
+
+interface FillInBlankRowProps {
+  blank: FillInBlankSpec;
+  idx: number;
+  vi: boolean;
+  canRemove: boolean;
+  onChangeBlankId: (nextId: string) => void;
+  onChangeAnswers: (nextAnswers: string[]) => void;
+  onChangeMatchMode: (mode: AnswerMatchMode) => void;
+  onRemove: () => void;
+}
+
+function FillInBlankRow({
+  blank,
+  idx,
+  vi,
+  canRemove,
+  onChangeBlankId,
+  onChangeAnswers,
+  onChangeMatchMode,
+  onRemove,
+}: FillInBlankRowProps): React.ReactElement {
+  // Keep raw user-typed draft strings locally so typing spaces ("Ha Noi") or editing
+  // blank_id NEVER gets stripped or remounted on keystroke (FUNC-06 / V32-019).
+  const [rawBlankId, setRawBlankId] = React.useState<string>(blank.blank_id);
+  const [rawAnswers, setRawAnswers] = React.useState<string>(
+    blank.accepted_answers.filter((s) => s.length > 0).join(", "),
+  );
+
+  return (
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+      <Input
+        aria-label={vi ? `Mã ô trống ${idx + 1}` : `Blank ID ${idx + 1}`}
+        className="sm:col-span-2 font-mono text-xs"
+        value={rawBlankId}
+        onChange={(e) => {
+          const nextRaw = e.target.value;
+          setRawBlankId(nextRaw);
+          const trimmed = nextRaw.trim();
+          onChangeBlankId(trimmed || `b${idx + 1}`);
+        }}
+        onBlur={() => {
+          const normalized = rawBlankId.trim() || `b${idx + 1}`;
+          setRawBlankId(normalized);
+          onChangeBlankId(normalized);
+        }}
+      />
+      <Input
+        aria-label={vi ? `Đáp án đúng ô trống ${idx + 1}` : `Accepted answers for blank ${idx + 1}`}
+        className="sm:col-span-6"
+        placeholder={vi ? "Đáp án đúng (ngăn cách dấu phẩy)" : "Accepted answers (comma-separated)"}
+        value={rawAnswers}
+        onChange={(e) => {
+          const nextRaw = e.target.value;
+          setRawAnswers(nextRaw);
+          onChangeAnswers(parseCommaSeparatedAcceptedAnswers(nextRaw));
+        }}
+        onBlur={() => {
+          const parsed = parseCommaSeparatedAcceptedAnswers(rawAnswers);
+          const normalizedDisplay = parsed.filter((s) => s.length > 0).join(", ");
+          setRawAnswers(normalizedDisplay);
+          onChangeAnswers(parsed);
+        }}
+      />
+      <Select
+        value={blank.match_mode ?? "case_insensitive"}
+        onValueChange={(v) => onChangeMatchMode(v as AnswerMatchMode)}
+      >
+        <SelectTrigger className="sm:col-span-3">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="case_insensitive">
+            {vi ? "Không phân biệt hoa/thường" : "Case-insensitive"}
+          </SelectItem>
+          <SelectItem value="exact">{vi ? "Chính xác tuyệt đối" : "Exact"}</SelectItem>
+          <SelectItem value="ignore_diacritics">
+            {vi ? "Bỏ dấu tiếng Việt" : "Ignore diacritics"}
+          </SelectItem>
+          <SelectItem value="numeric">{vi ? "So sánh số" : "Numeric"}</SelectItem>
+        </SelectContent>
+      </Select>
+      {canRemove && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={vi ? `Xóa ô trống ${idx + 1}` : `Remove blank ${idx + 1}`}
+          className="min-h-11 min-w-11 sm:col-span-1 sm:min-h-9 sm:min-w-9"
+          onClick={onRemove}
+        >
+          <Trash2 className="size-4" aria-hidden="true" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export interface V3QuestionTypeFieldsProps {
   setId: string;
   locale: Locale;
@@ -211,6 +316,26 @@ export function V3QuestionTypeFields({
 }: V3QuestionTypeFieldsProps): React.ReactElement {
   const vi = locale === "vi";
   const [uploadingKey, setUploadingKey] = React.useState<string | null>(null);
+  const blankResetToken = `${draft.id ?? "new"}:${draft.question_type}`;
+  const [blankRowKeys, setBlankRowKeys] = React.useState<{
+    token: string;
+    keys: string[];
+  }>(() => ({
+    token: blankResetToken,
+    keys:
+      draft.type_payload?.type === "fill_in_blank"
+        ? draft.type_payload.blanks.map((_, i) => `blank-row-${i}`)
+        : [],
+  }));
+  const blankKeyCounterRef = React.useRef(100);
+
+  const activeBlankKeys = React.useMemo(() => {
+    const count =
+      draft.type_payload?.type === "fill_in_blank" ? draft.type_payload.blanks.length : 0;
+    const base = blankRowKeys.token === blankResetToken ? blankRowKeys.keys : [];
+    if (base.length === count) return base;
+    return Array.from({ length: count }, (_, i) => base[i] ?? `blank-row-${i}`);
+  }, [blankRowKeys, blankResetToken, draft.type_payload]);
 
   const uploadImageForTarget = async (
     file: File | undefined,
@@ -627,7 +752,13 @@ export function V3QuestionTypeFields({
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() =>
+                onClick={() => {
+                  blankKeyCounterRef.current += 1;
+                  const nextKey = `blank-row-${blankKeyCounterRef.current}`;
+                  setBlankRowKeys({
+                    token: blankResetToken,
+                    keys: [...activeBlankKeys, nextKey],
+                  });
                   setDraft((prev) => {
                     if (prev.type_payload?.type !== "fill_in_blank") return prev;
                     const nextNum = prev.type_payload.blanks.length + 1;
@@ -643,90 +774,67 @@ export function V3QuestionTypeFields({
                         blanks: [...prev.type_payload.blanks, nextBlank],
                       },
                     };
-                  })
-                }
+                  });
+                }}
               >
-                <Plus className="mr-1 size-3.5" />
+                <Plus className="mr-1 size-3.5" aria-hidden="true" />
                 {vi ? "Thêm ô trống" : "Add blank"}
               </Button>
             </div>
             {draft.type_payload.blanks.map((blank, idx) => (
-              <div key={blank.blank_id} className="grid grid-cols-1 gap-2 sm:grid-cols-12">
-                <Input
-                  className="sm:col-span-2 font-mono text-xs"
-                  value={blank.blank_id}
-                  onChange={(e) => {
-                    const val = e.target.value.trim() || `b${idx + 1}`;
-                    setDraft((prev) => {
-                      if (prev.type_payload?.type !== "fill_in_blank") return prev;
-                      const blanks = prev.type_payload.blanks.map((b, i) =>
-                        i === idx ? { ...b, blank_id: val } : b,
-                      );
-                      return { ...prev, type_payload: { ...prev.type_payload, blanks } };
-                    });
-                  }}
-                />
-                <Input
-                  className="sm:col-span-6"
-                  placeholder={vi ? "Đáp án đúng (ngăn cách dấu phẩy)" : "Accepted answers (comma-separated)"}
-                  value={blank.accepted_answers.join(", ")}
-                  onChange={(e) => {
-                    const list = e.target.value.split(",").map((s) => s.trim());
-                    setDraft((prev) => {
-                      if (prev.type_payload?.type !== "fill_in_blank") return prev;
-                      const blanks = prev.type_payload.blanks.map((b, i) =>
-                        i === idx ? { ...b, accepted_answers: list } : b,
-                      );
-                      return { ...prev, type_payload: { ...prev.type_payload, blanks } };
-                    });
-                  }}
-                />
-                <Select
-                  value={blank.match_mode}
-                  onValueChange={(v) =>
-                    setDraft((prev) => {
-                      if (prev.type_payload?.type !== "fill_in_blank") return prev;
-                      const blanks = prev.type_payload.blanks.map((b, i) =>
-                        i === idx ? { ...b, match_mode: v as AnswerMatchMode } : b,
-                      );
-                      return { ...prev, type_payload: { ...prev.type_payload, blanks } };
-                    })
-                  }
-                >
-                  <SelectTrigger className="sm:col-span-3">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="case_insensitive">{vi ? "Không phân biệt hoa/thường" : "Case-insensitive"}</SelectItem>
-                    <SelectItem value="exact">{vi ? "Chính xác tuyệt đối" : "Exact"}</SelectItem>
-                    <SelectItem value="ignore_diacritics">{vi ? "Bỏ dấu tiếng Việt" : "Ignore diacritics"}</SelectItem>
-                    <SelectItem value="numeric">{vi ? "So sánh số" : "Numeric"}</SelectItem>
-                  </SelectContent>
-                </Select>
-                {draft.type_payload?.type === "fill_in_blank" &&
-                  draft.type_payload.blanks.length > 1 && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="sm:col-span-1"
-                      onClick={() =>
-                        setDraft((prev) => {
-                          if (prev.type_payload?.type !== "fill_in_blank") return prev;
-                          return {
-                            ...prev,
-                            type_payload: {
-                              ...prev.type_payload,
-                              blanks: prev.type_payload.blanks.filter((_, i) => i !== idx),
-                            },
-                          };
-                        })
-                      }
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  )}
-              </div>
+              <FillInBlankRow
+                key={`${blankResetToken}:${activeBlankKeys[idx] ?? idx}`}
+                blank={blank}
+                idx={idx}
+                vi={vi}
+                canRemove={
+                  draft.type_payload?.type === "fill_in_blank" &&
+                  draft.type_payload.blanks.length > 1
+                }
+                onChangeBlankId={(val) =>
+                  setDraft((prev) => {
+                    if (prev.type_payload?.type !== "fill_in_blank") return prev;
+                    const blanks = prev.type_payload.blanks.map((b, i) =>
+                      i === idx ? { ...b, blank_id: val } : b,
+                    );
+                    return { ...prev, type_payload: { ...prev.type_payload, blanks } };
+                  })
+                }
+                onChangeAnswers={(list) =>
+                  setDraft((prev) => {
+                    if (prev.type_payload?.type !== "fill_in_blank") return prev;
+                    const blanks = prev.type_payload.blanks.map((b, i) =>
+                      i === idx ? { ...b, accepted_answers: list } : b,
+                    );
+                    return { ...prev, type_payload: { ...prev.type_payload, blanks } };
+                  })
+                }
+                onChangeMatchMode={(mode) =>
+                  setDraft((prev) => {
+                    if (prev.type_payload?.type !== "fill_in_blank") return prev;
+                    const blanks = prev.type_payload.blanks.map((b, i) =>
+                      i === idx ? { ...b, match_mode: mode } : b,
+                    );
+                    return { ...prev, type_payload: { ...prev.type_payload, blanks } };
+                  })
+                }
+                onRemove={() => {
+                  setBlankRowKeys({
+                    token: blankResetToken,
+                    keys: activeBlankKeys.filter((_, i) => i !== idx),
+                  });
+                  setDraft((prev) => {
+                    if (prev.type_payload?.type !== "fill_in_blank") return prev;
+                    return {
+                      ...prev,
+                      type_payload: {
+                        ...prev.type_payload,
+                        blanks: prev.type_payload.blanks.filter((_, i) => i !== idx),
+                      },
+                    };
+                  });
+                }}
+              />
             ))}
           </div>
         )}

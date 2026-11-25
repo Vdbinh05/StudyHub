@@ -359,9 +359,11 @@ export function compactPreviewForTransport(
 
 export {
   chunkArray,
+  mapWithConcurrency,
   normalizeForComparison,
   normalizeText,
   sanitizeFileName,
+  stripLeadingOptionPrefix,
   stripUtf8Bom,
 } from "./text-utils";
 export {

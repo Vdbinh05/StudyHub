@@ -54,6 +54,7 @@ export interface GlobalSearchResultItem {
   subtitle?: string | null;
   study_set_id?: string | null;
   study_set_title?: string | null;
+  question_id?: string | null;
   folder_id?: string | null;
   chapter?: string | null;
   href?: string | null;
@@ -143,34 +144,37 @@ function normalizeEntityType(
   return "question";
 }
 
-function resolveResultHref(item: GlobalSearchResultItem): string {
-  if (item.href && item.href.startsWith("/") && !item.href.startsWith("//")) {
-    return item.href;
-  }
+export function resolveResultHref(item: GlobalSearchResultItem): string {
   switch (item.entity_type) {
     case "folder":
-      return `/folders/${item.folder_id ?? item.id}`;
+      return `/folders/${encodeURIComponent(item.folder_id ?? item.id)}`;
     case "study_set":
-      return `/sets/${item.study_set_id ?? item.id}`;
+      return `/sets/${encodeURIComponent(item.study_set_id ?? item.id)}`;
     case "diagram":
-      return `/diagrams/${item.id}/study`;
+      if (item.href && item.href.startsWith("/") && !item.href.startsWith("//")) {
+        return item.href;
+      }
+      return `/diagrams/${encodeURIComponent(item.id)}/study`;
     case "chapter":
       if (item.study_set_id) {
-        return `/sets/${item.study_set_id}?chapter=${encodeURIComponent(
+        return `/sets/${encodeURIComponent(item.study_set_id)}?chapter=${encodeURIComponent(
           item.chapter ?? item.title,
         )}`;
       }
       return "/library";
     case "tag":
       if (item.study_set_id) {
-        return `/sets/${item.study_set_id}/edit`;
+        return `/sets/${encodeURIComponent(item.study_set_id)}`;
       }
       return "/library";
     case "question":
     case "option":
     case "note":
       if (item.study_set_id) {
-        return `/sets/${item.study_set_id}/edit`;
+        const targetQuestionId = item.question_id ?? item.id;
+        return `/sets/${encodeURIComponent(item.study_set_id)}?q=${encodeURIComponent(
+          targetQuestionId,
+        )}`;
       }
       return "/library";
   }
@@ -230,6 +234,8 @@ export function normalizeSearchPayload(raw: unknown): GlobalSearchResultItem[] {
         typeof rec.study_set_id === "string" ? rec.study_set_id : null,
       study_set_title:
         typeof rec.study_set_title === "string" ? rec.study_set_title : null,
+      question_id:
+        typeof rec.question_id === "string" ? rec.question_id : null,
       folder_id: typeof rec.folder_id === "string" ? rec.folder_id : null,
       chapter: typeof rec.chapter === "string" ? rec.chapter : null,
       href: typeof rec.href === "string" ? rec.href : null,
@@ -330,6 +336,14 @@ export function GlobalSearchDialog({
   const inputRef = React.useRef<HTMLInputElement>(null);
   const lastCompositionEndRef = React.useRef<number | null>(null);
   const optionRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const searchSeqRef = React.useRef(0);
+  const activeControllerRef = React.useRef<AbortController | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      activeControllerRef.current?.abort();
+    };
+  }, []);
 
   // Async debounce callback (no synchronous setState inside effect body)
   React.useEffect(() => {
@@ -355,16 +369,37 @@ export function GlobalSearchDialog({
     staleTime: 15_000,
     retry: false,
     queryFn: async ({ signal }) => {
-      const params = new URLSearchParams();
-      params.set("q", debouncedQuery);
-      if (typeFilter !== "all") {
-        params.set("type", typeFilter);
+      activeControllerRef.current?.abort();
+      const controller = new AbortController();
+      activeControllerRef.current = controller;
+      const reqSeq = ++searchSeqRef.current;
+
+      const onParentAbort = () => controller.abort();
+      if (signal) {
+        if (signal.aborted) {
+          controller.abort();
+        } else {
+          signal.addEventListener("abort", onParentAbort, { once: true });
+        }
       }
-      params.set("limit", "30");
-      const res = await apiFetch<unknown>(`/api/search?${params.toString()}`, {
-        signal,
-      });
-      return normalizeSearchPayload(res.data);
+
+      try {
+        const params = new URLSearchParams();
+        params.set("q", debouncedQuery);
+        if (typeFilter !== "all") {
+          params.set("type", typeFilter);
+        }
+        params.set("limit", "30");
+        const res = await apiFetch<unknown>(`/api/search?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        if (reqSeq !== searchSeqRef.current) {
+          return [];
+        }
+        return normalizeSearchPayload(res.data);
+      } finally {
+        signal?.removeEventListener("abort", onParentAbort);
+      }
     },
   });
 
@@ -533,7 +568,7 @@ export function GlobalSearchDialog({
                   inputRef.current?.focus();
                 }}
                 className={cn(
-                  "min-h-8 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                  "min-h-11 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-8",
                   active
                     ? "border-primary bg-primary-subtle text-primary"
                     : "border-border bg-card text-muted-foreground hover:bg-secondary hover:text-foreground",

@@ -16,8 +16,11 @@ export interface ExamTimerProps {
   serverClockOffsetMs: number;
   active: boolean;
   autoSubmitOnExpire?: boolean;
-  onExpire: () => void;
+  /** May return `Promise<boolean>` (or void); returning `false` or rejecting triggers a bounded retry (FUNC-18(3)). */
+  onExpire: () => void | boolean | Promise<void | boolean>;
 }
+
+const EXPIRE_RETRY_DELAY_MS = 5_000;
 
 /**
  * Isolated memoized countdown timer leaf.
@@ -48,6 +51,8 @@ export const ExamTimer = React.memo(function ExamTimer({
   const warnedOneMinRef = React.useRef(false);
   const warnedTenSecRef = React.useRef(false);
   const expiredTriggeredRef = React.useRef(false);
+  const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRef = React.useRef(active);
   const onExpireRef = React.useRef(onExpire);
 
   React.useEffect(() => {
@@ -55,9 +60,65 @@ export const ExamTimer = React.memo(function ExamTimer({
   }, [onExpire]);
 
   React.useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+
+  // Reset warning/expiry flags whenever a new attempt deadline is mounted
+  React.useEffect(() => {
+    warnedFiveMinRef.current = false;
+    warnedOneMinRef.current = false;
+    warnedTenSecRef.current = false;
+    expiredTriggeredRef.current = false;
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, [expiresAtIso]);
+
+  React.useEffect(() => {
     if (!active || !expiresAtIso) {
       return;
     }
+
+    let cancelled = false;
+
+    const triggerExpire = () => {
+      if (cancelled || !activeRef.current || expiredTriggeredRef.current) return;
+      expiredTriggeredRef.current = true;
+
+      if (!autoSubmitOnExpire) return;
+
+      const scheduleRetry = () => {
+        if (cancelled || !activeRef.current) return;
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = null;
+          if (!cancelled && activeRef.current) {
+            expiredTriggeredRef.current = false;
+            triggerExpire();
+          }
+        }, EXPIRE_RETRY_DELAY_MS);
+      };
+
+      try {
+        const result = onExpireRef.current();
+        if (result && typeof (result as Promise<unknown>).then === "function") {
+          void (result as Promise<void | boolean>)
+            .then((ok) => {
+              if (ok === false) {
+                scheduleRetry();
+              }
+            })
+            .catch(() => {
+              scheduleRetry();
+            });
+        } else if (result === false) {
+          scheduleRetry();
+        }
+      } catch {
+        scheduleRetry();
+      }
+    };
 
     const tick = () => {
       const remMs = calculateRemainingMs(
@@ -96,16 +157,38 @@ export const ExamTimer = React.memo(function ExamTimer({
       }
 
       if (secs <= 0 && !expiredTriggeredRef.current) {
-        expiredTriggeredRef.current = true;
-        if (autoSubmitOnExpire) {
-          onExpireRef.current();
+        triggerExpire();
+      }
+    };
+
+    const handleOnline = () => {
+      const remMs = calculateRemainingMs(
+        expiresAtIso,
+        Date.now(),
+        serverClockOffsetMs,
+      );
+      if (remMs !== null && remMs <= 0 && activeRef.current) {
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
         }
+        expiredTriggeredRef.current = false;
+        triggerExpire();
       }
     };
 
     tick();
     const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      window.removeEventListener("online", handleOnline);
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
   }, [active, autoSubmitOnExpire, expiresAtIso, locale, serverClockOffsetMs]);
 
   if (remainingSeconds === null) {

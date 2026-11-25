@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { QueryClientContext } from "@tanstack/react-query";
 import {
   AlertTriangle,
   BookOpen,
@@ -62,9 +63,25 @@ import type {
   OfflineLocalNoteRecord,
   StorageEstimateInfo,
 } from "@/lib/offline/types";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "./format-bytes";
 import { useOptionalPwa } from "./PwaProvider";
+
+function subscribeFallbackOnline(callback: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  window.addEventListener("online", callback);
+  window.addEventListener("offline", callback);
+  return () => {
+    window.removeEventListener("online", callback);
+    window.removeEventListener("offline", callback);
+  };
+}
+
+function getFallbackOnlineSnapshot(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return navigator.onLine;
+}
 
 export interface OfflineManagerPanelProps {
   /** Optional explicit userId override (defaults to active user from PwaProvider) */
@@ -93,11 +110,17 @@ export function OfflineManagerPanel({
 }: OfflineManagerPanelProps) {
   const i18n = useOptionalI18n();
   const pwa = useOptionalPwa();
+  const queryClient = React.useContext(QueryClientContext);
   const locale = i18n?.locale ?? "vi";
   const vi = locale === "vi";
 
+  const fallbackOnline = React.useSyncExternalStore(
+    subscribeFallbackOnline,
+    getFallbackOnlineSnapshot,
+    () => false,
+  );
   const activeUserId = explicitUserId ?? pwa?.activeUserId ?? null;
-  const isOnline = pwa?.isOnline ?? true;
+  const isOnline = pwa ? pwa.isOnline : fallbackOnline;
 
   const [loading, setLoading] = React.useState(true);
   const [downloadedSets, setDownloadedSets] = React.useState<
@@ -124,6 +147,13 @@ export function OfflineManagerPanel({
   const [busySetId, setBusySetId] = React.useState<string | null>(null);
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = React.useState(false);
+
+  // Synchronous ref locks to prevent rapid double-click mutation races (`FUNC-31`)
+  const syncingRef = React.useRef(false);
+  const removingRef = React.useRef<Set<string>>(new Set());
+  const retryingRef = React.useRef<Set<string>>(new Set());
+  const resolvingRef = React.useRef<Set<string>>(new Set());
+  const clearingRef = React.useRef(false);
 
   // Merge editor state keyed by question_id
   const [mergeDrafts, setMergeDrafts] = React.useState<Record<string, string>>(
@@ -211,16 +241,20 @@ export function OfflineManagerPanel({
   }, [fetchPanelData, pwa?.offlineRevision, vi]);
 
   const handleSyncNow = async () => {
-    if (!activeUserId || !isOnline) return;
+    if (!activeUserId || !isOnline || syncingRef.current) return;
+    syncingRef.current = true;
     setSyncing(true);
     setStatusMessage(null);
     try {
       const outcome = await syncPendingEvents(activeUserId, { force: true });
+      if (outcome.appliedCount > 0 && queryClient) {
+        await invalidateLearningCaches(queryClient);
+      }
       if (outcome.status === "auth_required") {
         setStatusMessage(
           vi
-            ? "Phiên đăng nhập đã hết hạn. Toàn bộ tiến độ chờ đồng bộ vẫn được giữ nguyên — hãy đăng nhập lại để hoàn tất đồng bộ."
-            : "Your session expired. All pending offline events are preserved safely — sign in again to finish syncing.",
+            ? "Phiên đăng nhập đã hết hạn. Toàn bộ tiến độ chờ đồng bộ vẫn được giữ nguyên — hãy đăng nhập lại để đồng bộ."
+            : "Your session expired. All pending offline events are preserved safely — sign in again to sync.",
         );
       } else if (outcome.conflictCount > 0) {
         setStatusMessage(
@@ -234,34 +268,55 @@ export function OfflineManagerPanel({
             ? `Đã đồng bộ thành công (${outcome.appliedCount} sự kiện mới).`
             : `Sync complete (${outcome.appliedCount} event(s) applied).`,
         );
+      } else if (outcome.status === "error" || outcome.status === "offline") {
+        setStatusMessage(
+          vi
+            ? "Không thể đồng bộ ngay lúc này. Hệ thống sẽ tự thử lại an toàn theo chu kỳ giãn cách."
+            : "Unable to sync right now. Queued events are preserved and will retry safely with backoff.",
+        );
       }
       await loadAll();
       await pwa?.refreshOfflineState();
+    } catch {
+      setStatusMessage(
+        vi
+          ? "Không thể đồng bộ do bộ nhớ cục bộ tạm thời bị hạn chế."
+          : "Unable to complete sync because local storage is currently unavailable.",
+      );
     } finally {
+      syncingRef.current = false;
       setSyncing(false);
     }
   };
 
   const handleRemoveSet = async (setId: string) => {
-    if (!activeUserId) return;
+    if (!activeUserId || removingRef.current.has(setId)) return;
+    removingRef.current.add(setId);
     setBusySetId(setId);
     try {
       await deleteDownloadedStudySet(activeUserId, setId);
       await loadAll();
       await pwa?.refreshOfflineState();
+    } catch {
+      // Non-fatal if DB already closed
     } finally {
+      removingRef.current.delete(setId);
       setBusySetId(null);
     }
   };
 
   const handleRetryPartialSet = async (setId: string) => {
-    if (!activeUserId || !isOnline) return;
+    if (!activeUserId || !isOnline || retryingRef.current.has(setId)) return;
+    retryingRef.current.add(setId);
     setBusySetId(setId);
     try {
       await retryFailedMediaDownloads(activeUserId, setId);
       await loadAll();
       await pwa?.refreshOfflineState();
+    } catch {
+      // Non-fatal retry failure
     } finally {
+      retryingRef.current.delete(setId);
       setBusySetId(null);
     }
   };
@@ -270,18 +325,25 @@ export function OfflineManagerPanel({
     questionId: string,
     strategy: "keep_local" | "keep_server" | "keep_merged",
   ) => {
-    if (!activeUserId) return;
-    const mergedText = mergeDrafts[questionId] ?? "";
-    await resolveNoteConflict(
-      activeUserId,
-      questionId,
-      strategy === "keep_merged"
-        ? { strategy: "keep_merged", mergedText }
-        : { strategy },
-    );
-    setEditingMergeId(null);
-    await loadAll();
-    await pwa?.refreshOfflineState();
+    if (!activeUserId || resolvingRef.current.has(questionId)) return;
+    resolvingRef.current.add(questionId);
+    try {
+      const mergedText = mergeDrafts[questionId] ?? "";
+      await resolveNoteConflict(
+        activeUserId,
+        questionId,
+        strategy === "keep_merged"
+          ? { strategy: "keep_merged", mergedText }
+          : { strategy },
+      );
+      setEditingMergeId(null);
+      await loadAll();
+      await pwa?.refreshOfflineState();
+    } catch {
+      // Non-fatal storage error
+    } finally {
+      resolvingRef.current.delete(questionId);
+    }
   };
 
   const handleDismissNotices = async () => {
@@ -291,16 +353,23 @@ export function OfflineManagerPanel({
   };
 
   const handleClearAllLocalData = async () => {
-    if (!activeUserId) return;
-    await clearUserOfflineData(activeUserId);
-    setConfirmClearOpen(false);
-    setStatusMessage(
-      vi
-        ? "Đã xóa toàn bộ dữ liệu ngoại tuyến của tài khoản này trên trình duyệt."
-        : "Cleared all local offline data for this account on this browser.",
-    );
-    await loadAll();
-    await pwa?.refreshOfflineState();
+    if (!activeUserId || clearingRef.current) return;
+    clearingRef.current = true;
+    try {
+      await clearUserOfflineData(activeUserId);
+      setConfirmClearOpen(false);
+      setStatusMessage(
+        vi
+          ? "Đã xóa toàn bộ dữ liệu ngoại tuyến của tài khoản này trên trình duyệt."
+          : "Cleared all local offline data for this account on this browser.",
+      );
+      await loadAll();
+      await pwa?.refreshOfflineState();
+    } catch {
+      setConfirmClearOpen(false);
+    } finally {
+      clearingRef.current = false;
+    }
   };
 
   const allNotices = [
@@ -410,9 +479,9 @@ export function OfflineManagerPanel({
                     : `${syncSummary?.pendingCount ?? 0} pending sync event(s)`}
                 </span>
                 {(syncSummary?.authRequiredCount ?? 0) > 0 && (
-                  <Badge variant="warning">
+                  <Badge variant="warning" data-testid="sync-auth-required-badge">
                     <Lock className="size-3" aria-hidden="true" />
-                    {vi ? "Cần đăng nhập lại" : "Sign-in required"}
+                    {vi ? "Đăng nhập lại để đồng bộ" : "Sign in again to sync"}
                   </Badge>
                 )}
                 {conflicts.length > 0 && (
@@ -479,6 +548,28 @@ export function OfflineManagerPanel({
               </Button>
             </div>
           </div>
+
+          {(syncSummary?.authRequiredCount ?? 0) > 0 && (
+            <div
+              role="alert"
+              data-testid="sync-auth-required-callout"
+              className="border-warning/40 bg-warning-subtle text-warning-subtle-foreground flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-xs sm:text-sm"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <Lock className="size-4 shrink-0" aria-hidden="true" />
+                <span>
+                  {vi
+                    ? "Phiên đăng nhập đã hết hạn — đồng bộ tự động đang tạm dừng an toàn (không mất dữ liệu). Đăng nhập lại để đồng bộ."
+                    : "Your session expired — automatic sync is safely paused with all events preserved. Sign in again to sync."}
+                </span>
+              </div>
+              <Button size="sm" variant="outline" asChild>
+                <Link href="/login?next=%2Fsettings%3Ftab%3Doffline">
+                  {vi ? "Đăng nhập lại để đồng bộ" : "Sign in again to sync"}
+                </Link>
+              </Button>
+            </div>
+          )}
 
           {statusMessage && (
             <div

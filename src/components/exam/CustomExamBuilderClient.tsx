@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -75,12 +76,25 @@ import type {
   StudySet,
 } from "@/types/domain";
 import { cn } from "@/lib/utils";
-import { CoverageCyclesSection } from "./CoverageCyclesSection";
 import {
-  ExamPresetsSection,
   getAllocationLabel,
   getPolicyLabel,
-} from "./ExamPresetsSection";
+  localizeAllocationError,
+} from "./exam-labels";
+
+const CoverageCyclesSection = dynamic(
+  () => import("./CoverageCyclesSection").then((m) => m.CoverageCyclesSection),
+  {
+    loading: () => <Skeleton className="h-52 w-full rounded-xl" />,
+  },
+);
+
+const ExamPresetsSection = dynamic(
+  () => import("./ExamPresetsSection").then((m) => m.ExamPresetsSection),
+  {
+    loading: () => <Skeleton className="h-52 w-full rounded-xl" />,
+  },
+);
 
 const QUESTION_COUNT_PRESETS = [20, 50, 100, 250] as const;
 const DURATION_PRESETS = [15, 30, 45, 60, 90, 120, 180] as const;
@@ -217,9 +231,16 @@ export function CustomExamBuilderClient({
   const [examTitle, setExamTitle] = React.useState("");
   const [useAllQuestions, setUseAllQuestions] = React.useState(false);
   const [questionCountInput, setQuestionCountInput] = React.useState("50");
+  const [userHasEditedCount, setUserHasEditedCount] = React.useState(false);
   const [countEditedAtPool, setCountEditedAtPool] = React.useState<
     number | null
   >(null);
+  // Compact Step 1 when launched from a specific `/sets/[id]` so Step 2 stays above the fold (`RU-16`)
+  const [showFullSourcePicker, setShowFullSourcePicker] = React.useState<boolean>(
+    () => !(Boolean(urlSetId) && !urlSetIds && !urlFolderId),
+  );
+  // Lazy-mount Advanced Settings inner DOM only when expanded (`PERF-04` — slashes initial Step 1 DOM!)
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [allocationStrategy, setAllocationStrategy] =
     React.useState<AllocationStrategy>("proportional");
   const [customCounts, setCustomCounts] = React.useState<Record<string, string>>(
@@ -272,6 +293,7 @@ export function CustomExamBuilderClient({
 
   // Launch states
   const [isLaunching, setIsLaunching] = React.useState(false);
+  const launchingRef = React.useRef(false);
   const [loadedPresetId, setLoadedPresetId] = React.useState<string | null>(
     urlPresetId,
   );
@@ -348,6 +370,7 @@ export function CustomExamBuilderClient({
     } else {
       setUseAllQuestions(false);
       setQuestionCountInput(String(preset.requested_question_count));
+      setUserHasEditedCount(true);
       setCountEditedAtPool(null);
     }
 
@@ -405,6 +428,19 @@ export function CustomExamBuilderClient({
           }
           if (sourceIds.size > 0) {
             setSelectedSetIds(Array.from(sourceIds));
+            if (sourceIds.size > 1) {
+              setShowFullSourcePicker(true);
+            }
+          }
+          // Preserve full attempt config on `?cloneAttemptId=` (fixes FUNC-28(1)!)
+          const clonedCount =
+            payload.attempt.requested_question_count ??
+            payload.attempt.config?.question_count ??
+            payload.attempt.total_questions;
+          if (typeof clonedCount === "number" && clonedCount > 0) {
+            setUseAllQuestions(false);
+            setQuestionCountInput(String(clonedCount));
+            setUserHasEditedCount(true);
           }
           if (payload.attempt.allocation_strategy) {
             setAllocationStrategy(payload.attempt.allocation_strategy);
@@ -421,6 +457,57 @@ export function CustomExamBuilderClient({
             );
           }
           setPassScoreInput(String(payload.attempt.pass_threshold));
+          const cfg = payload.attempt.config;
+          if (cfg) {
+            if (typeof cfg.shuffle_questions === "boolean") {
+              setShuffleQuestions(cfg.shuffle_questions);
+            }
+            if (typeof cfg.shuffle_options === "boolean") {
+              setShuffleOptions(cfg.shuffle_options);
+            }
+            if (typeof cfg.show_subject_names === "boolean") {
+              setShowSubjectNames(cfg.show_subject_names);
+            } else if (typeof payload.attempt.show_subject_names === "boolean") {
+              setShowSubjectNames(payload.attempt.show_subject_names);
+            }
+            if (typeof cfg.show_chapter_names === "boolean") {
+              setShowChapterNames(cfg.show_chapter_names);
+            } else if (typeof payload.attempt.show_chapter_names === "boolean") {
+              setShowChapterNames(payload.attempt.show_chapter_names);
+            }
+            if (typeof cfg.allow_navigation === "boolean") {
+              setAllowNavigation(cfg.allow_navigation);
+            } else if (typeof payload.attempt.allow_navigation === "boolean") {
+              setAllowNavigation(payload.attempt.allow_navigation);
+            }
+            if (typeof cfg.allow_mark_for_review === "boolean") {
+              setAllowMarkForReview(cfg.allow_mark_for_review);
+            } else if (typeof payload.attempt.allow_mark_for_review === "boolean") {
+              setAllowMarkForReview(payload.attempt.allow_mark_for_review);
+            }
+            if (typeof cfg.auto_submit_on_expire === "boolean") {
+              setAutoSubmitOnExpire(cfg.auto_submit_on_expire);
+            } else if (typeof payload.attempt.auto_submit_on_expire === "boolean") {
+              setAutoSubmitOnExpire(payload.attempt.auto_submit_on_expire);
+            }
+            if (typeof cfg.show_review_after_submit === "boolean") {
+              setShowReviewAfterSubmit(cfg.show_review_after_submit);
+            } else if (typeof payload.attempt.show_review_after_submit === "boolean") {
+              setShowReviewAfterSubmit(payload.attempt.show_review_after_submit);
+            }
+            if (Array.isArray(cfg.chapters) && cfg.chapters.length > 0) {
+              setSelectedChapters(cfg.chapters);
+            }
+            if (Array.isArray(cfg.tag_ids) && cfg.tag_ids.length > 0) {
+              setSelectedTagIds(cfg.tag_ids);
+            }
+            if (Array.isArray(cfg.difficulties) && cfg.difficulties.length > 0) {
+              setSelectedDifficulties(cfg.difficulties);
+            }
+            if (Array.isArray(cfg.question_types) && cfg.question_types.length > 0) {
+              setSelectedQuestionTypes(cfg.question_types);
+            }
+          }
         })
         .catch(() => {});
     }
@@ -609,12 +696,19 @@ export function CustomExamBuilderClient({
     eligibleQuery.data?.total_eligible ??
     effectiveSubjects.reduce((sum, s) => sum + s.availableCount, 0);
 
-  // UX-12: Auto-clamp untouched/stale positive integer question count when the eligible pool
-  // loads or shrinks below it (e.g., selecting only a 24Q set while default is 50), while still
-  // strictly rejecting explicit out-of-range edits typed against the current pool size.
+  // Suppress false "0 câu" and red validation banners while sets/eligible pool are hydrating (`RU-03`)
+  const isSourcesHydrating =
+    setsQuery.isLoading ||
+    foldersQuery.isLoading ||
+    (hasAnySource && effectiveSubjects.length === 0 && eligibleQuery.isFetching);
+
+  // UX-12 & RU-03: Auto-clamp ONLY untouched default ("50") when pool loads smaller than 50;
+  // NEVER overwrite or clobber a user-edited questionCount during async hydration!
   const resolvedQuestionCountInput = React.useMemo(() => {
     if (useAllQuestions || totalEligible <= 0) return questionCountInput;
-    if (countEditedAtPool === totalEligible) return questionCountInput;
+    if (userHasEditedCount || countEditedAtPool === totalEligible) {
+      return questionCountInput;
+    }
     const trimmed = questionCountInput.trim();
     if (/^\d+$/.test(trimmed)) {
       const parsed = Number(trimmed);
@@ -623,7 +717,13 @@ export function CustomExamBuilderClient({
       }
     }
     return questionCountInput;
-  }, [countEditedAtPool, questionCountInput, totalEligible, useAllQuestions]);
+  }, [
+    countEditedAtPool,
+    questionCountInput,
+    totalEligible,
+    useAllQuestions,
+    userHasEditedCount,
+  ]);
 
   const requestedCountRaw: unknown = useAllQuestions
     ? totalEligible
@@ -794,6 +894,7 @@ export function CustomExamBuilderClient({
 
   // Start Custom Exam OR Start Full Coverage Cycle
   const handleLaunch = async () => {
+    if (launchingRef.current) return;
     if (!hasAnySource) {
       toast.error(
         lText(
@@ -827,6 +928,7 @@ export function CustomExamBuilderClient({
         );
         return;
       }
+      launchingRef.current = true;
       setIsLaunching(true);
       try {
         const res = await createCoverageCycleApi({
@@ -854,8 +956,17 @@ export function CustomExamBuilderClient({
           preset_id: loadedPresetId,
           start_first_exam: true,
         });
-        await queryClient.invalidateQueries({ queryKey: ["coverage-cycles"] });
+        void queryClient.invalidateQueries({ queryKey: ["coverage-cycles"] });
         if (res.first_exam?.attempt?.id) {
+          // Seed BOTH exam caches before navigation for instant 0ms launch (`PERF-04`)
+          queryClient.setQueryData(
+            ["exam-attempt", res.first_exam.attempt.id],
+            res.first_exam,
+          );
+          queryClient.setQueryData(
+            ["exam-attempt-live", res.first_exam.attempt.id],
+            res.first_exam,
+          );
           router.push(`/exams/${res.first_exam.attempt.id}`);
         } else if (res.cycle?.active_attempt_id) {
           router.push(`/exams/${res.cycle.active_attempt_id}`);
@@ -864,6 +975,7 @@ export function CustomExamBuilderClient({
           toast.success(
             lText(locale, "Đã tạo chu kỳ phủ 100%!", "Full Coverage cycle created!"),
           );
+          launchingRef.current = false;
           setIsLaunching(false);
         }
       } catch (err) {
@@ -872,6 +984,7 @@ export function CustomExamBuilderClient({
             ? err.message
             : lText(locale, "Không thể tạo chu kỳ phủ.", "Failed to create coverage cycle."),
         );
+        launchingRef.current = false;
         setIsLaunching(false);
       }
       return;
@@ -879,16 +992,25 @@ export function CustomExamBuilderClient({
 
     if (!countValidation.valid || !countValidation.value) {
       toast.error(
-        countValidation.message ??
-          lText(locale, "Số câu hỏi không hợp lệ.", "Invalid question count."),
+        localizeAllocationError(
+          locale,
+          countValidation.code,
+          countValidation.message,
+          totalEligible,
+        ),
       );
       return;
     }
 
     if (!localAllocation.valid) {
+      const firstErr = localAllocation.errors[0];
       toast.error(
-        localAllocation.errors[0]?.message ??
-          lText(locale, "Cấu hình phân bổ chưa hợp lệ.", "Allocation configuration is invalid."),
+        localizeAllocationError(
+          locale,
+          firstErr?.code,
+          firstErr?.message,
+          totalEligible,
+        ),
       );
       return;
     }
@@ -904,6 +1026,7 @@ export function CustomExamBuilderClient({
       return;
     }
 
+    launchingRef.current = true;
     setIsLaunching(true);
     try {
       const created = await createExamAttempt({
@@ -936,6 +1059,9 @@ export function CustomExamBuilderClient({
         filters: filtersPayload,
       });
 
+      // Seed React Query exam caches before routing — eliminates redundant 406KB GET /api/exams/[id] (`PERF-04`)!
+      queryClient.setQueryData(["exam-attempt", created.attempt.id], created);
+      queryClient.setQueryData(["exam-attempt-live", created.attempt.id], created);
       router.push(`/exams/${created.attempt.id}`);
     } catch (err) {
       toast.error(
@@ -943,6 +1069,7 @@ export function CustomExamBuilderClient({
           ? err.message
           : lText(locale, "Không thể tạo đề thi.", "Failed to generate exam."),
       );
+      launchingRef.current = false;
       setIsLaunching(false);
     }
   };
@@ -1217,29 +1344,73 @@ export function CustomExamBuilderClient({
                       )}
                     </CardTitle>
                     <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="min-h-9 px-2 text-xs"
-                        onClick={handleSelectAllSets}
-                      >
-                        {lText(locale, "Chọn tất cả", "Select all")}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="min-h-9 px-2 text-xs"
-                        disabled={!hasAnySource}
-                        onClick={handleClearSources}
-                      >
-                        {lText(locale, "Bỏ chọn", "Clear")}
-                      </Button>
+                      {!showFullSourcePicker && selectedSetIds.length === 1 && selectedFolderIds.length === 0 ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="min-h-11 sm:min-h-9 px-3 text-xs"
+                          onClick={() => setShowFullSourcePicker(true)}
+                        >
+                          {lText(locale, "Đổi / Thêm học phần", "Change / Add sets")}
+                        </Button>
+                      ) : (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="min-h-11 sm:min-h-9 px-2.5 text-xs"
+                            onClick={handleSelectAllSets}
+                          >
+                            {lText(locale, "Chọn tất cả", "Select all")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="min-h-11 sm:min-h-9 px-2.5 text-xs"
+                            disabled={!hasAnySource}
+                            onClick={handleClearSources}
+                          >
+                            {lText(locale, "Bỏ chọn", "Clear")}
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent className="min-w-0 space-y-4">
+                  {/* Compact Step 1 when pre-selected from `/sets/[id]` so Step 2 stays visible above the fold (`RU-16`) */}
+                  {!showFullSourcePicker &&
+                  selectedSetIds.length === 1 &&
+                  selectedFolderIds.length === 0 ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/30 bg-accent/30 px-3.5 py-3">
+                      {isSourcesHydrating ? (
+                        <div className="flex w-full items-center justify-between gap-3">
+                          <Skeleton className="h-5 w-48" />
+                          <Skeleton className="h-5 w-16" />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-semibold text-foreground">
+                              {effectiveSubjects[0]?.title ??
+                                allSets.find((s) => s.id === selectedSetIds[0])?.title ??
+                                lText(locale, "Học phần đã chọn", "Selected study set")}
+                            </p>
+                            <p className="text-xs text-muted-foreground tabular-nums">
+                              {totalEligible} {lText(locale, "câu hỏi khả dụng", "eligible questions")}
+                            </p>
+                          </div>
+                          <Badge variant="secondary" className="shrink-0 tabular-nums">
+                            1 {lText(locale, "học phần", "set")}
+                          </Badge>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                  <>
                   {/* Search input inside semantic <search> */}
                   <search className="relative">
                     <Search
@@ -1480,6 +1651,8 @@ export function CustomExamBuilderClient({
                       ) : null}
                     </div>
                   ) : null}
+                  </>
+                  )}
                 </CardContent>
               </Card>
 
@@ -1626,6 +1799,7 @@ export function CustomExamBuilderClient({
                               onClick={() => {
                                 setUseAllQuestions(false);
                                 setQuestionCountInput(String(n));
+                                setUserHasEditedCount(true);
                                 setCountEditedAtPool(
                                   totalEligible > 0 ? totalEligible : null,
                                 );
@@ -1660,12 +1834,13 @@ export function CustomExamBuilderClient({
                             value={resolvedQuestionCountInput}
                             onChange={(e) => {
                               setQuestionCountInput(e.target.value);
+                              setUserHasEditedCount(true);
                               setCountEditedAtPool(
                                 totalEligible > 0 ? totalEligible : null,
                               );
                             }}
                             aria-invalid={
-                              hasAnySource && !countValidation.valid
+                              hasAnySource && !isSourcesHydrating && !countValidation.valid
                                 ? "true"
                                 : "false"
                             }
@@ -1683,14 +1858,21 @@ export function CustomExamBuilderClient({
                         </div>
                       ) : null}
 
-                      {hasAnySource && !countValidation.valid ? (
+                      {hasAnySource && !isSourcesHydrating && !countValidation.valid ? (
                         <p
                           id="builder-count-error"
                           role="alert"
                           className="flex items-center gap-1.5 text-xs font-medium text-destructive"
                         >
                           <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
-                          <span>{countValidation.message}</span>
+                          <span>
+                            {localizeAllocationError(
+                              locale,
+                              countValidation.code,
+                              countValidation.message,
+                              totalEligible,
+                            )}
+                          </span>
                         </p>
                       ) : null}
                     </div>
@@ -1956,8 +2138,12 @@ export function CustomExamBuilderClient({
                 </CardContent>
               </Card>
 
-              {/* ADVANCED SETTINGS (Progressive disclosure via native <details>, closed by default — UX31-02) */}
-              <details className="group rounded-xl border border-border bg-card shadow-2xs">
+              {/* ADVANCED SETTINGS (Lazy-mounted inner DOM when opened — slashes Step 1 DOM & Cold TBT `PERF-04`!) */}
+              <details
+                open={advancedOpen}
+                onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+                className="group rounded-xl border border-border bg-card shadow-2xs"
+              >
                 <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3.5 text-sm font-semibold select-none [&::-webkit-details-marker]:hidden">
                   <span className="flex items-center gap-2">
                     <SlidersHorizontal
@@ -1985,6 +2171,7 @@ export function CustomExamBuilderClient({
                   </span>
                 </summary>
 
+                {advancedOpen ? (
                 <div className="space-y-6 border-t border-border p-4 sm:p-5">
                   {/* Fine Filters (Question Types, Difficulties, Chapters, Tags) */}
                   <div className="space-y-4">
@@ -2401,6 +2588,7 @@ export function CustomExamBuilderClient({
                   </div>
                   </div>
                 </div>
+                ) : null}
               </details>
             </div>
 
@@ -2485,9 +2673,13 @@ export function CustomExamBuilderClient({
                         {lText(locale, "Quy mô đề:", "Exam Size:")}
                       </span>
                       <span className="font-semibold tabular-nums">
-                        {fullCoverageMode && coveragePlan
-                          ? `${coveragePlan.formattedPlan} (${coveragePlan.examCount} ${lText(locale, "đề", "exams")})`
-                          : `${effectiveExamSize} ${lText(locale, "câu", "Q")}`}
+                        {isSourcesHydrating ? (
+                          <Skeleton className="inline-block h-4 w-16 align-middle" />
+                        ) : fullCoverageMode && coveragePlan ? (
+                          `${coveragePlan.formattedPlan} (${coveragePlan.examCount} ${lText(locale, "đề", "exams")})`
+                        ) : (
+                          `${effectiveExamSize} ${lText(locale, "câu", "Q")}`
+                        )}
                       </span>
                     </div>
                     <div className="flex justify-between">
@@ -2633,9 +2825,10 @@ export function CustomExamBuilderClient({
                     </div>
                   ) : null}
 
-                  {/* Validation Errors */}
+                  {/* Validation Errors (suppressed during async source hydration & localized — RU-03!) */}
                   {!fullCoverageMode &&
                   hasAnySource &&
+                  !isSourcesHydrating &&
                   localAllocation.errors.length > 0 ? (
                     <div
                       role="alert"
@@ -2647,7 +2840,14 @@ export function CustomExamBuilderClient({
                             className="mt-0.5 size-3.5 shrink-0"
                             aria-hidden="true"
                           />
-                          <span>{err.message}</span>
+                          <span>
+                            {localizeAllocationError(
+                              locale,
+                              err.code,
+                              err.message,
+                              totalEligible,
+                            )}
+                          </span>
                         </p>
                       ))}
                     </div>
@@ -2705,17 +2905,19 @@ export function CustomExamBuilderClient({
           </div>
         </TabsContent>
 
-        {/* TAB 2: SAVED PRESETS */}
+        {/* TAB 2: SAVED PRESETS (Lazily rendered only when tab is active — PERF-04) */}
         <TabsContent value="presets" className="mt-5">
-          <ExamPresetsSection
-            onSelectPresetInBuilder={hydrateFromPreset}
-            compact
-          />
+          {activeTab === "presets" ? (
+            <ExamPresetsSection
+              onSelectPresetInBuilder={hydrateFromPreset}
+              compact
+            />
+          ) : null}
         </TabsContent>
 
-        {/* TAB 3: FULL COVERAGE CYCLES */}
+        {/* TAB 3: FULL COVERAGE CYCLES (Lazily rendered only when tab is active — PERF-04) */}
         <TabsContent value="coverage" className="mt-5">
-          <CoverageCyclesSection compact />
+          {activeTab === "coverage" ? <CoverageCyclesSection compact /> : null}
         </TabsContent>
       </Tabs>
 

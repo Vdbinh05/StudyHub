@@ -1,4 +1,7 @@
+"use client";
+
 import * as React from "react";
+import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 
 export type BrandLogoVariant = "horizontal" | "icon" | "main" | "full";
@@ -39,6 +42,58 @@ const STACKED_SIZE_CLASSES: Record<BrandLogoSize, string> = {
   lg: "h-32 sm:h-40 w-auto",
 };
 
+const emptySubscribe = () => () => {};
+
+/**
+ * Renders a single theme-aware brand image so browsers ONLY download the active
+ * theme's logo (zero simultaneous light+dark high-priority PNG downloads, zero
+ * hydration mismatch, zero CLS, exact `39952bd` StudyHub branding preserved).
+ */
+function ThemedBrandImage({
+  lightSrc,
+  darkSrc,
+  alt,
+  width,
+  height,
+  size,
+  imgPriorityProps,
+}: {
+  lightSrc: string;
+  darkSrc: string;
+  alt: string;
+  width: number;
+  height: number;
+  size: BrandLogoSize;
+  imgPriorityProps: Pick<
+    React.ImgHTMLAttributes<HTMLImageElement>,
+    "fetchPriority" | "loading" | "decoding"
+  >;
+}) {
+  const mounted = React.useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false,
+  );
+  const { resolvedTheme } = useTheme();
+  const isDark = mounted && resolvedTheme === "dark";
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={isDark ? darkSrc : lightSrc}
+      alt={alt}
+      width={width}
+      height={height}
+      className={cn(
+        "object-contain",
+        !mounted && "dark:opacity-0",
+        STACKED_SIZE_CLASSES[size],
+      )}
+      {...imgPriorityProps}
+    />
+  );
+}
+
 export function BrandLogo({
   variant = "horizontal",
   collapsed = false,
@@ -60,29 +115,14 @@ export function BrandLogo({
   if (effectiveVariant === "full") {
     return (
       <span className={cn("inline-flex items-center justify-center select-none", className)}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/brand/logo-full.png"
+        <ThemedBrandImage
+          lightSrc="/brand/logo-full.png"
+          darkSrc="/brand/logo-full-dark.png"
           alt="StudyHub — Học thông minh · Ôn tập hiệu quả · Thi thử linh hoạt"
           width={609}
           height={454}
-          className={cn(
-            "object-contain dark:hidden",
-            STACKED_SIZE_CLASSES[size],
-          )}
-          {...imgPriorityProps}
-        />
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/brand/logo-full-dark.png"
-          alt="StudyHub — Học thông minh · Ôn tập hiệu quả · Thi thử linh hoạt"
-          width={609}
-          height={454}
-          className={cn(
-            "hidden object-contain dark:block",
-            STACKED_SIZE_CLASSES[size],
-          )}
-          {...imgPriorityProps}
+          size={size}
+          imgPriorityProps={imgPriorityProps}
         />
       </span>
     );
@@ -91,29 +131,14 @@ export function BrandLogo({
   if (effectiveVariant === "main") {
     return (
       <span className={cn("inline-flex items-center justify-center select-none", className)}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/brand/logo-main.png"
+        <ThemedBrandImage
+          lightSrc="/brand/logo-main.png"
+          darkSrc="/brand/logo-main-dark.png"
           alt="StudyHub"
           width={555}
           height={415}
-          className={cn(
-            "object-contain dark:hidden",
-            STACKED_SIZE_CLASSES[size],
-          )}
-          {...imgPriorityProps}
-        />
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/brand/logo-main-dark.png"
-          alt="StudyHub"
-          width={555}
-          height={415}
-          className={cn(
-            "hidden object-contain dark:block",
-            STACKED_SIZE_CLASSES[size],
-          )}
-          {...imgPriorityProps}
+          size={size}
+          imgPriorityProps={imgPriorityProps}
         />
       </span>
     );

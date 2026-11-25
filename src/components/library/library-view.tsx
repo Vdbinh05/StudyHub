@@ -168,7 +168,15 @@ function LibraryViewInner() {
   });
 
   const setsQuery = useQuery<{ items: StudySet[]; total: number; hasMore: boolean }>({
-    queryKey: ["study-sets", debouncedSearch, typeFilter, sortBy, showArchived, page],
+    queryKey: [
+      "study-sets",
+      debouncedSearch,
+      typeFilter,
+      sortBy,
+      showArchived,
+      favoritesOnly,
+      page,
+    ],
     enabled: configured,
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -179,6 +187,7 @@ function LibraryViewInner() {
       if (debouncedSearch) params.set("search", debouncedSearch);
       if (typeFilter !== "all") params.set("type", typeFilter);
       if (showArchived) params.set("includeArchived", "true");
+      if (favoritesOnly) params.set("favoritesOnly", "true");
       const res = await apiFetch<StudySet[]>(`/api/sets?${params.toString()}`);
       const items = Array.isArray(res.data) ? res.data : [];
       return {
@@ -283,6 +292,7 @@ function LibraryViewInner() {
         typeFilter,
         sortBy,
         showArchived,
+        favoritesOnly,
         page,
       ];
       await queryClient.cancelQueries({ queryKey });
@@ -392,13 +402,13 @@ function LibraryViewInner() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button asChild size="sm">
+          <Button asChild size="sm" className="min-h-11 sm:min-h-8">
             <Link href="/sets/new" prefetch={false}>
               <Plus className="size-4" aria-hidden="true" />
               <span>{t("library.newSet")}</span>
             </Link>
           </Button>
-          <Button asChild variant="outline" size="sm">
+          <Button asChild variant="outline" size="sm" className="min-h-11 sm:min-h-8">
             <Link href="/import" prefetch={false}>
               <Upload className="size-4" aria-hidden="true" />
               <span>{t("library.importSet")}</span>
@@ -407,6 +417,7 @@ function LibraryViewInner() {
           <Button
             variant="outline"
             size="sm"
+            className="min-h-11 sm:min-h-8"
             onClick={() => {
               setEditingFolder(null);
               setFolderDialogOpen(true);
@@ -518,7 +529,11 @@ function LibraryViewInner() {
           <Button
             variant={favoritesOnly ? "secondary" : "outline"}
             size="sm"
-            onClick={() => setFavoritesOnly((prev) => !prev)}
+            className="min-h-11 sm:min-h-8"
+            onClick={() => {
+              setFavoritesOnly((prev) => !prev);
+              setPage(1);
+            }}
             aria-pressed={favoritesOnly}
           >
             <Star
@@ -531,6 +546,7 @@ function LibraryViewInner() {
           <Button
             variant={showArchived ? "secondary" : "outline"}
             size="sm"
+            className="min-h-11 sm:min-h-8"
             onClick={() => {
               setShowArchived((prev) => !prev);
               setPage(1);
@@ -636,9 +652,9 @@ function LibraryViewInner() {
         <div className="flex items-center justify-between gap-2">
           <h2 id="sets-heading" className="text-foreground text-sm font-semibold">
             {t("library.mySets")}
-            {configured && !setsQuery.isLoading && !setsQuery.error && (
+            {configured && Boolean(setsQuery.data) && !setsQuery.error && (
               <span className="text-muted-foreground ml-1.5 font-mono text-xs font-normal tabular-nums">
-                ({favoritesOnly ? sets.length : totalSets})
+                ({totalSets})
               </span>
             )}
           </h2>
@@ -650,8 +666,10 @@ function LibraryViewInner() {
             title={vi ? "Chưa thể tải thư viện học phần" : "Library unavailable"}
             description={t("common.serviceUnavailableDesc")}
           />
-        ) : setsQuery.isLoading ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        ) : setsQuery.isLoading ||
+          (setsQuery.isFetching && !setsQuery.data) ||
+          (!setsQuery.data && !setsQuery.error) ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true">
             {Array.from({ length: 6 }).map((_, i) => (
               <Skeleton key={i} className="h-44 rounded-xl" />
             ))}
@@ -740,6 +758,7 @@ function LibraryViewInner() {
                           <Button
                             variant="ghost"
                             size="icon-sm"
+                            className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
                             aria-pressed={isFav}
                             aria-label={
                               isFav
@@ -769,6 +788,7 @@ function LibraryViewInner() {
                               <Button
                                 variant="ghost"
                                 size="icon-sm"
+                                className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
                                 aria-label={`${t("common.actions")} ${set.title}`}
                               >
                                 <MoreHorizontal className="size-4" aria-hidden="true" />
@@ -892,14 +912,14 @@ function LibraryViewInner() {
 
                     <CardFooter className="gap-2 border-t px-4 pt-3">
                       {urlAction === "import" ? (
-                        <Button size="sm" asChild className="w-full">
+                        <Button size="sm" asChild className="min-h-11 w-full sm:min-h-8">
                           <Link href={`/sets/${set.id}/import`} prefetch={false}>
                             <Upload className="size-3.5" aria-hidden="true" />
                             <span>{t("library.importSet")}</span>
                           </Link>
                         </Button>
                       ) : urlAction === "test" ? (
-                        <Button size="sm" asChild className="w-full">
+                        <Button size="sm" asChild className="min-h-11 w-full sm:min-h-8">
                           <Link href={`/exams/new?setId=${set.id}`} prefetch={false}>
                             <FileCheck2 className="size-3.5" aria-hidden="true" />
                             <span>{t("exam.startExam")}</span>
@@ -907,13 +927,23 @@ function LibraryViewInner() {
                         </Button>
                       ) : (
                         <>
-                          <Button size="sm" variant="default" asChild className="flex-1">
+                          <Button
+                            size="sm"
+                            variant="default"
+                            asChild
+                            className="min-h-11 flex-1 sm:min-h-8"
+                          >
                             <Link href={`/sets/${set.id}`} prefetch={false}>
                               <Play className="size-3.5" aria-hidden="true" />
                               <span>{vi ? "Mở học phần" : "Open"}</span>
                             </Link>
                           </Button>
-                          <Button size="sm" variant="outline" asChild>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            asChild
+                            className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-8"
+                          >
                             <Link
                               href={`/sets/${set.id}/${set.set_type === "flashcards" ? "flashcards" : "practice"}`}
                               prefetch={false}

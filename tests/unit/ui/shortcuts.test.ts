@@ -410,4 +410,150 @@ describe("GlobalSearchDialog payload normalization", () => {
     ]);
     expect(items[2]?.href).toBe("/diagrams/diag-1/study");
   });
+
+  it("deep-links questions, options, notes to viewer-safe /sets/[id]?q= and encodes chapters (V32-026)", async () => {
+    const { resolveResultHref } = await import(
+      "@/components/layout/GlobalSearchDialog"
+    );
+
+    // Even when backend supplies legacy /edit href, question/option/note route to /sets/[id]?q=<questionId>
+    expect(
+      resolveResultHref({
+        id: "q-42",
+        entity_type: "question",
+        title: "Bernoulli principle",
+        study_set_id: "set-1",
+        href: "/sets/set-1/edit",
+      }),
+    ).toBe("/sets/set-1?q=q-42");
+
+    expect(
+      resolveResultHref({
+        id: "opt-9",
+        question_id: "q-42",
+        entity_type: "option",
+        title: "Static pressure decreases",
+        study_set_id: "set-1",
+        href: "/sets/set-1/edit",
+      }),
+    ).toBe("/sets/set-1?q=q-42");
+
+    expect(
+      resolveResultHref({
+        id: "note-7",
+        question_id: "q-99",
+        entity_type: "note",
+        title: "Mnemonic note",
+        study_set_id: "set-1",
+        href: "/sets/set-1/edit",
+      }),
+    ).toBe("/sets/set-1?q=q-99");
+
+    // Chapters with &, #, ?, + must be cleanly percent-encoded
+    expect(
+      resolveResultHref({
+        id: "ch-1",
+        entity_type: "chapter",
+        title: "Ch 1: Wind & Pressure #2? +100%",
+        chapter: "Ch 1: Wind & Pressure #2? +100%",
+        study_set_id: "set-1",
+      }),
+    ).toBe(
+      `/sets/set-1?chapter=${encodeURIComponent("Ch 1: Wind & Pressure #2? +100%")}`,
+    );
+
+    expect(
+      resolveResultHref({
+        id: "tag-1",
+        entity_type: "tag",
+        title: "Meteorology",
+        study_set_id: "set-1",
+      }),
+    ).toBe("/sets/set-1");
+  });
+});
+
+describe("StudyHub V3.2 — Shared shouldIgnoreShortcutEvent Guard (src/lib/ui/shortcuts.ts)", () => {
+  it("ignores defaultPrevented, disabled shortcuts, IME composition, editable targets, and open modals/popovers", async () => {
+    const { shouldIgnoreShortcutEvent } = await import("@/lib/ui/shortcuts");
+
+    const neutralTarget = document.createElement("div");
+
+    // 1. defaultPrevented
+    const prevented = makeKeyEvent({ key: "?", shiftKey: true, target: neutralTarget });
+    prevented.preventDefault();
+    expect(shouldIgnoreShortcutEvent(prevented)).toBe(true);
+
+    // 2. shortcutsEnabled === false
+    expect(
+      shouldIgnoreShortcutEvent(makeKeyEvent({ key: "1", target: neutralTarget }), {
+        shortcutsEnabled: false,
+      }),
+    ).toBe(true);
+
+    // 3. IME composition
+    expect(
+      shouldIgnoreShortcutEvent(
+        makeKeyEvent({ key: "a", isComposing: true, target: neutralTarget }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldIgnoreShortcutEvent(
+        makeKeyEvent({ key: "Enter", keyCode: 229, target: neutralTarget }),
+      ),
+    ).toBe(true);
+
+    // 4. Editable target vs allowInEditable
+    const input = document.createElement("input");
+    expect(
+      shouldIgnoreShortcutEvent(makeKeyEvent({ key: "1", target: input })),
+    ).toBe(true);
+    expect(
+      shouldIgnoreShortcutEvent(makeKeyEvent({ key: "k", ctrlKey: true, target: input }), {
+        allowInEditable: true,
+      }),
+    ).toBe(false);
+
+    // 5. Open modal / Radix popover in DOM
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("data-state", "open");
+    document.body.appendChild(dialog);
+    try {
+      expect(
+        shouldIgnoreShortcutEvent(makeKeyEvent({ key: "1", target: neutralTarget })),
+      ).toBe(true);
+      expect(
+        shouldIgnoreShortcutEvent(makeKeyEvent({ key: "1", target: neutralTarget }), {
+          allowInModal: true,
+        }),
+      ).toBe(false);
+    } finally {
+      dialog.remove();
+    }
+
+    const popper = document.createElement("div");
+    popper.setAttribute("data-radix-popper-content-wrapper", "");
+    document.body.appendChild(popper);
+    try {
+      expect(
+        shouldIgnoreShortcutEvent(makeKeyEvent({ key: "ArrowRight", target: neutralTarget })),
+      ).toBe(true);
+    } finally {
+      popper.remove();
+    }
+
+    // 6. Closed dialog does not block shortcuts
+    const closedDialog = document.createElement("div");
+    closedDialog.setAttribute("role", "dialog");
+    closedDialog.setAttribute("data-state", "closed");
+    document.body.appendChild(closedDialog);
+    try {
+      expect(
+        shouldIgnoreShortcutEvent(makeKeyEvent({ key: "1", target: neutralTarget })),
+      ).toBe(false);
+    } finally {
+      closedDialog.remove();
+    }
+  });
 });

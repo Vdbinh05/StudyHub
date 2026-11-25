@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   ArrowLeft,
@@ -65,7 +65,6 @@ import {
   fetchAccessibleSets,
   fetchExamEligiblePool,
   fetchPracticeQuestionPool,
-  isEditableEventTarget,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   recordStudySessionAnswer,
@@ -74,7 +73,13 @@ import {
   updateStudySession,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
+import {
+  formatCorrectAnswerDisplay,
+  isMultiSelectChoiceQuestion,
+} from "@/lib/learning/answer-display";
 import { validateQuestionCount } from "@/lib/learning/exam-allocator";
+import { invalidateLearningCaches } from "@/lib/query-keys";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import {
   gradeChoiceSelection,
   shuffleOptions,
@@ -95,12 +100,19 @@ import type {
   PracticeQuestionItem,
   QuestionOption,
   SelectionPolicy,
+  StructuredAnswerResponse,
 } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { ConfidenceSelector } from "./ConfidenceSelector";
 import { lText } from "./learning-copy";
 import { QuestionNotesAndReportBar } from "./QuestionNotesAndReportBar";
 import { SafeRichText, ZoomableImage } from "./SafeRichText";
+import {
+  QuestionContextMedia,
+  V3StructuredPracticeControls,
+  gradeStructuredStudyQuestion,
+  isStructuredV3Question,
+} from "./V3StructuredPracticeControls";
 
 const SUBSET_PRESETS = [20, 50, 100, 250] as const;
 const MAX_PRACTICE_QUESTIONS = 2000;
@@ -162,7 +174,47 @@ const ALL_PRACTICE_TYPES: ExamQuestionType[] = [
   "multiple_choice",
   "true_false",
   "short_answer",
+  "image_choice",
+  "ordering",
+  "matching",
+  "fill_in_blank",
+  "numerical",
+  "image_hotspot",
+  "reading_passage",
+  "listening",
 ];
+
+function getPracticeTypeLabel(
+  qtype: ExamQuestionType,
+  locale: "vi" | "en",
+): string {
+  switch (qtype) {
+    case "single_choice":
+      return lText(locale, "1 đáp án", "Single Choice");
+    case "multiple_choice":
+      return lText(locale, "Nhiều đáp án", "Multiple Choice");
+    case "true_false":
+      return lText(locale, "Đúng / Sai", "True / False");
+    case "short_answer":
+      return lText(locale, "Tự luận ngắn", "Short Answer");
+    case "image_choice":
+      return lText(locale, "Chọn đáp án hình ảnh", "Image Choice");
+    case "ordering":
+      return lText(locale, "Sắp xếp thứ tự", "Ordering");
+    case "matching":
+      return lText(locale, "Ghép cặp", "Matching");
+    case "fill_in_blank":
+      return lText(locale, "Điền vào chỗ trống", "Fill in Blank");
+    case "numerical":
+      return lText(locale, "Nhập giá trị số", "Numerical");
+    case "image_hotspot":
+      return lText(locale, "Chọn điểm trên ảnh", "Image Hotspot");
+    case "reading_passage":
+      return lText(locale, "Đọc hiểu", "Reading Passage");
+    case "listening":
+      return lText(locale, "Nghe hiểu", "Listening");
+  }
+}
 
 interface ActivePracticeItem {
   question: PracticeQuestionItem;
@@ -172,6 +224,7 @@ interface ActivePracticeItem {
 interface PracticeAnswerState {
   selectedOptionIds: string[];
   typedAnswer: string;
+  structuredResponse?: StructuredAnswerResponse | null;
   isSubmitted: boolean;
   isCorrect: boolean;
   confidence?: ConfidenceLevel | null;
@@ -215,6 +268,7 @@ function getCustomPracticeDesktopLgServerSnapshot(): boolean {
 
 export function CustomPracticeClient() {
   const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
   const { preferences, playFeedbackSound } = useUserPreferences();
   const isDesktopLg = React.useSyncExternalStore(
     subscribeCustomPracticeDesktopLg,
@@ -223,12 +277,19 @@ export function CustomPracticeClient() {
   );
   const searchParams = useSearchParams();
 
-  // Read URL deep-link params (?setId=, ?setIds=, ?folderId=, ?mode=, ?chapter=)
+  // Read URL deep-link params (?setId=, ?setIds=, ?folderId=, ?mode=, ?chapter=, ?count=)
   const urlSetId = searchParams.get("setId");
   const urlSetIds = searchParams.get("setIds");
   const urlFolderId = searchParams.get("folderId");
   const urlMode = searchParams.get("mode");
   const urlChapter = searchParams.get("chapter");
+  const urlCountRaw = searchParams.get("count");
+  const initialUrlCount = React.useMemo(() => {
+    if (!urlCountRaw || !/^\d+$/.test(urlCountRaw.trim())) return null;
+    const parsed = Number(urlCountRaw.trim());
+    if (!Number.isSafeInteger(parsed) || parsed < 1) return null;
+    return Math.min(parsed, MAX_PRACTICE_QUESTIONS);
+  }, [urlCountRaw]);
 
   const [phase, setPhase] = React.useState<"setup" | "active" | "complete">(
     "setup",
@@ -260,7 +321,9 @@ export function CustomPracticeClient() {
     () => resolveInitialPolicy(urlMode),
   );
   const [countMode, setCountMode] = React.useState<"all" | "custom">("custom");
-  const [customCountInput, setCustomCountInput] = React.useState<string>("50");
+  const [customCountInput, setCustomCountInput] = React.useState<string>(() =>
+    initialUrlCount ? String(initialUrlCount) : "50",
+  );
   const [countEditedAtPool, setCountEditedAtPool] = React.useState<
     number | null
   >(null);
@@ -276,26 +339,35 @@ export function CustomPracticeClient() {
     [],
   );
 
-  // Behavior options (hydrated from user_preferences — SH-032)
+  // Behavior options (hydrated from user_preferences + mode_preferences.mc — V32-025)
+  const mcPrefs = preferences.mode_preferences?.mc;
   const [shuffleQ, setShuffleQ] = React.useState<boolean>(
     () => preferences.default_shuffle_questions,
   );
   const [shuffleA, setShuffleA] = React.useState<boolean>(
-    () => preferences.default_shuffle_options,
+    () => mcPrefs?.shuffle_options ?? preferences.default_shuffle_options,
   );
   const [showExplanation, setShowExplanation] = React.useState<boolean>(
-    () => preferences.show_instant_feedback,
+    () => mcPrefs?.instant_feedback ?? preferences.show_instant_feedback,
   );
-  const [autoNext, setAutoNext] = React.useState<boolean>(false);
+  const [autoNext, setAutoNext] = React.useState<boolean>(
+    () => (mcPrefs?.auto_advance_ms ?? 0) > 0,
+  );
 
   const syncedPrefsRef = React.useRef(false);
   React.useEffect(() => {
     if (syncedPrefsRef.current) return;
     syncedPrefsRef.current = true;
     setShuffleQ(preferences.default_shuffle_questions);
-    setShuffleA(preferences.default_shuffle_options);
-    setShowExplanation(preferences.show_instant_feedback);
+    setShuffleA(mcPrefs?.shuffle_options ?? preferences.default_shuffle_options);
+    setShowExplanation(
+      mcPrefs?.instant_feedback ?? preferences.show_instant_feedback,
+    );
+    setAutoNext((mcPrefs?.auto_advance_ms ?? 0) > 0);
   }, [
+    mcPrefs?.auto_advance_ms,
+    mcPrefs?.instant_feedback,
+    mcPrefs?.shuffle_options,
     preferences.default_shuffle_options,
     preferences.default_shuffle_questions,
     preferences.show_instant_feedback,
@@ -303,6 +375,7 @@ export function CustomPracticeClient() {
 
   // Active practice session state
   const [isLaunching, setIsLaunching] = React.useState(false);
+  const launchingRef = React.useRef(false);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   const [items, setItems] = React.useState<ActivePracticeItem[]>([]);
   const [currentIndex, setCurrentIndex] = React.useState(0);
@@ -555,6 +628,7 @@ export function CustomPracticeClient() {
   // Launch Custom Practice Session via POST /api/practice/questions
   const launchPractice = React.useCallback(
     async (overrideCount?: number | "all") => {
+      if (launchingRef.current) return;
       if (sources.length === 0) {
         toast.error(
           lText(
@@ -587,6 +661,7 @@ export function CustomPracticeClient() {
         requestedCount = countValidation.value;
       }
 
+      launchingRef.current = true;
       setIsLaunching(true);
       try {
         const res = await fetchPracticeQuestionPool({
@@ -640,6 +715,7 @@ export function CustomPracticeClient() {
           err instanceof Error ? err.message : t("common.errorGeneric"),
         );
       } finally {
+        launchingRef.current = false;
         setIsLaunching(false);
       }
     },
@@ -696,7 +772,11 @@ export function CustomPracticeClient() {
           completed_items: submittedList.length,
           correct_items: correctCount,
           duration_seconds: secs,
-        }).catch(() => {});
+        })
+          .then(() => {
+            invalidateLearningCaches(queryClient);
+          })
+          .catch(() => {});
       }
     },
     [
@@ -704,6 +784,7 @@ export function CustomPracticeClient() {
       clearAutoNextTimer,
       items.length,
       playFeedbackSound,
+      queryClient,
       sessionId,
       sessionStartedAt,
     ],
@@ -716,6 +797,7 @@ export function CustomPracticeClient() {
       typedAnswer: string,
       isCorrect: boolean,
       confidence: ConfidenceLevel | null,
+      structuredResponse?: StructuredAnswerResponse | null,
     ) => {
       try {
         if (sessionId) {
@@ -723,6 +805,7 @@ export function CustomPracticeClient() {
             question_id: question.id,
             selected_option_ids: selectedOptionIds,
             typed_answer: typedAnswer || null,
+            structured_response: structuredResponse ?? null,
             confidence,
             is_correct: isCorrect,
             update_progress: true,
@@ -754,8 +837,13 @@ export function CustomPracticeClient() {
     [sessionId],
   );
 
+  const autoAdvanceMs = mcPrefs?.auto_advance_ms ?? null;
+
   const submitCurrentAnswer = React.useCallback(
-    (overrideSelectedIds?: string[]) => {
+    (
+      overrideSelectedIds?: string[],
+      overrideStructuredResponse?: StructuredAnswerResponse,
+    ) => {
       if (!currentItem) return;
       const q = currentItem.question;
       const existing = answers[q.id];
@@ -764,12 +852,17 @@ export function CustomPracticeClient() {
       const selectedIds =
         overrideSelectedIds ?? existing?.selectedOptionIds ?? [];
       const typed = existing?.typedAnswer ?? "";
+      const structured =
+        overrideStructuredResponse ?? existing?.structuredResponse ?? null;
       const submittedConfidence = preferences.confidence_enabled
         ? (existing?.confidence ?? null)
         : null;
 
       let isCorrect = false;
-      if (q.question_type === "short_answer") {
+      if (isStructuredV3Question(q)) {
+        if (!structured) return;
+        isCorrect = gradeStructuredStudyQuestion(q, structured);
+      } else if (q.question_type === "short_answer") {
         if (!typed.trim()) return;
         const expected = getExpectedWriteAnswers(q);
         isCorrect = gradeWriteAnswer(typed, expected).isCorrect;
@@ -784,6 +877,7 @@ export function CustomPracticeClient() {
       const nextState: PracticeAnswerState = {
         selectedOptionIds: selectedIds,
         typedAnswer: typed,
+        structuredResponse: structured,
         isSubmitted: true,
         isCorrect,
         confidence: submittedConfidence,
@@ -792,20 +886,30 @@ export function CustomPracticeClient() {
       setAnswers(nextAnswers);
       playFeedbackSound(isCorrect ? "correct" : "wrong");
 
-      void persistAnswer(q, selectedIds, typed, isCorrect, submittedConfidence);
+      void persistAnswer(
+        q,
+        selectedIds,
+        typed,
+        isCorrect,
+        submittedConfidence,
+        structured,
+      );
 
       if (autoNext && isCorrect) {
         clearAutoNextTimer();
+        const delayMs =
+          autoAdvanceMs && autoAdvanceMs > 0 ? autoAdvanceMs : 750;
         autoNextTimerRef.current = window.setTimeout(() => {
           autoNextTimerRef.current = null;
           setCurrentIndex((prev) =>
             prev < items.length - 1 ? prev + 1 : prev,
           );
-        }, 750);
+        }, delayMs);
       }
     },
     [
       answers,
+      autoAdvanceMs,
       autoNext,
       clearAutoNextTimer,
       currentItem,
@@ -823,10 +927,7 @@ export function CustomPracticeClient() {
       const existing = answers[q.id];
       if (existing?.isSubmitted) return;
 
-      const isMulti =
-        q.question_type === "multiple_choice" ||
-        (q.type_payload?.type === "image_choice" &&
-          q.type_payload.selection_mode === "multiple");
+      const isMulti = isMultiSelectChoiceQuestion(q);
       if (isMulti) {
         const prev = existing?.selectedOptionIds ?? [];
         const nextIds = prev.includes(optionId)
@@ -913,16 +1014,17 @@ export function CustomPracticeClient() {
     setPhase("active");
   }, [answers, clearAutoNextTimer, items, shuffleA]);
 
-  // Keyboard shortcuts during active practice (strictly guarded against inputs/modals/sheets)
+  const shortcutsEnabled =
+    preferences.mode_preferences?.shortcuts?.enabled !== false;
+
+  // Keyboard shortcuts during active practice (strictly guarded against inputs/modals/sheets — V32-023)
   React.useEffect(() => {
     if (phase !== "active" || !currentItem || navSheetOpen || optionLightbox) {
       return;
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (isEditableEventTarget(e.target)) return;
-      if (document.querySelector('[role="dialog"]')) return;
+      if (shouldIgnoreShortcutEvent(e, { shortcutsEnabled })) return;
 
       const key = e.key.toLowerCase();
       if (e.key === "ArrowLeft") {
@@ -952,7 +1054,7 @@ export function CustomPracticeClient() {
             finishPractice();
           }
         } else if (
-          currentItem.question.question_type === "multiple_choice" &&
+          isMultiSelectChoiceQuestion(currentItem.question) &&
           currentAnswer.selectedOptionIds.length > 0
         ) {
           e.preventDefault();
@@ -963,7 +1065,8 @@ export function CustomPracticeClient() {
 
       if (
         !currentAnswer.isSubmitted &&
-        currentItem.question.question_type !== "short_answer"
+        currentItem.question.question_type !== "short_answer" &&
+        !isStructuredV3Question(currentItem.question)
       ) {
         const num = Number(e.key);
         if (
@@ -1002,6 +1105,7 @@ export function CustomPracticeClient() {
     navSheetOpen,
     optionLightbox,
     phase,
+    shortcutsEnabled,
     submitCurrentAnswer,
   ]);
 
@@ -1581,14 +1685,7 @@ export function CustomPracticeClient() {
                       <div className="flex flex-wrap gap-2">
                         {ALL_PRACTICE_TYPES.map((qtype) => {
                           const active = selectedTypes.includes(qtype);
-                          const label =
-                            qtype === "single_choice"
-                              ? lText(locale, "1 đáp án", "Single Choice")
-                              : qtype === "multiple_choice"
-                                ? lText(locale, "Nhiều đáp án", "Multiple Choice")
-                                : qtype === "true_false"
-                                  ? lText(locale, "Đúng / Sai", "True / False")
-                                  : lText(locale, "Tự luận ngắn", "Short Answer");
+                          const label = getPracticeTypeLabel(qtype, locale);
                           return (
                             <button
                               key={qtype}
@@ -1596,7 +1693,7 @@ export function CustomPracticeClient() {
                               aria-pressed={active}
                               onClick={() => toggleTypeFilter(qtype)}
                               className={cn(
-                                "rounded-md border px-3 py-1 text-xs font-medium transition-colors",
+                                "min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors sm:min-h-8 sm:py-1",
                                 active
                                   ? "border-primary bg-primary/10 text-primary"
                                   : "border-border bg-card hover:bg-muted",
@@ -1923,18 +2020,20 @@ export function CustomPracticeClient() {
     );
   }
 
-  const isMultiCurrent =
-    q.question_type === "multiple_choice" ||
-    (q.type_payload?.type === "image_choice" &&
-      q.type_payload.selection_mode === "multiple");
+  const isMultiCurrent = isMultiSelectChoiceQuestion(q);
   const isImageChoiceLayout = q.question_type === "image_choice";
+  const isCurrentStructuredV3 = isStructuredV3Question(q);
 
   const submittedValues = Object.values(answers).filter((a) => a.isSubmitted);
   const liveCorrect = submittedValues.filter((a) => a.isCorrect).length;
   const liveWrong = submittedValues.length - liveCorrect;
   const isStarred = starredIds.has(q.id);
-  const expectedWriteAnswers =
-    q.question_type === "short_answer" ? getExpectedWriteAnswers(q) : [];
+  const formattedCorrectAnswer = formatCorrectAnswerDisplay(q, locale);
+  const shouldDisplayExplanation =
+    showExplanation &&
+    Boolean(q.explanation || q.explanation_rich) &&
+    (!currentAnswer.isCorrect ||
+      (mcPrefs?.show_explanation_on_correct ?? true));
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4 pb-20 lg:pb-6">
@@ -2060,17 +2159,14 @@ export function CustomPracticeClient() {
                       <Badge variant="outline">{q.chapter}</Badge>
                     ) : null}
                     <Badge variant="outline" className="text-[11px]">
-                      {q.question_type === "multiple_choice"
-                        ? lText(locale, "Chọn nhiều đáp án", "Multiple Choice")
-                        : q.question_type === "image_choice"
-                          ? lText(locale, "Chọn đáp án hình ảnh", "Image Choice")
-                          : q.question_type === "true_false"
-                            ? lText(locale, "Đúng / Sai", "True / False")
-                            : q.question_type === "short_answer"
-                              ? lText(locale, "Tự luận ngắn", "Short Answer")
-                              : lText(locale, "Trắc nghiệm", "Single Choice")}
+                      {q.question_type === "flashcard"
+                        ? lText(locale, "Thẻ ghi nhớ", "Flashcard")
+                        : getPracticeTypeLabel(q.question_type, locale)}
                     </Badge>
                   </div>
+
+                  {/* Reading passage / Listening audio context (V32-020 FUNC-08) */}
+                  <QuestionContextMedia question={q} />
 
                   {/* Question Prompt (RichText + KaTeX + Zoomable Lightbox + Audio) */}
                   <div className="space-y-3">
@@ -2090,7 +2186,11 @@ export function CustomPracticeClient() {
                         )}
                       />
                     ) : null}
-                    {q.audio_url ? (
+                    {q.audio_url &&
+                    !(
+                      q.type_payload?.type === "listening" &&
+                      q.type_payload.audio_url === q.audio_url
+                    ) ? (
                       <AudioPlayer
                         src={q.audio_url}
                         transcript={q.audio_transcript}
@@ -2120,12 +2220,40 @@ export function CustomPracticeClient() {
                       }))
                     }
                     keyboardMode={
-                      q.question_type === "short_answer" ? "letters" : "none"
+                      q.question_type === "short_answer" ||
+                      isCurrentStructuredV3
+                        ? "letters"
+                        : "none"
                     }
                   />
 
                   {/* Answer Area */}
-                  {q.question_type === "short_answer" ? (
+                  {isCurrentStructuredV3 ? (
+                    <V3StructuredPracticeControls
+                      key={q.id}
+                      question={q}
+                      disabled={currentAnswer.isSubmitted}
+                      value={currentAnswer.structuredResponse ?? null}
+                      onChange={(nextResp) => {
+                        if (currentAnswer.isSubmitted) return;
+                        setAnswers((prev) => ({
+                          ...prev,
+                          [q.id]: {
+                            ...(prev[q.id] ?? {
+                              selectedOptionIds: [],
+                              typedAnswer: "",
+                              isSubmitted: false,
+                              isCorrect: false,
+                            }),
+                            structuredResponse: nextResp,
+                          },
+                        }));
+                      }}
+                      onSubmit={(submittedResp) =>
+                        submitCurrentAnswer(undefined, submittedResp)
+                      }
+                    />
+                  ) : q.question_type === "short_answer" ? (
                     <div className="space-y-3">
                       <Input
                         value={currentAnswer.typedAnswer}
@@ -2200,10 +2328,10 @@ export function CustomPracticeClient() {
                           if (revealed) {
                             if (isCorrectOpt) {
                               toneClass =
-                                "border-success bg-success-subtle/70 text-foreground";
+                                "border-2 border-success bg-success-subtle text-foreground ring-1 ring-success/25";
                             } else if (isSelected && !isCorrectOpt) {
                               toneClass =
-                                "border-destructive bg-destructive-subtle/70 text-foreground";
+                                "border-2 border-destructive bg-destructive-subtle text-foreground";
                             } else {
                               toneClass =
                                 "border-border bg-card opacity-70";
@@ -2385,18 +2513,18 @@ export function CustomPracticeClient() {
                       </div>
 
                       {!currentAnswer.isCorrect &&
-                      q.question_type === "short_answer" &&
-                      expectedWriteAnswers.length > 0 ? (
+                      (q.question_type === "short_answer" ||
+                        isCurrentStructuredV3) &&
+                      formattedCorrectAnswer ? (
                         <p className="text-xs">
                           <span className="font-medium">
                             {lText(locale, "Đáp án đúng: ", "Accepted answer: ")}
                           </span>
-                          {expectedWriteAnswers.join(" / ")}
+                          {formattedCorrectAnswer}
                         </p>
                       ) : null}
 
-                      {showExplanation &&
-                      (q.explanation || q.explanation_rich) ? (
+                      {shouldDisplayExplanation ? (
                         <div className="border-t border-border/50 pt-2 text-xs leading-relaxed text-foreground/90">
                           <span className="font-semibold">
                             {lText(locale, "Giải thích: ", "Explanation: ")}

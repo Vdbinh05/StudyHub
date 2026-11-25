@@ -42,7 +42,7 @@ import {
 } from "@/lib/learning/api-client";
 import { planCoverageSeries } from "@/lib/learning/coverage-engine";
 import type { CoverageCycle } from "@/types/domain";
-import { getAllocationLabel } from "./ExamPresetsSection";
+import { getAllocationLabel } from "./exam-labels";
 
 interface CoverageCyclesSectionProps {
   compact?: boolean;
@@ -59,6 +59,7 @@ export function CoverageCyclesSection({
     "all" | "active" | "completed"
   >("all");
   const [busyCycleId, setBusyCycleId] = React.useState<string | null>(null);
+  const busyLockRef = React.useRef<boolean>(false);
   const [discardTarget, setDiscardTarget] =
     React.useState<CoverageCycle | null>(null);
   const [restartTarget, setRestartTarget] =
@@ -76,10 +77,15 @@ export function CoverageCyclesSection({
   const cycles = cyclesQuery.data ?? [];
 
   const handleIssueNextExam = async (cycle: CoverageCycle) => {
+    if (busyLockRef.current) return;
+    busyLockRef.current = true;
     setBusyCycleId(cycle.id);
     try {
       const payload = await issueCoverageNextExam(cycle.id);
-      await queryClient.invalidateQueries({ queryKey: ["coverage-cycles"] });
+      // Seed React Query caches before routing for 0ms exam hydration (PERF-04)
+      queryClient.setQueryData(["exam-attempt", payload.attempt.id], payload);
+      queryClient.setQueryData(["exam-attempt-live", payload.attempt.id], payload);
+      void queryClient.invalidateQueries({ queryKey: ["coverage-cycles"] });
       router.push(`/exams/${payload.attempt.id}`);
     } catch (err) {
       toast.error(
@@ -91,12 +97,14 @@ export function CoverageCyclesSection({
               "Could not generate the next exam for this cycle.",
             ),
       );
+      busyLockRef.current = false;
       setBusyCycleId(null);
     }
   };
 
   const handleConfirmDiscard = async () => {
-    if (!discardTarget) return;
+    if (!discardTarget || busyLockRef.current) return;
+    busyLockRef.current = true;
     setBusyCycleId(discardTarget.id);
     try {
       await discardCoverageActiveExam(discardTarget.id);
@@ -116,12 +124,14 @@ export function CoverageCyclesSection({
           : lText(locale, "Không thể hủy đề đang làm.", "Could not discard active exam."),
       );
     } finally {
+      busyLockRef.current = false;
       setBusyCycleId(null);
     }
   };
 
   const handleConfirmRestart = async () => {
-    if (!restartTarget) return;
+    if (!restartTarget || busyLockRef.current) return;
+    busyLockRef.current = true;
     setBusyCycleId(restartTarget.id);
     try {
       await restartCoverageCycleApi(restartTarget.id, {
@@ -144,12 +154,14 @@ export function CoverageCyclesSection({
           : lText(locale, "Không thể khởi động lại chu kỳ.", "Failed to restart cycle."),
       );
     } finally {
+      busyLockRef.current = false;
       setBusyCycleId(null);
     }
   };
 
   const handleConfirmDelete = async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget || busyLockRef.current) return;
+    busyLockRef.current = true;
     setBusyCycleId(deleteTarget.id);
     try {
       await deleteCoverageCycle(deleteTarget.id);
@@ -169,6 +181,7 @@ export function CoverageCyclesSection({
           : lText(locale, "Không thể xóa chu kỳ.", "Failed to delete cycle."),
       );
     } finally {
+      busyLockRef.current = false;
       setBusyCycleId(null);
     }
   };
@@ -193,7 +206,7 @@ export function CoverageCyclesSection({
               type="button"
               size="sm"
               variant={statusFilter === val ? "default" : "outline"}
-              className="min-h-9"
+              className="min-h-11 sm:min-h-9"
               aria-pressed={statusFilter === val}
               onClick={() => setStatusFilter(val)}
             >
@@ -325,7 +338,7 @@ export function CoverageCyclesSection({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="min-h-9"
+                        className="min-h-11 sm:min-h-9"
                         disabled={isBusy}
                         onClick={() => setRestartTarget(cycle)}
                       >
@@ -336,7 +349,7 @@ export function CoverageCyclesSection({
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="min-h-9 min-w-9 text-muted-foreground hover:text-destructive"
+                        className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 text-muted-foreground hover:text-destructive"
                         disabled={isBusy}
                         aria-label={lText(
                           locale,

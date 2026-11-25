@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -22,6 +21,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  broadcastAuthEvent,
+  purgeAllUserClientState,
+} from "@/lib/auth/client-session-cleanup";
 import { useI18n } from "@/lib/i18n";
 
 const GOOGLE_OAUTH_ENABLED =
@@ -174,7 +177,6 @@ function mapRegisterAuthError(
 export function RegisterForm() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
-  const router = useRouter();
 
   const [displayName, setDisplayName] = React.useState("");
   const [username, setUsername] = React.useState("");
@@ -276,11 +278,15 @@ export function RegisterForm() {
       }
 
       if (data.session) {
+        const nextUserId = data.user?.id ?? null;
+        await purgeAllUserClientState(null, nextUserId, { broadcast: false });
+        broadcastAuthEvent("account-switch", nextUserId);
         toast.success(
           vi ? "Tạo tài khoản thành công!" : "Account created successfully!",
         );
-        router.push("/dashboard");
-        router.refresh();
+        window.location.replace(
+          new URL("/dashboard", window.location.origin).toString(),
+        );
       } else {
         setVerificationSent(true);
       }

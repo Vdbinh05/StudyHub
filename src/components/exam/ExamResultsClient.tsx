@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   CheckCircle2,
@@ -71,6 +71,7 @@ import {
   issueCoverageNextExam,
   type ExamAttemptPayload,
 } from "@/lib/learning/api-client";
+import { dedupeQuestionMediaImages } from "@/lib/learning/answer-display";
 import { summarizeConfidenceCalibration } from "@/lib/learning/confidence";
 import { scoreExamAttempt } from "@/lib/learning/exam-scoring";
 import { indexToOptionLabel } from "@/lib/learning/shuffle";
@@ -178,6 +179,7 @@ export function ExamResultsClient({
   attemptId,
 }: ExamResultsClientProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { locale, t } = useI18n();
 
   const [reviewFilter, setReviewFilter] = React.useState<ReviewFilter>("all");
@@ -186,8 +188,11 @@ export function ExamResultsClient({
   const [breakdownTab, setBreakdownTab] = React.useState<
     "subject" | "chapter" | "tag"
   >("subject");
-  const [isRetaking, setIsRetaking] = React.useState(false);
+  const [isRetakingSameExam, setIsRetakingSameExam] = React.useState(false);
+  const [isCreatingMistakeExam, setIsCreatingMistakeExam] =
+    React.useState(false);
   const [isContinuingCoverage, setIsContinuingCoverage] = React.useState(false);
+  const actionLockRef = React.useRef(false);
   const [pdfDialogOpen, setPdfDialogOpen] = React.useState(false);
   const [pdfMode, setPdfMode] = React.useState<
     | "paper_and_key"
@@ -458,9 +463,9 @@ export function ExamResultsClient({
     overscan: 4,
   });
 
-  // Retake Exact Exam preserving ALL multi-subject sources & question IDs (fixes SH-023!)
+  // Retake Exact Exam preserving ALL multi-subject sources & question IDs (fixes SH-023 & FUNC-18(5)!)
   const handleRetakeSameExam = React.useCallback(async () => {
-    if (!attempt) return;
+    if (!attempt || actionLockRef.current) return;
     const sourceQuestionIds = questions
       .map((q) => q.question_id)
       .filter((id): id is string => Boolean(id));
@@ -475,7 +480,8 @@ export function ExamResultsClient({
       id,
     }));
 
-    setIsRetaking(true);
+    actionLockRef.current = true;
+    setIsRetakingSameExam(true);
     try {
       const created = await createExamAttempt({
         study_set_id: attempt.study_set_id ?? allSourceSetIds[0] ?? null,
@@ -493,18 +499,21 @@ export function ExamResultsClient({
         pass_threshold: attempt.pass_threshold,
         question_ids: sourceQuestionIds,
       });
+      queryClient.setQueryData(["exam-attempt", created.attempt.id], created);
+      queryClient.setQueryData(["exam-attempt-live", created.attempt.id], created);
       router.push(`/exams/${created.attempt.id}`);
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("common.errorGeneric"),
       );
-      setIsRetaking(false);
+      actionLockRef.current = false;
+      setIsRetakingSameExam(false);
     }
-  }, [allSourceSetIds, attempt, questions, router, t]);
+  }, [allSourceSetIds, attempt, queryClient, questions, router, t]);
 
-  // Create Test from Incorrect Questions via clean POST (NEVER 3,700-char `?questionIds=` URL!)
+  // Create Test from Incorrect/Unanswered Questions via clean POST (NEVER 3,700-char `?questionIds=` URL!)
   const handleCreateExamFromMistakes = React.useCallback(async () => {
-    if (!attempt) return;
+    if (!attempt || actionLockRef.current) return;
     const wrongSourceIds = questions
       .filter((q) => {
         const ans = answerMap.get(q.id);
@@ -525,7 +534,8 @@ export function ExamResultsClient({
       id,
     }));
 
-    setIsRetaking(true);
+    actionLockRef.current = true;
+    setIsCreatingMistakeExam(true);
     try {
       const created = await createExamAttempt({
         study_set_id: attempt.study_set_id ?? allSourceSetIds[0] ?? null,
@@ -534,8 +544,8 @@ export function ExamResultsClient({
         sources: sources.length > 0 ? sources : undefined,
         title: lText(
           locale,
-          `Thi lại câu sai (${wrongSourceIds.length} câu) — ${attempt.study_set_title_snapshot}`,
-          `Mistakes Retest (${wrongSourceIds.length}Q) — ${attempt.study_set_title_snapshot}`,
+          `Thi lại câu sai & chưa làm (${wrongSourceIds.length} câu) — ${attempt.study_set_title_snapshot}`,
+          `Missed & Unanswered Retest (${wrongSourceIds.length}Q) — ${attempt.study_set_title_snapshot}`,
         ),
         question_count: wrongSourceIds.length,
         duration_limit_seconds: null,
@@ -547,20 +557,38 @@ export function ExamResultsClient({
         pass_threshold: attempt.pass_threshold,
         question_ids: wrongSourceIds,
       });
+      queryClient.setQueryData(["exam-attempt", created.attempt.id], created);
+      queryClient.setQueryData(["exam-attempt-live", created.attempt.id], created);
       router.push(`/exams/${created.attempt.id}`);
     } catch {
-      setIsRetaking(false);
+      actionLockRef.current = false;
+      setIsCreatingMistakeExam(false);
       // Fallback cleanly to Builder seeded by attemptId (short URL!)
       router.push(`/exams/new?sourceAttemptId=${attempt.id}&mode=mistakes`);
     }
-  }, [allSourceSetIds, answerMap, attempt, locale, perQuestionStatusMap, questions, router]);
+  }, [
+    allSourceSetIds,
+    answerMap,
+    attempt,
+    locale,
+    perQuestionStatusMap,
+    queryClient,
+    questions,
+    router,
+  ]);
 
   const handleContinueCoverage = React.useCallback(async () => {
     const cycleId = attempt?.coverage_cycle_id;
-    if (!cycleId) return;
+    if (!cycleId || actionLockRef.current) return;
+    actionLockRef.current = true;
     setIsContinuingCoverage(true);
     try {
       const nextExam = await issueCoverageNextExam(cycleId);
+      queryClient.setQueryData(["exam-attempt", nextExam.attempt.id], nextExam);
+      queryClient.setQueryData(
+        ["exam-attempt-live", nextExam.attempt.id],
+        nextExam,
+      );
       router.push(`/exams/${nextExam.attempt.id}`);
     } catch (err) {
       toast.error(
@@ -572,10 +600,11 @@ export function ExamResultsClient({
               "Opening Coverage Cycles dashboard for details.",
             ),
       );
+      actionLockRef.current = false;
       router.push("/exams/new?tab=coverage");
       setIsContinuingCoverage(false);
     }
-  }, [attempt?.coverage_cycle_id, locale, router]);
+  }, [attempt?.coverage_cycle_id, locale, queryClient, router]);
 
   if (resultQuery.isLoading) {
     return (
@@ -680,7 +709,7 @@ export function ExamResultsClient({
 
                 <h2 className="text-3xl font-bold tracking-tight tabular-nums">
                   {Number(attempt.score_percent).toFixed(2)}%{" "}
-                  <span className="text-base font-normal text-muted-foreground">
+                  <span className="inline-block whitespace-nowrap text-base font-normal text-muted-foreground">
                     ({attempt.correct_count} / {attempt.total_questions}{" "}
                     {lText(locale, "câu đúng", "correct")})
                   </span>
@@ -692,13 +721,17 @@ export function ExamResultsClient({
                 </p>
               </div>
 
-              {/* Action Buttons (ZERO 3,700-char `?questionIds=` URLs!) */}
+              {/* Action Buttons (independent loading spinners + accurate labels — RU-16!) */}
               <div className="flex flex-wrap gap-2">
                 {attempt.coverage_cycle_id ? (
                   <Button
                     type="button"
-                    className="min-h-10"
-                    disabled={isContinuingCoverage}
+                    className="min-h-11 sm:min-h-10"
+                    disabled={
+                      isContinuingCoverage ||
+                      isCreatingMistakeExam ||
+                      isRetakingSameExam
+                    }
                     onClick={() => void handleContinueCoverage()}
                   >
                     {isContinuingCoverage ? (
@@ -718,21 +751,41 @@ export function ExamResultsClient({
                   <Button
                     type="button"
                     variant={attempt.coverage_cycle_id ? "outline" : "default"}
-                    className="min-h-10"
-                    disabled={isRetaking}
+                    className="min-h-11 sm:min-h-10"
+                    disabled={
+                      isCreatingMistakeExam ||
+                      isRetakingSameExam ||
+                      isContinuingCoverage
+                    }
                     onClick={() => void handleCreateExamFromMistakes()}
                   >
-                    <Play className="size-4" aria-hidden="true" />
-                    {lText(
-                      locale,
-                      `Tạo đề từ ${wrongAndMissedCount} câu sai`,
-                      `Create Test from ${wrongAndMissedCount} Missed`,
+                    {isCreatingMistakeExam ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Play className="size-4" aria-hidden="true" />
                     )}
+                    {attempt.wrong_count > 0 && attempt.unanswered_count > 0
+                      ? lText(
+                          locale,
+                          `Tạo đề từ ${wrongAndMissedCount} câu sai & chưa làm`,
+                          `Create Test from ${wrongAndMissedCount} Wrong & Unanswered`,
+                        )
+                      : attempt.unanswered_count > 0
+                        ? lText(
+                            locale,
+                            `Tạo đề từ ${wrongAndMissedCount} câu chưa làm`,
+                            `Create Test from ${wrongAndMissedCount} Unanswered`,
+                          )
+                        : lText(
+                            locale,
+                            `Tạo đề từ ${wrongAndMissedCount} câu sai`,
+                            `Create Test from ${wrongAndMissedCount} Wrong`,
+                          )}
                   </Button>
                 ) : null}
 
                 {weakestSubject?.study_set_id ? (
-                  <Button variant="secondary" className="min-h-10" asChild>
+                  <Button variant="secondary" className="min-h-11 sm:min-h-10" asChild>
                     <Link
                       href={`/practice?setId=${weakestSubject.study_set_id}`}
                     >
@@ -745,11 +798,15 @@ export function ExamResultsClient({
                 <Button
                   type="button"
                   variant="outline"
-                  className="min-h-10"
-                  disabled={isRetaking}
+                  className="min-h-11 sm:min-h-10"
+                  disabled={
+                    isRetakingSameExam ||
+                    isCreatingMistakeExam ||
+                    isContinuingCoverage
+                  }
                   onClick={() => void handleRetakeSameExam()}
                 >
-                  {isRetaking ? (
+                  {isRetakingSameExam ? (
                     <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                   ) : (
                     <RotateCcw className="size-4" aria-hidden="true" />
@@ -757,7 +814,7 @@ export function ExamResultsClient({
                   {lText(locale, "Làm lại chính xác đề này", "Retake Exact Exam")}
                 </Button>
 
-                <Button variant="outline" className="min-h-10" asChild>
+                <Button variant="outline" className="min-h-11 sm:min-h-10" asChild>
                   <Link href={`/exams/new?cloneAttemptId=${attempt.id}`}>
                     <Shuffle className="size-4" aria-hidden="true" />
                     {lText(locale, "Tạo đề ngẫu nhiên mới", "Generate New Random Exam")}
@@ -767,7 +824,7 @@ export function ExamResultsClient({
                 <Button
                   type="button"
                   variant="outline"
-                  className="min-h-10"
+                  className="min-h-11 sm:min-h-10"
                   onClick={() => setPdfDialogOpen(true)}
                 >
                   <FileDown className="size-4" aria-hidden="true" />
@@ -899,17 +956,17 @@ export function ExamResultsClient({
                 </CardTitle>
 
                 <div className="overflow-x-auto">
-                  <TabsList className="inline-flex w-max flex-nowrap">
-                    <TabsTrigger value="subject">
+                  <TabsList className="inline-flex h-auto w-max flex-nowrap p-1">
+                    <TabsTrigger value="subject" className="min-h-11 sm:min-h-9">
                       {lText(locale, "Theo môn học", "By Subject")} (
                       {subjectBreakdown.length})
                     </TabsTrigger>
-                    <TabsTrigger value="chapter">
+                    <TabsTrigger value="chapter" className="min-h-11 sm:min-h-9">
                       {lText(locale, "Theo chương", "By Chapter")} (
                       {chapterBreakdown.length})
                     </TabsTrigger>
                     {tagBreakdown.length > 0 ? (
-                      <TabsTrigger value="tag">
+                      <TabsTrigger value="tag" className="min-h-11 sm:min-h-9">
                         {lText(locale, "Theo thẻ", "By Tag")} (
                         {tagBreakdown.length})
                       </TabsTrigger>
@@ -1158,20 +1215,20 @@ export function ExamResultsClient({
                   className="max-w-full"
                 >
                   <div className="overflow-x-auto pb-1">
-                    <TabsList className="inline-flex w-max flex-nowrap">
-                      <TabsTrigger value="all" className="shrink-0">
+                    <TabsList className="inline-flex h-auto w-max flex-nowrap p-1">
+                      <TabsTrigger value="all" className="min-h-11 sm:min-h-9 shrink-0">
                         {t("common.all")} ({questions.length})
                       </TabsTrigger>
-                      <TabsTrigger value="incorrect" className="shrink-0">
+                      <TabsTrigger value="incorrect" className="min-h-11 sm:min-h-9 shrink-0">
                         {lText(locale, "Câu sai", "Incorrect")} ({attempt.wrong_count})
                       </TabsTrigger>
-                      <TabsTrigger value="unanswered" className="shrink-0">
+                      <TabsTrigger value="unanswered" className="min-h-11 sm:min-h-9 shrink-0">
                         {t("exam.unanswered")} ({attempt.unanswered_count})
                       </TabsTrigger>
-                      <TabsTrigger value="flagged" className="shrink-0">
+                      <TabsTrigger value="flagged" className="min-h-11 sm:min-h-9 shrink-0">
                         {lText(locale, "Đánh dấu", "Marked")} ({flaggedCount})
                       </TabsTrigger>
-                      <TabsTrigger value="correct" className="shrink-0">
+                      <TabsTrigger value="correct" className="min-h-11 sm:min-h-9 shrink-0">
                         {t("study.correct")} ({attempt.correct_count})
                       </TabsTrigger>
                     </TabsList>
@@ -1368,34 +1425,49 @@ export function ExamResultsClient({
                                 className="text-base font-medium leading-relaxed"
                               />
 
-                              <div className="flex flex-wrap gap-2">
-                                <ZoomableImage
-                                  src={q.prompt_image_url_snapshot}
-                                  alt={lText(
-                                    locale,
-                                    "Hình ảnh câu hỏi",
-                                    "Question illustration",
-                                  )}
-                                  className="max-h-56"
-                                  lazy
-                                />
-                                {(q.media_snapshot ?? [])
-                                  .filter(
-                                    (m) =>
-                                      m.mime_type.startsWith("image/") &&
-                                      isSafeDisplayImageUrl(m.proxy_url),
-                                  )
-                                  .map((m) => (
-                                    <ZoomableImage
-                                      key={m.media_id}
-                                      src={m.proxy_url}
-                                      alt={m.alt_text ?? ""}
-                                      caption={m.caption}
-                                      className="max-h-44"
-                                      lazy
-                                    />
-                                  ))}
-                              </div>
+                              {(() => {
+                                const rawImgAttachments = (q.media_snapshot ?? []).filter(
+                                  (m) =>
+                                    m.mime_type.startsWith("image/") &&
+                                    isSafeDisplayImageUrl(m.proxy_url),
+                                );
+                                const { promptImageUrl: dedupPromptImg, attachments: dedupAttachments } =
+                                  dedupeQuestionMediaImages(
+                                    isSafeDisplayImageUrl(q.prompt_image_url_snapshot)
+                                      ? q.prompt_image_url_snapshot
+                                      : null,
+                                    rawImgAttachments,
+                                  );
+                                if (!dedupPromptImg && dedupAttachments.length === 0) {
+                                  return null;
+                                }
+                                return (
+                                  <div className="flex flex-wrap gap-2">
+                                    {dedupPromptImg ? (
+                                      <ZoomableImage
+                                        src={dedupPromptImg}
+                                        alt={lText(
+                                          locale,
+                                          "Hình ảnh câu hỏi",
+                                          "Question illustration",
+                                        )}
+                                        className="max-h-56"
+                                        lazy
+                                      />
+                                    ) : null}
+                                    {dedupAttachments.map((m) => (
+                                      <ZoomableImage
+                                        key={m.media_id}
+                                        src={m.proxy_url}
+                                        alt={m.alt_text ?? ""}
+                                        caption={m.caption}
+                                        className="max-h-44"
+                                        lazy
+                                      />
+                                    ))}
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             {q.question_type === "short_answer" ||

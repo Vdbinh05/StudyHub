@@ -8,6 +8,7 @@ import type {
   StudyMode,
   UserQuestionProgress,
 } from "@/types/domain";
+import { isMissingRpcError, rpcRecordProgressAnswer } from "./rpc";
 
 const MIN_EASE_FACTOR = 1.3;
 const MAX_EASE_FACTOR = 4.0;
@@ -162,6 +163,35 @@ export async function upsertQuestionProgress(
     responseTimeMs = null,
     overrides,
   } = params;
+
+  // DB-02 (Migration 0019): Atomic FOR UPDATE PostgreSQL RPC prevents concurrent RMW lost updates
+  const { data: rpcProgress, error: rpcErr } = await rpcRecordProgressAnswer(
+    supabase,
+    {
+      p_question_id: questionId,
+      p_study_set_id: studySetId,
+      p_is_correct: isCorrect,
+      p_self_rating: selfRating ?? null,
+      p_confidence: confidence ?? null,
+      p_hint_used: hintUsed,
+      p_mode: mode ?? null,
+      p_response_time_ms: responseTimeMs,
+      p_override_mastery_level: overrides?.mastery_level ?? null,
+      p_override_mistake_status: overrides?.mistake_status ?? null,
+      p_override_ease_factor: overrides?.ease_factor ?? null,
+      p_override_interval_days: overrides?.interval_days ?? null,
+      p_override_repetitions: overrides?.repetitions ?? null,
+      p_override_next_review_at:
+        overrides?.next_review_at !== undefined ? overrides.next_review_at : null,
+      p_has_override_next_review_at: overrides?.next_review_at !== undefined,
+    },
+  );
+  if (!rpcErr && rpcProgress) {
+    return rpcProgress as unknown as UserQuestionProgress;
+  }
+  if (rpcErr && !isMissingRpcError(rpcErr)) {
+    throw rpcErr;
+  }
 
   const [{ data: existing, error: fetchErr }, { data: prefRow }] =
     await Promise.all([

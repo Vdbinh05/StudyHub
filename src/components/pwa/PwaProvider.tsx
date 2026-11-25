@@ -2,10 +2,12 @@
 
 import * as React from "react";
 import { usePathname } from "next/navigation";
+import { QueryClientContext } from "@tanstack/react-query";
 import { RefreshCw, ShieldAlert, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useOptionalI18n } from "@/lib/i18n";
 import type { SyncQueueSummary, SyncRunOutcome } from "@/lib/offline/sync-queue";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 
 const ACTIVE_USER_POINTER_KEY = "studyhub-offline-active-user";
 
@@ -70,6 +72,44 @@ export function isActiveExamRoutePath(pathname: string | null | undefined): bool
     if (segment && segment !== "new") {
       return true;
     }
+  }
+  return false;
+}
+
+/**
+ * Detect dedicated live exam attempt runner routes (`/exams/[attemptId]`) which render
+ * their own server-authoritative offline banner and header sync pill.
+ */
+export function isLiveExamAttemptRoutePath(
+  pathname: string | null | undefined,
+): boolean {
+  if (!pathname) return false;
+  if (/^\/exams\/([^/]+)$/.test(pathname)) {
+    const segment = pathname.split("/")[2];
+    return Boolean(segment && segment !== "new");
+  }
+  return false;
+}
+
+/**
+ * Detect focus study & exam routes where mobile offline status must stay compact and
+ * non-stacking (`V32-035` / `RU-12`).
+ */
+export function isFocusStudyOrExamRoutePath(
+  pathname: string | null | undefined,
+): boolean {
+  if (!pathname) return false;
+  if (isActiveExamRoutePath(pathname)) return true;
+  if (pathname === "/exams" || pathname.startsWith("/exams/")) return true;
+  if (
+    /^\/sets\/[^/]+\/(practice|flashcards|learn|write|spell|match|diagrams)(?:\/|$)/.test(
+      pathname,
+    )
+  ) {
+    return true;
+  }
+  if (/^\/diagrams\/[^/]+\/study(?:\/|$)/.test(pathname)) {
+    return true;
   }
   return false;
 }
@@ -261,6 +301,7 @@ export function PwaProvider({
 }: PwaProviderProps) {
   const pathname = usePathname();
   const i18n = useOptionalI18n();
+  const queryClient = React.useContext(QueryClientContext);
   const locale = i18n?.locale ?? "vi";
 
   const isOnline = React.useSyncExternalStore(
@@ -283,6 +324,7 @@ export function PwaProvider({
     [detectedPlatform, installedOverride],
   );
 
+  const hasExplicitUserId = explicitUserId !== undefined;
   const [deferredPrompt, setDeferredPrompt] =
     React.useState<BeforeInstallPromptEvent | null>(null);
   const [installOutcome, setInstallOutcome] = React.useState<
@@ -293,23 +335,49 @@ export function PwaProvider({
     null,
   );
   const [examLockManual, setExamLockManual] = React.useState(false);
-  const [resolvedUserId, setResolvedUserId] = React.useState<string | null>(
-    () => explicitUserId ?? readStoredActiveUserId(),
+  const [resolvedUserId, setResolvedUserId] = React.useState<string | null>(() =>
+    hasExplicitUserId ? explicitUserId : readStoredActiveUserId(),
   );
-  const [syncSummaryState, setSyncSummaryState] =
-    React.useState<SyncQueueSummary | null>(null);
+  const [syncSummaryEntry, setSyncSummaryEntry] = React.useState<{
+    userId: string;
+    summary: SyncQueueSummary;
+  } | null>(null);
   const [isSyncing, setIsSyncing] = React.useState(false);
   const [offlineRevision, setOfflineRevision] = React.useState(0);
 
-  const prevUserIdRef = React.useRef<string | null>(
-    explicitUserId ?? readStoredActiveUserId(),
-  );
+  // Initialize from stored pointer so an account transition on fresh mount (userA -> userB)
+  // ALWAYS closes userA's IndexedDB handle before opening userB's partition (`SEC-01`).
+  const prevUserIdRef = React.useRef<string | null>(readStoredActiveUserId());
+  const partitionSwitchPromiseRef = React.useRef<Promise<void>>(Promise.resolve());
   const reloadingForUpdateRef = React.useRef(false);
 
-  const activeUserId = explicitUserId !== undefined ? explicitUserId : resolvedUserId;
-  const syncSummary = activeUserId ? syncSummaryState : null;
+  // Strictly trust server-verified explicitUserId when provided (never fall back to stale localStorage)
+  const activeUserId = hasExplicitUserId ? explicitUserId : resolvedUserId;
+  // User-tagged syncSummary derivation prevents any 1-frame cross-account flash (`SEC-01`)
+  const syncSummary =
+    activeUserId && syncSummaryEntry?.userId === activeUserId
+      ? syncSummaryEntry.summary
+      : null;
+  const pendingSyncCount = syncSummary?.pendingCount ?? 0;
   const isExamActive = examLockManual || isActiveExamRoutePath(pathname);
+  const isUpdateDeferred = isExamActive || pendingSyncCount > 0;
   const updateAvailable = waitingWorker !== null;
+
+  const activeUserIdRef = React.useRef<string | null>(activeUserId);
+  const isExamActiveRef = React.useRef<boolean>(isExamActive);
+  const pendingSyncCountRef = React.useRef<number>(pendingSyncCount);
+
+  React.useEffect(() => {
+    activeUserIdRef.current = activeUserId;
+  }, [activeUserId]);
+
+  React.useEffect(() => {
+    isExamActiveRef.current = isExamActive;
+  }, [isExamActive]);
+
+  React.useEffect(() => {
+    pendingSyncCountRef.current = pendingSyncCount;
+  }, [pendingSyncCount]);
 
   // Capture beforeinstallprompt & appinstalled lifecycle events
   React.useEffect(() => {
@@ -337,7 +405,7 @@ export function PwaProvider({
   }, []);
 
   // Register Service Worker (`/sw.js`) deferred until window load + idle so SW startup
-  // never competes with FCP/LCP on mobile (never auto-skipWaiting).
+  // never competes with FCP/LCP on mobile (never auto-skipWaiting; clean listener teardown for MEM-03).
   React.useEffect(() => {
     if (
       typeof window === "undefined" ||
@@ -348,9 +416,16 @@ export function PwaProvider({
     }
 
     let cancelled = false;
+    let activeRegistration: ServiceWorkerRegistration | null = null;
+    let handleUpdateFound: (() => void) | null = null;
+    const installingCleanups = new Set<() => void>();
 
     const handleControllerChange = () => {
-      if (reloadingForUpdateRef.current) {
+      if (
+        reloadingForUpdateRef.current &&
+        !isExamActiveRef.current &&
+        pendingSyncCountRef.current === 0
+      ) {
         window.location.reload();
       }
     };
@@ -359,6 +434,37 @@ export function PwaProvider({
       "controllerchange",
       handleControllerChange,
     );
+
+    const attachInstallingListener = (installing: ServiceWorker | null) => {
+      if (!installing || cancelled) return;
+      const handleStateChange = () => {
+        if (cancelled) return;
+        if (
+          installing.state === "installed" &&
+          navigator.serviceWorker.controller
+        ) {
+          setWaitingWorker(installing);
+        }
+        if (
+          installing.state === "installed" ||
+          installing.state === "redundant"
+        ) {
+          if (typeof installing.removeEventListener === "function") {
+            installing.removeEventListener("statechange", handleStateChange);
+          }
+          installingCleanups.delete(cleanup);
+        }
+      };
+      const cleanup = () => {
+        if (typeof installing.removeEventListener === "function") {
+          installing.removeEventListener("statechange", handleStateChange);
+        }
+      };
+      installingCleanups.add(cleanup);
+      if (typeof installing.addEventListener === "function") {
+        installing.addEventListener("statechange", handleStateChange);
+      }
+    };
 
     const cancelDeferred = scheduleAfterLoadIdle(() => {
       if (cancelled) return;
@@ -372,18 +478,20 @@ export function PwaProvider({
             setWaitingWorker(registration.waiting);
           }
 
-          registration.addEventListener("updatefound", () => {
-            const installing = registration.installing;
-            if (!installing) return;
-            installing.addEventListener("statechange", () => {
-              if (
-                installing.state === "installed" &&
-                navigator.serviceWorker.controller
-              ) {
-                setWaitingWorker(installing);
-              }
-            });
-          });
+          if (registration.installing) {
+            attachInstallingListener(registration.installing);
+          }
+
+          const onUpdateFound = () => {
+            if (cancelled) return;
+            attachInstallingListener(registration.installing);
+          };
+
+          activeRegistration = registration;
+          handleUpdateFound = onUpdateFound;
+          if (typeof registration.addEventListener === "function") {
+            registration.addEventListener("updatefound", onUpdateFound);
+          }
         })
         .catch(() => {
           // Non-fatal in unsupported dev contexts or private windows
@@ -397,6 +505,17 @@ export function PwaProvider({
         "controllerchange",
         handleControllerChange,
       );
+      if (
+        activeRegistration &&
+        handleUpdateFound &&
+        typeof activeRegistration.removeEventListener === "function"
+      ) {
+        activeRegistration.removeEventListener("updatefound", handleUpdateFound);
+      }
+      for (const cleanupInstalling of installingCleanups) {
+        cleanupInstalling();
+      }
+      installingCleanups.clear();
     };
   }, []);
 
@@ -408,18 +527,23 @@ export function PwaProvider({
     let cancelIdleDb: (() => void) | null = null;
 
     if (explicitUserId !== undefined) {
-      const prev = prevUserIdRef.current;
+      const prev = prevUserIdRef.current ?? readStoredActiveUserId();
       prevUserIdRef.current = explicitUserId;
       writeStoredActiveUserId(explicitUserId);
-      if (prev !== explicitUserId && (prev || explicitUserId)) {
-        // Immediate account switch isolation (P0 security guarantee)
-        void import("@/lib/offline/db").then(
-          async ({ setActiveOfflineUserId, switchOfflineUser }) => {
-            if (!mounted) return;
+
+      if (prev && prev !== explicitUserId) {
+        // Immediate account switch isolation (P0 security guarantee — SEC-01):
+        // close userA's IndexedDB handle BEFORE opening userB's DB or scheduling syncNow().
+        const switchTask = import("@/lib/offline/db")
+          .then(async ({ setActiveOfflineUserId, switchOfflineUser }) => {
             await switchOfflineUser(prev, explicitUserId);
+            if (!mounted) return;
             setActiveOfflineUserId(explicitUserId);
-          },
-        );
+            setSyncSummaryEntry(null);
+            setOfflineRevision((r) => r + 1);
+          })
+          .catch(() => undefined);
+        partitionSwitchPromiseRef.current = switchTask;
       } else if (explicitUserId) {
         // Same account as stored pointer — defer IndexedDB module activation to idle
         cancelIdleDb = scheduleAfterLoadIdle(() => {
@@ -429,6 +553,7 @@ export function PwaProvider({
           });
         }, 2500);
       }
+
       return () => {
         mounted = false;
         cancelIdleDb?.();
@@ -436,6 +561,10 @@ export function PwaProvider({
     }
 
     const storedPointer = readStoredActiveUserId();
+    if (storedPointer) {
+      prevUserIdRef.current = storedPointer;
+    }
+
     const skipClientAuthBootstrap =
       isPublicUnauthRoutePath(pathname) && !storedPointer;
 
@@ -471,8 +600,13 @@ export function PwaProvider({
               const nextId = data.user?.id ?? null;
               const prev = prevUserIdRef.current;
               if (prev && prev !== nextId) {
-                await switchOfflineUser(prev, nextId);
+                const switchTask = switchOfflineUser(prev, nextId).catch(
+                  () => undefined,
+                );
+                partitionSwitchPromiseRef.current = switchTask;
+                await switchTask;
               }
+              if (!mounted) return;
               prevUserIdRef.current = nextId;
               setResolvedUserId(nextId);
               setActiveOfflineUserId(nextId);
@@ -491,8 +625,11 @@ export function PwaProvider({
             const prev = prevUserIdRef.current;
             prevUserIdRef.current = null;
             setResolvedUserId(null);
-            setSyncSummaryState(null);
-            void clearOfflineDataForLogout(prev);
+            setSyncSummaryEntry(null);
+            const clearTask = clearOfflineDataForLogout(prev).catch(
+              () => undefined,
+            );
+            partitionSwitchPromiseRef.current = clearTask;
             setOfflineRevision((r) => r + 1);
             return;
           }
@@ -501,7 +638,10 @@ export function PwaProvider({
           if (nextId && nextId !== prevUserIdRef.current) {
             const prev = prevUserIdRef.current;
             prevUserIdRef.current = nextId;
-            void switchOfflineUser(prev, nextId);
+            const switchTask = switchOfflineUser(prev, nextId).catch(
+              () => undefined,
+            );
+            partitionSwitchPromiseRef.current = switchTask;
             setResolvedUserId(nextId);
             setActiveOfflineUserId(nextId);
             writeStoredActiveUserId(nextId);
@@ -526,13 +666,20 @@ export function PwaProvider({
 
   const refreshOfflineState = React.useCallback(async () => {
     if (!activeUserId) {
-      setSyncSummaryState(null);
+      setSyncSummaryEntry(null);
       return;
     }
     try {
+      await partitionSwitchPromiseRef.current;
+      if (activeUserIdRef.current !== activeUserId) {
+        return;
+      }
       const { getSyncQueueSummary } = await import("@/lib/offline/sync-queue");
       const summary = await getSyncQueueSummary(activeUserId);
-      setSyncSummaryState(summary);
+      if (activeUserIdRef.current !== activeUserId) {
+        return;
+      }
+      setSyncSummaryEntry({ userId: activeUserId, summary });
       setOfflineRevision((r) => r + 1);
     } catch {
       // IndexedDB unavailable or private mode
@@ -546,8 +693,18 @@ export function PwaProvider({
       }
       setIsSyncing(true);
       try {
+        await partitionSwitchPromiseRef.current;
+        if (activeUserIdRef.current !== activeUserId || !getOnlineSnapshot()) {
+          return null;
+        }
         const { syncPendingEvents } = await import("@/lib/offline/sync-queue");
         const outcome = await syncPendingEvents(activeUserId, { force });
+        if (activeUserIdRef.current !== activeUserId) {
+          return outcome;
+        }
+        if (outcome.appliedCount > 0 && queryClient) {
+          await invalidateLearningCaches(queryClient);
+        }
         await refreshOfflineState();
         return outcome;
       } catch {
@@ -556,7 +713,7 @@ export function PwaProvider({
         setIsSyncing(false);
       }
     },
-    [activeUserId, refreshOfflineState],
+    [activeUserId, queryClient, refreshOfflineState],
   );
 
   // Load initial sync summary & auto-sync when online or returning to foreground (deferred to idle)
@@ -569,11 +726,15 @@ export function PwaProvider({
     const cancelDeferred = scheduleAfterLoadIdle(() => {
       void (async () => {
         try {
+          await partitionSwitchPromiseRef.current;
+          if (!active || activeUserIdRef.current !== activeUserId) return;
           const { getSyncQueueSummary } = await import("@/lib/offline/sync-queue");
           const summary = await getSyncQueueSummary(activeUserId);
-          if (!active) return;
-          setSyncSummaryState(summary);
-          if (isOnline && summary.pendingCount > 0) {
+          if (!active || activeUserIdRef.current !== activeUserId) return;
+          setSyncSummaryEntry({ userId: activeUserId, summary });
+          const hasAutoSyncablePending =
+            summary.pendingCount > summary.authRequiredCount;
+          if (isOnline && hasAutoSyncablePending) {
             await syncNow(false);
           }
         } catch {
@@ -586,7 +747,7 @@ export function PwaProvider({
       if (
         document.visibilityState === "visible" &&
         getOnlineSnapshot() &&
-        activeUserId
+        activeUserIdRef.current === activeUserId
       ) {
         void syncNow(false);
       }
@@ -618,18 +779,19 @@ export function PwaProvider({
   }, [deferredPrompt]);
 
   const applyAppUpdate = React.useCallback(() => {
-    if (!waitingWorker || isExamActive) {
+    if (!waitingWorker || isExamActive || pendingSyncCount > 0) {
       return;
     }
     reloadingForUpdateRef.current = true;
     waitingWorker.postMessage({ type: "APPLY_UPDATE" });
-  }, [waitingWorker, isExamActive]);
+  }, [waitingWorker, isExamActive, pendingSyncCount]);
 
   const clearCurrentUserOfflineData = React.useCallback(async () => {
     if (!activeUserId) return;
+    await partitionSwitchPromiseRef.current;
     const { clearUserOfflineData } = await import("@/lib/offline/db");
     await clearUserOfflineData(activeUserId);
-    setSyncSummaryState(null);
+    setSyncSummaryEntry(null);
     setOfflineRevision((r) => r + 1);
   }, [activeUserId]);
 
@@ -678,41 +840,71 @@ export function PwaProvider({
   );
 
   const vi = locale === "vi";
+  const isOfflineHubRoute = pathname === "/offline";
+  const isLiveExamRoute = isLiveExamAttemptRoutePath(pathname);
+  const isCompactFocusRoute = isFocusStudyOrExamRoutePath(pathname);
+  const shouldRenderOfflineBanner =
+    !hideBanners && !isOnline && !isOfflineHubRoute && !isLiveExamRoute;
 
   return (
     <PwaContext.Provider value={contextValue}>
-      {!hideBanners && !isOnline && (
-        <div
-          role="status"
-          aria-live="polite"
-          data-testid="pwa-offline-banner"
-          className="border-warning/30 bg-warning-subtle text-warning-subtle-foreground border-b px-4 py-2 text-xs sm:text-sm"
-        >
-          <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <WifiOff className="size-4 shrink-0" aria-hidden="true" />
-              <span className="truncate font-medium">
-                {i18n
-                  ? i18n.t("pwa.offlineBanner")
-                  : vi
-                    ? "Bạn đang ngoại tuyến — các học phần đã tải vẫn sẵn sàng để luyện tập."
-                    : "You are offline — downloaded study sets remain available for practice."}
+      {shouldRenderOfflineBanner &&
+        (isCompactFocusRoute ? (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="pwa-offline-banner"
+            data-variant="compact"
+            className="border-warning/30 bg-warning-subtle text-warning-subtle-foreground border-b px-3 py-1 text-xs"
+          >
+            <div className="mx-auto flex max-w-6xl items-center justify-center gap-2">
+              <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="font-medium">
+                {vi ? "Ngoại tuyến" : "Offline"}
               </span>
+              {pendingSyncCount > 0 && (
+                <span className="tabular-nums opacity-90">
+                  ·{" "}
+                  {vi
+                    ? `${pendingSyncCount} chờ đồng bộ`
+                    : `${pendingSyncCount} pending sync`}
+                </span>
+              )}
             </div>
-            {syncSummary && syncSummary.pendingCount > 0 && (
-              <span className="shrink-0 font-medium tabular-nums">
-                {i18n
-                  ? i18n.t("pwa.pendingSyncCount", {
-                      count: syncSummary.pendingCount,
-                    })
-                  : vi
-                    ? `${syncSummary.pendingCount} mục chờ đồng bộ`
-                    : `${syncSummary.pendingCount} pending sync`}
-              </span>
-            )}
           </div>
-        </div>
-      )}
+        ) : (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="pwa-offline-banner"
+            data-variant="standard"
+            className="border-warning/30 bg-warning-subtle text-warning-subtle-foreground border-b px-4 py-2 text-xs sm:text-sm"
+          >
+            <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <WifiOff className="size-4 shrink-0" aria-hidden="true" />
+                <span className="truncate font-medium">
+                  {i18n
+                    ? i18n.t("pwa.offlineBanner")
+                    : vi
+                      ? "Bạn đang ngoại tuyến — các học phần đã tải vẫn sẵn sàng để luyện tập."
+                      : "You are offline — downloaded study sets remain available for practice."}
+                </span>
+              </div>
+              {pendingSyncCount > 0 && (
+                <span className="shrink-0 font-medium tabular-nums">
+                  {i18n
+                    ? i18n.t("pwa.pendingSyncCount", {
+                        count: pendingSyncCount,
+                      })
+                    : vi
+                      ? `${pendingSyncCount} mục chờ đồng bộ`
+                      : `${pendingSyncCount} pending sync`}
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
 
       {!hideBanners && updateAvailable && (
         <div
@@ -723,7 +915,7 @@ export function PwaProvider({
         >
           <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
-              {isExamActive ? (
+              {isUpdateDeferred ? (
                 <ShieldAlert className="size-4 shrink-0" aria-hidden="true" />
               ) : (
                 <RefreshCw className="size-4 shrink-0" aria-hidden="true" />
@@ -743,15 +935,19 @@ export function PwaProvider({
                       : vi
                         ? "Bản cập nhật sẽ được áp dụng sau khi bạn nộp bài thi hiện tại."
                         : "The update will be applied after you finish your active exam."
-                    : i18n
-                      ? i18n.t("pwa.updateAvailableDesc")
-                      : vi
-                        ? "Tải lại ứng dụng để áp dụng các cải tiến mới nhất."
-                        : "Reload the app to apply the latest improvements."}
+                    : pendingSyncCount > 0
+                      ? vi
+                        ? `Bản cập nhật đang tạm hoãn để đồng bộ an toàn ${pendingSyncCount} mục ngoại tuyến trước.`
+                        : `Update paused until ${pendingSyncCount} pending offline item(s) finish syncing.`
+                      : i18n
+                        ? i18n.t("pwa.updateAvailableDesc")
+                        : vi
+                          ? "Tải lại ứng dụng để áp dụng các cải tiến mới nhất."
+                          : "Reload the app to apply the latest improvements."}
                 </p>
               </div>
             </div>
-            {!isExamActive && (
+            {!isUpdateDeferred && (
               <Button size="sm" onClick={applyAppUpdate}>
                 <RefreshCw className="size-3.5" aria-hidden="true" />
                 {i18n

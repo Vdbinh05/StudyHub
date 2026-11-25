@@ -1,11 +1,16 @@
 import { z } from "zod";
 import {
   exportStudySetToPdf,
+  formatStructuredExamResponseForPdf,
   type PdfEmbeddedImage,
   type PdfExportOption,
   type PdfExportQuestion,
 } from "@/lib/export/pdf-exporter";
-import { chunkArray, sanitizeFileName } from "@/lib/import/text-utils";
+import {
+  chunkArray,
+  mapWithConcurrency,
+  sanitizeFileName,
+} from "@/lib/import/text-utils";
 import { inspectRasterImageBytes } from "@/lib/import/zip-guard";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import { apiError, handleApiError, parseJsonBody } from "@/lib/security/errors";
@@ -17,7 +22,11 @@ import { streamBinaryResponse } from "@/lib/security/stream-response";
 import { stripPreSubmitQuestions } from "@/lib/supabase/exam-engine";
 import { rpcGetExamAttemptDetail } from "@/lib/supabase/rpc";
 import type { QuestionType } from "@/types/domain";
-import type { QuestionTypePayload, RichTextDoc } from "@/types/v3";
+import type {
+  QuestionTypePayload,
+  RichTextDoc,
+  StructuredAnswerResponse,
+} from "@/types/v3";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -26,6 +35,7 @@ const MAX_PDF_REQUEST_BYTES = 256 * 1024;
 const PAGE_SIZE = 1000;
 const IN_QUERY_CHUNK_SIZE = 120;
 const MAX_TOTAL_EMBED_IMAGE_BYTES = 14 * 1024 * 1024;
+const PDF_CONCURRENCY_LIMIT = 6;
 
 const ExportPdfBodySchema = z
   .object({
@@ -118,48 +128,99 @@ export async function POST(request: Request) {
     let embeddedImageBytesTotal = 0;
     const imageCache = new Map<string, PdfEmbeddedImage | null>();
 
-    const fetchEmbeddedImage = async (
+    /**
+     * Bound-parallelized Storage image loader (`concurrency = 6`, DB-10) with
+     * deterministic document-order byte budget enforcement and explicit WebP/GIF
+     * caption markers so legacy images never silently disappear (FUNC-21).
+     */
+    const preloadStorageImages = async (
+      urls: readonly (string | null | undefined)[],
+    ): Promise<void> => {
+      if (!body.includeImages || urls.length === 0) return;
+
+      const uniquePaths: string[] = [];
+      const seenPaths = new Set<string>();
+      for (const url of urls) {
+        const storagePath = extractSafeStoragePath(url);
+        if (!storagePath || imageCache.has(storagePath) || seenPaths.has(storagePath)) {
+          continue;
+        }
+        seenPaths.add(storagePath);
+        uniquePaths.push(storagePath);
+      }
+
+      if (uniquePaths.length === 0) return;
+
+      const downloaded = await mapWithConcurrency(
+        uniquePaths,
+        PDF_CONCURRENCY_LIMIT,
+        async (
+          storagePath,
+        ): Promise<{ storagePath: string; entry: PdfEmbeddedImage | null }> => {
+          try {
+            const { data: blob, error } = await supabase.storage
+              .from("study-media")
+              .download(storagePath);
+            if (error || !blob) {
+              return { storagePath, entry: null };
+            }
+            const ab = await blob.arrayBuffer();
+            const bytes = new Uint8Array(ab);
+            const check = inspectRasterImageBytes(bytes);
+            if (!check.valid) {
+              return { storagePath, entry: null };
+            }
+            if (check.mime === "image/webp" || check.mime === "image/gif") {
+              return {
+                storagePath,
+                entry: {
+                  bytes: new Uint8Array(0),
+                  mimeType: check.mime,
+                  unsupportedFormatNote: true,
+                },
+              };
+            }
+            if (check.mime === "image/png" || check.mime === "image/jpeg") {
+              return {
+                storagePath,
+                entry: {
+                  bytes,
+                  mimeType: check.mime,
+                },
+              };
+            }
+            return { storagePath, entry: null };
+          } catch {
+            return { storagePath, entry: null };
+          }
+        },
+      );
+
+      for (const { storagePath, entry } of downloaded) {
+        if (!entry) {
+          imageCache.set(storagePath, null);
+          continue;
+        }
+        if (entry.unsupportedFormatNote) {
+          imageCache.set(storagePath, entry);
+          continue;
+        }
+        if (embeddedImageBytesTotal + entry.bytes.byteLength > MAX_TOTAL_EMBED_IMAGE_BYTES) {
+          imageCache.set(storagePath, null);
+          continue;
+        }
+        embeddedImageBytesTotal += entry.bytes.byteLength;
+        imageCache.set(storagePath, entry);
+      }
+    };
+
+    const getCachedEmbeddedImage = (
       url: string | null | undefined,
-    ): Promise<PdfEmbeddedImage | null> => {
+    ): PdfEmbeddedImage | null => {
       if (!body.includeImages || !url) return null;
       const storagePath = extractSafeStoragePath(url);
       if (!storagePath) return null;
-      if (imageCache.has(storagePath)) return imageCache.get(storagePath) ?? null;
-      if (embeddedImageBytesTotal >= MAX_TOTAL_EMBED_IMAGE_BYTES) return null;
-
-      try {
-        const { data: blob, error } = await supabase.storage
-          .from("study-media")
-          .download(storagePath);
-        if (error || !blob) {
-          imageCache.set(storagePath, null);
-          return null;
-        }
-        const ab = await blob.arrayBuffer();
-        const bytes = new Uint8Array(ab);
-        const check = inspectRasterImageBytes(bytes);
-        if (
-          !check.valid ||
-          (check.mime !== "image/png" && check.mime !== "image/jpeg")
-        ) {
-          imageCache.set(storagePath, null);
-          return null;
-        }
-        if (embeddedImageBytesTotal + bytes.byteLength > MAX_TOTAL_EMBED_IMAGE_BYTES) {
-          imageCache.set(storagePath, null);
-          return null;
-        }
-        embeddedImageBytesTotal += bytes.byteLength;
-        const result: PdfEmbeddedImage = {
-          bytes,
-          mimeType: check.mime,
-        };
-        imageCache.set(storagePath, result);
-        return result;
-      } catch {
-        imageCache.set(storagePath, null);
-        return null;
-      }
+      return imageCache.get(storagePath) ?? null;
     };
 
     let exportTitle = body.title?.trim() ?? "";
@@ -210,26 +271,44 @@ export async function POST(request: Request) {
         ? stripPreSubmitQuestions(attemptDetail.questions ?? [])
         : [...(attemptDetail.questions ?? [])].sort((a, b) => a.position - b.position);
 
+      // Bound-parallel preload of all unique Storage images referenced by attempt snapshots (DB-10)
+      const attemptImageUrls: Array<string | null | undefined> = [];
+      for (const row of snapshotQuestions) {
+        const typePayload = (row.type_payload_snapshot as QuestionTypePayload | null) ?? null;
+        attemptImageUrls.push(row.prompt_image_url_snapshot);
+        if (
+          !row.prompt_image_url_snapshot &&
+          typePayload?.type === "image_hotspot" &&
+          typePayload.image_url
+        ) {
+          attemptImageUrls.push(typePayload.image_url);
+        }
+        const rawOpts = Array.isArray(row.options_snapshot) ? row.options_snapshot : [];
+        for (const opt of rawOpts) {
+          attemptImageUrls.push(opt.image_url);
+        }
+      }
+      await preloadStorageImages(attemptImageUrls);
+
       for (const row of snapshotQuestions) {
         const rawOpts = Array.isArray(row.options_snapshot) ? row.options_snapshot : [];
         const correctIdSet = new Set(
           isUnsubmitted ? [] : (row.correct_option_ids ?? []),
         );
-        const mappedOptions: PdfExportOption[] = [];
-        for (let i = 0; i < rawOpts.length; i += 1) {
-          const opt = rawOpts[i];
-          const optImage = await fetchEmbeddedImage(opt.image_url);
-          mappedOptions.push({
-            id: opt.id,
-            label: opt.label || String.fromCharCode(65 + i),
-            content: opt.content ?? "",
-            contentRich: (opt.content_rich as RichTextDoc | null | undefined) ?? null,
-            isCorrect: isUnsubmitted ? false : correctIdSet.has(opt.id),
-            image: optImage,
-          });
-        }
+        const mappedOptions: PdfExportOption[] = rawOpts.map((opt, i) => ({
+          id: opt.id,
+          label: opt.label || String.fromCharCode(65 + i),
+          content: opt.content ?? "",
+          contentRich: (opt.content_rich as RichTextDoc | null | undefined) ?? null,
+          isCorrect: isUnsubmitted ? false : correctIdSet.has(opt.id),
+          image: getCachedEmbeddedImage(opt.image_url),
+        }));
 
-        const promptImg = await fetchEmbeddedImage(row.prompt_image_url_snapshot);
+        const typePayload = (row.type_payload_snapshot as QuestionTypePayload | null) ?? null;
+        const primaryImageUrl =
+          row.prompt_image_url_snapshot ||
+          (typePayload?.type === "image_hotspot" ? typePayload.image_url : null);
+        const promptImg = getCachedEmbeddedImage(primaryImageUrl);
         const accepted =
           !isUnsubmitted && Array.isArray(row.accepted_answers_snapshot)
             ? row.accepted_answers_snapshot
@@ -245,6 +324,12 @@ export async function POST(request: Request) {
                 .map((o) => o.label)
                 .join(", ")
             : null;
+        const structuredText = formatStructuredExamResponseForPdf(
+          (userAnswer?.structured_response as StructuredAnswerResponse | null | undefined) ?? null,
+          typePayload,
+          mappedOptions,
+          body.locale === "vi",
+        );
 
         const passageObj = row.passage_snapshot ?? null;
 
@@ -261,11 +346,13 @@ export async function POST(request: Request) {
           passageId: passageObj?.id ?? null,
           passageTitle: passageObj?.title ?? null,
           passageContent: passageObj?.content_text ?? null,
-          typePayload: (row.type_payload_snapshot as QuestionTypePayload | null) ?? null,
+          typePayload,
           options: mappedOptions,
           acceptedAnswers: accepted,
           promptImages: promptImg ? [promptImg] : [],
-          userResponseText: selectedLabels || userAnswer?.typed_answer || null,
+          userResponseText: isUnsubmitted
+            ? null
+            : selectedLabels || userAnswer?.typed_answer?.trim() || structuredText || null,
           wasCorrect: isUnsubmitted ? null : (userAnswer?.is_correct ?? null),
         });
       }
@@ -285,15 +372,8 @@ export async function POST(request: Request) {
         );
       }
 
-      const { data: setRow, error: setErr } = await supabase
-        .from("study_sets")
-        .select("id, title, subject")
-        .eq("id", body.studySetId)
-        .single();
-      if (setErr) throw setErr;
-
-      exportTitle = exportTitle || setRow.title;
-      exportSubject = exportSubject || setRow.subject || undefined;
+      exportTitle = exportTitle || access.studySet.title;
+      exportSubject = exportSubject || access.studySet.subject || undefined;
 
       const selectedIdSet = body.questionIds ? new Set(body.questionIds) : null;
 
@@ -345,63 +425,114 @@ export async function POST(request: Request) {
 
       const qIds = filteredQuestions.map((q) => q.id);
 
-      // Chunked option & accepted-answer & passage fetches (<= 120 UUIDs per .in())
-      const optionsByQ = new Map<string, PdfExportOption[]>();
-      const acceptedByQ = new Map<string, string[]>();
-      const passagesById = new Map<string, { title: string | null; content: string }>();
+      // Bound-parallel chunked passage, option & accepted-answer fetches (<= 120 UUIDs per .in(), concurrency = 6)
+      type RawOptionRow = {
+        id: string;
+        question_id: string;
+        position: number;
+        label: string;
+        content: string;
+        content_rich: unknown;
+        image_url: string | null;
+        is_correct: boolean;
+      };
 
       const uniquePassageIds = Array.from(
         new Set(filteredQuestions.map((q) => q.passage_id).filter((id): id is string => Boolean(id))),
       );
+      const qIdChunks = chunkArray(qIds, IN_QUERY_CHUNK_SIZE);
 
-      for (const pChunk of chunkArray(uniquePassageIds, IN_QUERY_CHUNK_SIZE)) {
-        const { data: pRows } = await supabase
-          .from("shared_passages")
-          .select("id, title, content_text")
-          .in("id", pChunk);
-        for (const p of pRows ?? []) {
+      const [passageChunks, optionChunks, acceptedChunks] = await Promise.all([
+        mapWithConcurrency(
+          chunkArray(uniquePassageIds, IN_QUERY_CHUNK_SIZE),
+          PDF_CONCURRENCY_LIMIT,
+          async (pChunk) => {
+            const { data: pRows, error: pErr } = await supabase
+              .from("shared_passages")
+              .select("id, title, content_text")
+              .in("id", pChunk);
+            if (pErr) throw pErr;
+            return pRows ?? [];
+          },
+        ),
+        mapWithConcurrency(qIdChunks, PDF_CONCURRENCY_LIMIT, async (idChunk) => {
+          const { data: optRows, error: optErr } = await supabase
+            .from("question_options")
+            .select("id, question_id, position, label, content, content_rich, image_url, is_correct")
+            .in("question_id", idChunk)
+            .order("position", { ascending: true });
+          if (optErr) throw optErr;
+          return (optRows ?? []) as RawOptionRow[];
+        }),
+        mapWithConcurrency(qIdChunks, PDF_CONCURRENCY_LIMIT, async (idChunk) => {
+          const { data: accRows, error: accErr } = await supabase
+            .from("question_accepted_answers")
+            .select("question_id, answer_text")
+            .in("question_id", idChunk);
+          if (accErr) throw accErr;
+          return accRows ?? [];
+        }),
+      ]);
+
+      const passagesById = new Map<string, { title: string | null; content: string }>();
+      for (const pRows of passageChunks) {
+        for (const p of pRows) {
           passagesById.set(p.id, { title: p.title, content: p.content_text });
         }
       }
 
-      for (const idChunk of chunkArray(qIds, IN_QUERY_CHUNK_SIZE)) {
-        const { data: optRows, error: optErr } = await supabase
-          .from("question_options")
-          .select("id, question_id, position, label, content, content_rich, image_url, is_correct")
-          .in("question_id", idChunk)
-          .order("position", { ascending: true });
-        if (optErr) throw optErr;
-
-        for (const opt of optRows ?? []) {
-          const list = optionsByQ.get(opt.question_id) ?? [];
-          const optImg = await fetchEmbeddedImage(opt.image_url);
-          list.push({
-            id: opt.id,
-            label: opt.label,
-            content: opt.content,
-            contentRich: (opt.content_rich as RichTextDoc | null) ?? null,
-            isCorrect: opt.is_correct,
-            image: optImg,
-          });
-          optionsByQ.set(opt.question_id, list);
+      const rawOptionsByQ = new Map<string, RawOptionRow[]>();
+      for (const optRows of optionChunks) {
+        for (const opt of optRows) {
+          const list = rawOptionsByQ.get(opt.question_id) ?? [];
+          list.push(opt);
+          rawOptionsByQ.set(opt.question_id, list);
         }
+      }
 
-        const { data: accRows, error: accErr } = await supabase
-          .from("question_accepted_answers")
-          .select("question_id, answer_text")
-          .in("question_id", idChunk);
-        if (accErr) throw accErr;
-
-        for (const acc of accRows ?? []) {
+      const acceptedByQ = new Map<string, string[]>();
+      for (const accRows of acceptedChunks) {
+        for (const acc of accRows) {
           const list = acceptedByQ.get(acc.question_id) ?? [];
           list.push(acc.answer_text);
           acceptedByQ.set(acc.question_id, list);
         }
       }
 
+      // Collect all unique Storage image URLs in document order and preload with concurrency = 6 (DB-10)
+      const setImageUrls: Array<string | null | undefined> = [];
       for (const q of filteredQuestions) {
-        const promptImg = await fetchEmbeddedImage(q.prompt_image_url);
+        const typePayload = (q.type_payload as QuestionTypePayload | null) ?? null;
+        setImageUrls.push(q.prompt_image_url);
+        if (
+          !q.prompt_image_url &&
+          typePayload?.type === "image_hotspot" &&
+          typePayload.image_url
+        ) {
+          setImageUrls.push(typePayload.image_url);
+        }
+        for (const opt of rawOptionsByQ.get(q.id) ?? []) {
+          setImageUrls.push(opt.image_url);
+        }
+      }
+      await preloadStorageImages(setImageUrls);
+
+      for (const q of filteredQuestions) {
+        const typePayload = (q.type_payload as QuestionTypePayload | null) ?? null;
+        const primaryImageUrl =
+          q.prompt_image_url ||
+          (typePayload?.type === "image_hotspot" ? typePayload.image_url : null);
+        const promptImg = getCachedEmbeddedImage(primaryImageUrl);
         const passage = q.passage_id ? passagesById.get(q.passage_id) : undefined;
+        const mappedOptions: PdfExportOption[] = (rawOptionsByQ.get(q.id) ?? []).map((opt) => ({
+          id: opt.id,
+          label: opt.label,
+          content: opt.content,
+          contentRich: (opt.content_rich as RichTextDoc | null) ?? null,
+          isCorrect: opt.is_correct,
+          image: getCachedEmbeddedImage(opt.image_url),
+        }));
+
         exportQuestions.push({
           id: q.id,
           questionType: q.question_type,
@@ -417,8 +548,8 @@ export async function POST(request: Request) {
           passageTitle: passage?.title ?? null,
           passageContent: passage?.content ?? null,
           audioTranscript: q.audio_transcript,
-          typePayload: (q.type_payload as QuestionTypePayload | null) ?? null,
-          options: optionsByQ.get(q.id) ?? [],
+          typePayload,
+          options: mappedOptions,
           acceptedAnswers: acceptedByQ.get(q.id) ?? [],
           promptImages: promptImg ? [promptImg] : [],
         });

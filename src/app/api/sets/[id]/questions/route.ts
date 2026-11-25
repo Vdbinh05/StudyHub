@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, requireStudySetAccess } from "@/lib/security/authz";
 import {
   apiSuccess,
+  AppError,
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
@@ -16,6 +17,12 @@ import {
   fetchQuestionRelationsChunked,
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcAllocateQuestionPosition,
+  rpcBumpStudySetContentVersion,
+  rpcGetStudySetQuestionsPage,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import {
   createQuestionSchema,
@@ -27,8 +34,9 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
+// DB-11: Lightweight summary projection — omits heavy TipTap *_rich JSONB blobs & explanations
 const QUESTION_SUMMARY_COLUMNS =
-  "id, study_set_id, question_type, position, chapter, prompt, prompt_rich, prompt_image_url, back_text, back_rich, back_image_url, explanation, explanation_rich, hint, audio_media_id, audio_url, passage_id, diagram_id, difficulty, created_at, updated_at";
+  "id, study_set_id, question_type, position, chapter, prompt, prompt_image_url, back_text, back_image_url, audio_media_id, audio_url, passage_id, diagram_id, difficulty, created_at, updated_at";
 
 export async function GET(
   request: NextRequest,
@@ -39,13 +47,49 @@ export async function GET(
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
-    await requireStudySetAccess(supabase, setId, user.id, "read");
-
     const rawParams = Object.fromEntries(request.nextUrl.searchParams.entries());
     const query = listQuestionsQuerySchema.parse(rawParams);
     const isSummaryMode =
       request.nextUrl.searchParams.get("fields")?.trim().toLowerCase() ===
       "summary";
+    const from = (query.page - 1) * query.pageSize;
+
+    // PERF-03 & DB-11 (Migration 0019): Single-RTT RPC replaces 4 sequential RTTs + strips heavy *_rich in summary mode
+    const { data: rpcPage, error: rpcErr } = await rpcGetStudySetQuestionsPage(
+      supabase,
+      {
+        p_set_id: setId,
+        p_fields: isSummaryMode ? "summary" : "full",
+        p_chapter: query.chapter ?? null,
+        p_difficulty: query.difficulty ?? null,
+        p_question_type: query.questionType ?? null,
+        p_search: query.search ?? null,
+        p_starred_only: Boolean(query.starredOnly),
+        p_tag_id: query.tagId ?? null,
+        p_page: query.page,
+        p_page_size: query.pageSize,
+      },
+    );
+
+    if (!rpcErr && rpcPage) {
+      const items = Array.isArray(rpcPage.items) ? rpcPage.items : [];
+      const total = Number(rpcPage.total ?? items.length);
+      return apiSuccess(items, {
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: from + items.length < total,
+      });
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      if (rpcErr.code === "P0002") {
+        throw new AppError("NOT_FOUND", "Study set not found.", 404);
+      }
+      throw rpcErr;
+    }
+
+    await requireStudySetAccess(supabase, setId, user.id, "read");
+
     const questionColumns = isSummaryMode ? QUESTION_SUMMARY_COLUMNS : "*";
 
     let filterIds: string[] | null = null;
@@ -96,7 +140,6 @@ export async function GET(
       }
     }
 
-    const from = (query.page - 1) * query.pageSize;
     const to = from + query.pageSize - 1;
     const escapedSearch = query.search ? sanitizePostgrestSearch(query.search) : "";
 
@@ -187,7 +230,7 @@ export async function GET(
             supabase
               .from("question_options")
               .select(
-                "id, question_id, study_set_id, position, label, content, content_rich, image_url, media_id, image_alt, is_correct, created_at",
+                "id, question_id, study_set_id, position, label, content, image_url, media_id, image_alt, is_correct, created_at",
               )
               .eq("study_set_id", setId)
               .in("question_id", chunk)
@@ -298,14 +341,20 @@ export async function POST(
 
     let position = input.position;
     if (position === undefined) {
-      const { data: lastQ } = await supabase
-        .from("questions")
-        .select("position")
-        .eq("study_set_id", setId)
-        .order("position", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      position = lastQ ? lastQ.position + 1 : 0;
+      const { data: allocatedPos, error: allocErr } =
+        await rpcAllocateQuestionPosition(supabase, setId);
+      if (!allocErr && allocatedPos !== null) {
+        position = allocatedPos;
+      } else {
+        const { data: lastQ } = await supabase
+          .from("questions")
+          .select("position")
+          .eq("study_set_id", setId)
+          .order("position", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        position = lastQ ? lastQ.position + 1 : 0;
+      }
     }
 
     const { data: created, error: createErr } = await supabase
@@ -383,17 +432,23 @@ export async function POST(
         if (mediaRelErr) throw mediaRelErr;
       }
 
-      // Bump study_sets.content_version for offline freshness detection
-      const { data: setVer } = await supabase
-        .from("study_sets")
-        .select("content_version")
-        .eq("id", setId)
-        .maybeSingle();
-      if (setVer) {
-        await supabase
+      // DB-02: Atomic SQL content_version increment (replaces RMW race)
+      const { error: bumpErr } = await rpcBumpStudySetContentVersion(
+        supabase,
+        setId,
+      );
+      if (bumpErr && isMissingRpcError(bumpErr)) {
+        const { data: setVer } = await supabase
           .from("study_sets")
-          .update({ content_version: (setVer.content_version ?? 1) + 1 })
-          .eq("id", setId);
+          .select("content_version")
+          .eq("id", setId)
+          .maybeSingle();
+        if (setVer) {
+          await supabase
+            .from("study_sets")
+            .update({ content_version: (setVer.content_version ?? 1) + 1 })
+            .eq("id", setId);
+        }
       }
 
       let insertedAccepted: unknown[] = [];

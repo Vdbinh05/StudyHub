@@ -93,7 +93,7 @@ export async function GET(): Promise<NextResponse> {
       fetchAllPages(async (from, to) =>
         supabase
           .from("user_question_progress")
-          .select("study_set_id, mastery_level, correct_count, wrong_count, next_review_at")
+          .select("study_set_id, mastery_level, correct_count, wrong_count, next_review_at, mistake_status")
           .eq("user_id", user.id)
           .range(from, to),
       ),
@@ -156,7 +156,13 @@ export async function GET(): Promise<NextResponse> {
     for (const p of progressRows) {
       if (p.mastery_level === "mastered") masteredCount += 1;
       if (p.next_review_at && p.next_review_at <= nowIso) dueCount += 1;
-      if (p.wrong_count > 0 && p.mastery_level !== "mastered") mistakeCount += 1;
+      if (
+        p.wrong_count > 0 &&
+        p.mastery_level !== "mastered" &&
+        (p.mistake_status ?? "active") !== "resolved"
+      ) {
+        mistakeCount += 1;
+      }
       totalCorrect += p.correct_count;
       totalWrong += p.wrong_count;
     }

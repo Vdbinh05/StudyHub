@@ -8,6 +8,10 @@ import {
 } from "@/lib/security/errors";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
 import { fetchQuestionRelationsChunked } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcBumpStudySetContentVersion,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import { updateQuestionSchema } from "@/lib/validation/questions";
 import type { Json, TablesUpdate } from "@/types/database";
@@ -388,16 +392,22 @@ export async function PATCH(
       }
     }
 
-    const { data: setVer } = await supabase
-      .from("study_sets")
-      .select("content_version")
-      .eq("id", setId)
-      .maybeSingle();
-    if (setVer) {
-      await supabase
+    const { error: bumpErr } = await rpcBumpStudySetContentVersion(
+      supabase,
+      setId,
+    );
+    if (bumpErr && isMissingRpcError(bumpErr)) {
+      const { data: setVer } = await supabase
         .from("study_sets")
-        .update({ content_version: (setVer.content_version ?? 1) + 1 })
-        .eq("id", setId);
+        .select("content_version")
+        .eq("id", setId)
+        .maybeSingle();
+      if (setVer) {
+        await supabase
+          .from("study_sets")
+          .update({ content_version: (setVer.content_version ?? 1) + 1 })
+          .eq("id", setId);
+      }
     }
 
     const [{ data: updated, error: fetchErr }, relations] = await Promise.all([
@@ -443,16 +453,22 @@ export async function DELETE(
       throw new AppError("NOT_FOUND", "Question not found.", 404);
     }
 
-    const { data: setVer } = await supabase
-      .from("study_sets")
-      .select("content_version")
-      .eq("id", setId)
-      .maybeSingle();
-    if (setVer) {
-      await supabase
+    const { error: bumpErr } = await rpcBumpStudySetContentVersion(
+      supabase,
+      setId,
+    );
+    if (bumpErr && isMissingRpcError(bumpErr)) {
+      const { data: setVer } = await supabase
         .from("study_sets")
-        .update({ content_version: (setVer.content_version ?? 1) + 1 })
-        .eq("id", setId);
+        .select("content_version")
+        .eq("id", setId)
+        .maybeSingle();
+      if (setVer) {
+        await supabase
+          .from("study_sets")
+          .update({ content_version: (setVer.content_version ?? 1) + 1 })
+          .eq("id", setId);
+      }
     }
 
     return apiSuccess({ deleted: true, id: qId });

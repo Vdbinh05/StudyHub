@@ -123,6 +123,94 @@ export async function fetchCycleSubjectProgress(
 }
 
 /**
+ * Computes live remaining/total counts excluding mid-cycle deleted questions (`question_id IS NULL`)
+ * and cleanly transitions wedged active cycles with 0 live unassigned/assigned questions to `completed` (V32-010 / FUNC-07).
+ */
+export async function computeLiveCoverageMetrics(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+  cycle: {
+    id: string;
+    status: string;
+    total_questions: number;
+    completed_count: number;
+    assigned_count: number;
+    active_attempt_id: string | null;
+    completed_at: string | null;
+  },
+  subjectProgress: readonly CoverageSubjectProgress[],
+  hasInProgressActiveAttempt: boolean,
+): Promise<{
+  status: CoverageCycle["status"];
+  completed_at: string | null;
+  assigned_count: number;
+  active_attempt_id: string | null;
+  remaining_count: number;
+  progress_percent: number;
+}> {
+  const liveRemaining =
+    subjectProgress.length > 0
+      ? subjectProgress.reduce((sum, s) => sum + Math.max(0, s.remaining), 0)
+      : Math.max(0, cycle.total_questions - cycle.completed_count - cycle.assigned_count);
+
+  const liveAssigned =
+    subjectProgress.length > 0
+      ? subjectProgress.reduce((sum, s) => sum + Math.max(0, s.assigned), 0)
+      : Math.max(0, cycle.assigned_count);
+
+  const liveCompleted =
+    subjectProgress.length > 0
+      ? subjectProgress.reduce((sum, s) => sum + Math.max(0, s.completed), 0)
+      : Math.max(0, cycle.completed_count);
+
+  let status = cycle.status as CoverageCycle["status"];
+  let completedAt = cycle.completed_at;
+  let activeAttemptId = cycle.active_attempt_id;
+  let assignedCount = liveAssigned;
+
+  if (
+    status === "active" &&
+    !hasInProgressActiveAttempt &&
+    liveRemaining === 0 &&
+    liveAssigned === 0
+  ) {
+    const nowIso = completedAt ?? new Date().toISOString();
+    await supabase
+      .from("coverage_cycles")
+      .update({
+        status: "completed",
+        completed_at: nowIso,
+        assigned_count: 0,
+        active_attempt_id: null,
+      })
+      .eq("id", cycle.id)
+      .eq("user_id", userId);
+
+    status = "completed";
+    completedAt = nowIso;
+    activeAttemptId = null;
+    assignedCount = 0;
+  }
+
+  const effectiveTotal = Math.max(0, liveCompleted + assignedCount + liveRemaining);
+  const progressPercent =
+    status === "completed"
+      ? 100
+      : effectiveTotal > 0
+        ? Math.round((liveCompleted / effectiveTotal) * 10000) / 100
+        : 0;
+
+  return {
+    status,
+    completed_at: completedAt,
+    assigned_count: assignedCount,
+    active_attempt_id: activeAttemptId,
+    remaining_count: liveRemaining,
+    progress_percent: progressPercent,
+  };
+}
+
+/**
  * Selects the next unassigned batch of questions for a coverage cycle respecting its
  * `allocation_strategy` and `questions_per_exam`, then issues the exam atomically via RPC.
  */
@@ -161,6 +249,28 @@ export async function issueNextExamForCycle(
   );
 
   if (unassigned.length === 0) {
+    // V32-010 / FUNC-07: If all remaining questions were deleted mid-cycle, transition cycle to `completed`
+    if (cycle.status === "active") {
+      const { count: assignedCount } = await supabase
+        .from("coverage_cycle_questions")
+        .select("id", { count: "exact", head: true })
+        .eq("cycle_id", cycle.id)
+        .eq("state", "assigned");
+
+      if ((assignedCount ?? 0) === 0) {
+        await supabase
+          .from("coverage_cycles")
+          .update({
+            status: "completed",
+            completed_at: cycle.completed_at ?? new Date().toISOString(),
+            assigned_count: 0,
+            active_attempt_id: null,
+          })
+          .eq("id", cycle.id)
+          .eq("user_id", userId);
+      }
+    }
+
     throw new AppError(
       "CYCLE_ALREADY_COMPLETED",
       "All questions in this coverage cycle have already been completed.",
@@ -312,6 +422,7 @@ export async function issueNextExamForCycle(
       p_title_snapshot: titleSnapshot,
       p_config: {
         ...filterCfg,
+        shuffle_options: shuffleOptions,
         question_count: selectedItems.length,
         duration_limit_seconds: durationLimitSeconds,
         pass_threshold: passThreshold,
@@ -330,6 +441,13 @@ export async function issueNextExamForCycle(
   );
 
   if (rpcErr) throw rpcErr;
+  if (issued?.already_completed) {
+    throw new AppError(
+      "CYCLE_ALREADY_COMPLETED",
+      "All questions in this coverage cycle have already been completed.",
+      409,
+    );
+  }
   if (!issued) {
     throw new AppError(
       "INTERNAL_ERROR",

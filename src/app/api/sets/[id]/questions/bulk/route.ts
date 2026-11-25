@@ -7,12 +7,20 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { normalizeAnswerText, slugifyTag } from "@/lib/security/sanitize";
 import {
   chunkArray,
   fetchInChunks,
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcBumpStudySetContentVersion,
+} from "@/lib/supabase/rpc";
 import { uuidSchema } from "@/lib/validation/common";
 import {
   bulkDeleteQuestionsSchema,
@@ -28,12 +36,39 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
+async function bumpContentVersionSafe(
+  supabase: Parameters<typeof rpcBumpStudySetContentVersion>[0],
+  setId: string,
+): Promise<void> {
+  const { error } = await rpcBumpStudySetContentVersion(supabase, setId);
+  if (error && isMissingRpcError(error)) {
+    const { data: setVer } = await supabase
+      .from("study_sets")
+      .select("content_version")
+      .eq("id", setId)
+      .maybeSingle();
+    if (setVer) {
+      await supabase
+        .from("study_sets")
+        .update({ content_version: (setVer.content_version ?? 1) + 1 })
+        .eq("id", setId);
+    }
+  }
+}
+
 export async function POST(
   request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.BULK_QUESTIONS,
+      user.id,
+    );
+    if (limited) return limited;
+
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
@@ -196,17 +231,7 @@ export async function POST(
       }
     }
 
-    const { data: setVer } = await supabase
-      .from("study_sets")
-      .select("content_version")
-      .eq("id", setId)
-      .maybeSingle();
-    if (setVer) {
-      await supabase
-        .from("study_sets")
-        .update({ content_version: (setVer.content_version ?? 1) + 1 })
-        .eq("id", setId);
-    }
+    await bumpContentVersionSafe(supabase, setId);
 
     return apiSuccess(
       {
@@ -227,6 +252,13 @@ export async function PATCH(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.BULK_QUESTIONS,
+      user.id,
+    );
+    if (limited) return limited;
+
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
@@ -321,6 +353,9 @@ export async function PATCH(
       }
     }
 
+    // V32-037 / DB-02: Bump study_sets.content_version atomically on bulk edits
+    await bumpContentVersionSafe(supabase, setId);
+
     return apiSuccess({
       updated_count: verifiedIds.length,
     });
@@ -335,6 +370,13 @@ export async function DELETE(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.BULK_QUESTIONS,
+      user.id,
+    );
+    if (limited) return limited;
+
     const { id } = await context.params;
     const setId = uuidSchema.parse(id);
 
@@ -356,6 +398,11 @@ export async function DELETE(
 
       if (error) throw error;
       deletedCount += (data ?? []).length;
+    }
+
+    // V32-037 / DB-02: Bump study_sets.content_version atomically on bulk deletes
+    if (deletedCount > 0) {
+      await bumpContentVersionSafe(supabase, setId);
     }
 
     return apiSuccess({

@@ -823,3 +823,148 @@ export async function saveOfflineNote(
 
   return updated;
 }
+
+// ============================================================================
+// Active Offline Session Persistence (Survives F5 Reload Offline — RU-19)
+// ============================================================================
+
+const ACTIVE_OFFLINE_SESSION_KEY = "studyhub-offline-active-session-v1";
+
+export interface ActiveOfflineSessionState {
+  userId: string;
+  setId: string;
+  mode: OfflineCapableMode;
+  questionIndex: number;
+}
+
+export function parseOfflineSessionHash(
+  hash: string | null | undefined,
+): Omit<ActiveOfflineSessionState, "userId"> | null {
+  if (!hash) return null;
+  const cleaned = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!cleaned) return null;
+  try {
+    const params = new URLSearchParams(cleaned);
+    const setId = params.get("set")?.trim() || "";
+    if (!setId) return null;
+    const rawMode = params.get("mode")?.trim() || "flashcards";
+    const mode: OfflineCapableMode = OFFLINE_SUPPORTED_MODES.has(rawMode)
+      ? (rawMode as OfflineCapableMode)
+      : "flashcards";
+    const rawQ = Number(params.get("q") ?? "0");
+    const questionIndex =
+      Number.isFinite(rawQ) && rawQ >= 0 ? Math.floor(rawQ) : 0;
+    return { setId, mode, questionIndex };
+  } catch {
+    return null;
+  }
+}
+
+export function formatOfflineSessionHash(
+  state: Omit<ActiveOfflineSessionState, "userId">,
+): string {
+  const params = new URLSearchParams();
+  params.set("set", state.setId);
+  params.set("mode", state.mode);
+  params.set("q", String(Math.max(0, Math.floor(state.questionIndex))));
+  return `#${params.toString()}`;
+}
+
+export function saveActiveOfflineSessionState(
+  state: ActiveOfflineSessionState,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      ACTIVE_OFFLINE_SESSION_KEY,
+      JSON.stringify({
+        userId: state.userId,
+        setId: state.setId,
+        mode: state.mode,
+        questionIndex: Math.max(0, Math.floor(state.questionIndex)),
+      }),
+    );
+  } catch {
+    // Ignore restricted sessionStorage
+  }
+  try {
+    const nextHash = formatOfflineSessionHash({
+      setId: state.setId,
+      mode: state.mode,
+      questionIndex: state.questionIndex,
+    });
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}${nextHash}`,
+      );
+    }
+  } catch {
+    // Ignore history API restrictions
+  }
+}
+
+export function loadActiveOfflineSessionState(
+  userId: string,
+): Omit<ActiveOfflineSessionState, "userId"> | null {
+  if (typeof window === "undefined" || !userId.trim()) return null;
+
+  const fromHash = parseOfflineSessionHash(window.location.hash);
+  if (fromHash) {
+    return fromHash;
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_OFFLINE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ActiveOfflineSessionState>;
+    if (
+      parsed.userId !== userId ||
+      typeof parsed.setId !== "string" ||
+      parsed.setId.trim().length === 0
+    ) {
+      return null;
+    }
+    const mode: OfflineCapableMode =
+      typeof parsed.mode === "string" && OFFLINE_SUPPORTED_MODES.has(parsed.mode)
+        ? (parsed.mode as OfflineCapableMode)
+        : "flashcards";
+    const questionIndex =
+      typeof parsed.questionIndex === "number" &&
+      Number.isFinite(parsed.questionIndex) &&
+      parsed.questionIndex >= 0
+        ? Math.floor(parsed.questionIndex)
+        : 0;
+    return {
+      setId: parsed.setId.trim(),
+      mode,
+      questionIndex,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearActiveOfflineSessionState(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(ACTIVE_OFFLINE_SESSION_KEY);
+  } catch {
+    // Ignore restricted sessionStorage
+  }
+  try {
+    if (window.location.hash || window.location.search.includes("setId=")) {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.hash = "";
+      nextUrl.searchParams.delete("setId");
+      window.history.replaceState(
+        null,
+        "",
+        `${nextUrl.pathname}${nextUrl.search}`,
+      );
+    }
+  } catch {
+    // Ignore history API restrictions
+  }
+}

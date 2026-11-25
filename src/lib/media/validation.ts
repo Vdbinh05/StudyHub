@@ -653,10 +653,83 @@ async function canvasToBlob(
   });
 }
 
+function mimeToImageExtension(mime: AllowedImageMime): AllowedImageExtension {
+  switch (mime) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+  }
+}
+
+function normalizeAllowedImageMime(rawMime: string | null | undefined): AllowedImageMime | null {
+  const normalized = (rawMime ?? "").trim().toLowerCase().split(";")[0];
+  if (normalized === "image/png") return "image/png";
+  if (normalized === "image/jpeg" || normalized === "image/jpg") return "image/jpeg";
+  if (normalized === "image/webp") return "image/webp";
+  if (normalized === "image/gif") return "image/gif";
+  return null;
+}
+
+/**
+ * Inspects whether a rendered 2D canvas contains any non-opaque pixel (`alpha < 255`).
+ * Defaults conservatively to `true` if `getImageData` is unavailable or throws so transparency
+ * is never silently flattened to black.
+ */
+function canvasHasTransparency(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): boolean {
+  try {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData?.data;
+    if (!data || data.length < 4) return true;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Resolves the ACTUAL encoded MIME & extension produced by `canvas.toBlob()`.
+ * Prevents Safari/WebKit fallback mismatches where requesting an unsupported encoder
+ * returns `image/png` bytes while callers stamp `.webp` (FUNC-29(4)).
+ */
+async function resolveActualEncodedFormat(
+  blob: Blob,
+  fallbackMime: AllowedImageMime,
+): Promise<{ mime: AllowedImageMime; ext: AllowedImageExtension }> {
+  const fromType = normalizeAllowedImageMime(blob.type);
+  if (fromType) {
+    return { mime: fromType, ext: mimeToImageExtension(fromType) };
+  }
+  try {
+    if (typeof blob.arrayBuffer === "function") {
+      const header = new Uint8Array(await blob.arrayBuffer());
+      const sniffed = detectImageMagicBytes(header);
+      if (sniffed) {
+        return { mime: sniffed.mime, ext: sniffed.ext };
+      }
+    }
+  } catch {
+    // Fall through to requested MIME
+  }
+  return { mime: fallbackMime, ext: mimeToImageExtension(fallbackMime) };
+}
+
 /**
  * Client-side Canvas resize/compress helper preserving technical diagram readability.
  * Validates magic bytes first, preserves animated GIFs and `preserveOriginal: true` untouched,
- * and falls back cleanly on SSR or non-canvas environments.
+ * outputs universally PDF- & Safari-compatible JPEG (opaque photos) or PNG (transparent/diagrams),
+ * and honors the actual `blob.type` returned by the browser encoder.
  */
 export async function optimizeImageForUpload(
   file: File,
@@ -691,9 +764,13 @@ export async function optimizeImageForUpload(
   const srcHeight = img.naturalHeight || parsedDims?.height || 1;
   const plan = computeTargetDimensions(srcWidth, srcHeight, options);
 
-  // Skip re-encoding if already within size & resolution targets and diagramMode wants crisp PNG
+  // Skip re-encoding if already within size & resolution targets for PDF-safe formats
   const alreadyCompact = !plan.resized && file.size <= 1.5 * 1024 * 1024;
-  if (alreadyCompact && (options.diagramMode || validation.detectedMime === "image/png")) {
+  if (
+    alreadyCompact &&
+    validation.detectedMime !== "image/webp" &&
+    (options.diagramMode || validation.detectedMime === "image/png")
+  ) {
     return {
       file,
       wasModified: false,
@@ -723,17 +800,40 @@ export async function optimizeImageForUpload(
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img, 0, 0, plan.width, plan.height);
 
-  const outputMime: AllowedImageMime =
-    options.diagramMode && (options.preferPngForDiagrams ?? true) && validation.detectedMime === "image/png"
-      ? "image/png"
-      : validation.detectedMime === "image/png"
-        ? "image/webp"
-        : validation.detectedMime;
+  // Choose universal PDF- & Safari-compatible format (FUNC-21 + FUNC-29(4)):
+  // - Diagrams with PNG preference -> PNG
+  // - Transparent images -> PNG (preserves alpha)
+  // - Opaque photos / opaque PNGs / opaque WebPs -> JPEG (compact + universal PDF & Safari support)
+  let requestedMime: AllowedImageMime;
+  if (
+    options.diagramMode &&
+    (options.preferPngForDiagrams ?? true) &&
+    validation.detectedMime === "image/png"
+  ) {
+    requestedMime = "image/png";
+  } else if (validation.detectedMime === "image/jpeg") {
+    requestedMime = "image/jpeg";
+  } else {
+    const hasAlpha = canvasHasTransparency(ctx, plan.width, plan.height);
+    requestedMime = hasAlpha ? "image/png" : "image/jpeg";
+  }
 
-  const quality = Math.min(1, Math.max(0.5, options.quality ?? (options.diagramMode ? 0.94 : 0.88)));
-  const blob = await canvasToBlob(canvas, outputMime, outputMime === "image/png" ? undefined : quality);
+  const quality = Math.min(
+    1,
+    Math.max(0.5, options.quality ?? (options.diagramMode ? 0.94 : 0.88)),
+  );
+  const blob = await canvasToBlob(
+    canvas,
+    requestedMime,
+    requestedMime === "image/png" ? undefined : quality,
+  );
 
-  if (!blob || (!plan.resized && blob.size >= file.size)) {
+  const isWebpTranscode = validation.detectedMime === "image/webp";
+  if (
+    !blob ||
+    blob.size > MAX_IMAGE_UPLOAD_BYTES ||
+    (!plan.resized && !isWebpTranscode && blob.size >= file.size)
+  ) {
     return {
       file,
       wasModified: false,
@@ -744,10 +844,10 @@ export async function optimizeImageForUpload(
     };
   }
 
-  const nextExt = outputMime === "image/png" ? "png" : outputMime === "image/webp" ? "webp" : "jpg";
+  const actualFormat = await resolveActualEncodedFormat(blob, requestedMime);
   const baseName = validation.sanitizedFileName.replace(/\.[^.]+$/, "");
-  const optimizedFile = new File([blob], `${baseName}.${nextExt}`, {
-    type: outputMime,
+  const optimizedFile = new File([blob], `${baseName}.${actualFormat.ext}`, {
+    type: actualFormat.mime,
     lastModified: Date.now(),
   });
 
@@ -804,17 +904,21 @@ export async function cropAndRotateImageFile(
   ctx.rotate((rotationDegrees * Math.PI) / 180);
   ctx.drawImage(img, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
 
-  const outMime: AllowedImageMime =
+  const requestedMime: AllowedImageMime =
     validation.detectedMime === "image/jpeg" ? "image/jpeg" : "image/png";
-  const blob = await canvasToBlob(canvas, outMime, outMime === "image/jpeg" ? 0.92 : undefined);
+  const blob = await canvasToBlob(
+    canvas,
+    requestedMime,
+    requestedMime === "image/jpeg" ? 0.92 : undefined,
+  );
   if (!blob) {
     throw new Error("Failed to export cropped image.");
   }
 
-  const ext = outMime === "image/jpeg" ? "jpg" : "png";
+  const actualFormat = await resolveActualEncodedFormat(blob, requestedMime);
   const baseName = validation.sanitizedFileName.replace(/\.[^.]+$/, "");
-  return new File([blob], `${baseName}-edited.${ext}`, {
-    type: outMime,
+  return new File([blob], `${baseName}-edited.${actualFormat.ext}`, {
+    type: actualFormat.mime,
     lastModified: Date.now(),
   });
 }

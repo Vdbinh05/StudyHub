@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   AlertTriangle,
@@ -19,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useI18n } from "@/lib/i18n";
 import { buildVercelSafeCommitChunks } from "@/lib/import/commit-chunker";
+import { consumePendingImportFile } from "@/lib/import/pending-file-handoff";
 import {
   computeImportSummary,
   validateImportBatch,
@@ -28,6 +30,7 @@ import {
   uploadFileToTempStorage,
   VERCEL_SAFE_DIRECT_PAYLOAD_BYTES,
 } from "@/lib/media/direct-upload";
+import { invalidateStudySetCaches } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import type {
   AnswerRule,
@@ -151,6 +154,7 @@ export function ImportWizard({
   existingQuestionCount = 0,
 }: ImportWizardProps) {
   const { locale } = useI18n();
+  const queryClient = useQueryClient();
   const steps = React.useMemo(() => getImportStepLabels(locale), [locale]);
 
   const [step, setStep] = React.useState<1 | 2 | 3>(1);
@@ -205,6 +209,21 @@ export function ImportWizard({
   // Stable session seed for idempotency keys across retries of the same import
   const commitBatchIdRef = React.useRef<string>(crypto.randomUUID());
   const sourceVersionRef = React.useRef<number>(sourceVersion);
+  // Race guards for async parse & commit loops (FUNC-13)
+  const parseAbortControllerRef = React.useRef<AbortController | null>(null);
+  const parseRequestIdRef = React.useRef<number>(0);
+  const committingRef = React.useRef<boolean>(false);
+  const commitSessionRef = React.useRef<{
+    batchId: string;
+    importJobId?: string;
+    completedChunks: number;
+    totalImported: number;
+    totalSkipped: number;
+    totalReplaced: number;
+    finalSetTotal: number;
+  } | null>(null);
+  const handoffFileRef = React.useRef<File | null>(null);
+  const handoffStartedRef = React.useRef<boolean>(false);
   // Parse cache key to avoid redundant re-parses when options haven't changed
   const lastParsedKeyRef = React.useRef<string | null>(null);
   const hasParsedQuestionsRef = React.useRef<boolean>(false);
@@ -261,6 +280,7 @@ export function ImportWizard({
       if (revalidateTimerRef.current) {
         clearTimeout(revalidateTimerRef.current);
       }
+      parseAbortControllerRef.current?.abort();
     };
   }, []);
 
@@ -376,6 +396,11 @@ export function ImportWizard({
         };
       }
 
+      const requestId = ++parseRequestIdRef.current;
+      parseAbortControllerRef.current?.abort();
+      const controller = new AbortController();
+      parseAbortControllerRef.current = controller;
+
       setIsParsing(true);
       setParseError(null);
 
@@ -390,9 +415,13 @@ export function ImportWizard({
               contentType: activeFile.type || undefined,
               studySetId,
             });
+            if (controller.signal.aborted || parseRequestIdRef.current !== requestId) {
+              return null;
+            }
             response = await fetch("/api/import/parse", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
+              signal: controller.signal,
               body: JSON.stringify({
                 storagePath: staged.storagePath,
                 fileName: staged.fileName,
@@ -408,6 +437,7 @@ export function ImportWizard({
             form.append("options", JSON.stringify(effectiveOptions));
             response = await fetch("/api/import/parse", {
               method: "POST",
+              signal: controller.signal,
               body: form,
             });
           }
@@ -422,9 +452,13 @@ export function ImportWizard({
               contentType: "text/plain",
               studySetId,
             });
+            if (controller.signal.aborted || parseRequestIdRef.current !== requestId) {
+              return null;
+            }
             response = await fetch("/api/import/parse", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
+              signal: controller.signal,
               body: JSON.stringify({
                 storagePath: staged.storagePath,
                 fileName: staged.fileName,
@@ -437,6 +471,7 @@ export function ImportWizard({
             response = await fetch("/api/import/parse", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
+              signal: controller.signal,
               body: JSON.stringify({
                 rawText,
                 fileName: "pasted-input.txt",
@@ -448,6 +483,9 @@ export function ImportWizard({
         }
 
         const payload = (await response.json()) as ParseApiResponse;
+        if (controller.signal.aborted || parseRequestIdRef.current !== requestId) {
+          return null;
+        }
         if (!response.ok || !payload.data) {
           const msg =
             payload.error?.message ??
@@ -481,6 +519,7 @@ export function ImportWizard({
         setFileSizeBytes(data.fileSizeBytes ?? 0);
         setParsedFileName(data.fileName ?? activeFile?.name ?? "pasted-input.txt");
         commitBatchIdRef.current = crypto.randomUUID();
+        commitSessionRef.current = null;
 
         lastParsedKeyRef.current = buildParseCacheKey(activeVersion, {
           ...effectiveOptions,
@@ -492,6 +531,13 @@ export function ImportWizard({
         });
         return data;
       } catch (err) {
+        if (
+          controller.signal.aborted ||
+          parseRequestIdRef.current !== requestId ||
+          (err instanceof DOMException && err.name === "AbortError")
+        ) {
+          return null;
+        }
         const msg =
           err instanceof Error
             ? err.message
@@ -502,7 +548,9 @@ export function ImportWizard({
         toast.error(msg);
         return null;
       } finally {
-        setIsParsing(false);
+        if (parseRequestIdRef.current === requestId) {
+          setIsParsing(false);
+        }
       }
     },
     [
@@ -554,8 +602,14 @@ export function ImportWizard({
       sourceVersionRef.current = nextVer;
       setSourceVersion(nextVer);
       lastParsedKeyRef.current = null;
+      commitSessionRef.current = null;
 
-      if (!file) return;
+      if (!file) {
+        parseRequestIdRef.current += 1;
+        parseAbortControllerRef.current?.abort();
+        setIsParsing(false);
+        return;
+      }
 
       const data = await runServerParse(
         {
@@ -577,6 +631,39 @@ export function ImportWizard({
     },
     [openStep2WithResult, runServerParse],
   );
+
+  // Auto-consume a pre-selected File handed off from `/import` (`V32-038` / `RU-13`)
+  // eliminating the double file-picker friction (StrictMode remount-safe, zero dep loop).
+  const handleSelectFileRef = React.useRef(handleSelectFile);
+  React.useEffect(() => {
+    handleSelectFileRef.current = handleSelectFile;
+  }, [handleSelectFile]);
+
+  React.useEffect(() => {
+    if (!handoffFileRef.current) {
+      const pending = consumePendingImportFile(studySetId);
+      if (pending) {
+        handoffFileRef.current = pending;
+      }
+    }
+    const file = handoffFileRef.current;
+    if (!file || handoffStartedRef.current) return;
+
+    handoffStartedRef.current = true;
+    let active = true;
+    void handleSelectFileRef.current(file).then(() => {
+      if (active) {
+        handoffFileRef.current = null;
+      }
+    });
+
+    return () => {
+      active = false;
+      if (handoffFileRef.current) {
+        handoffStartedRef.current = false;
+      }
+    };
+  }, [studySetId]);
 
   // O(1) immediate single-item validation + debounced batch duplicate revalidation
   const handleUpdateQuestion = React.useCallback(
@@ -696,39 +783,87 @@ export function ImportWizard({
 
   const executeCommit = React.useCallback(
     async (overrideRows?: ParsedQuestion[]) => {
+      if (committingRef.current) return;
       const latestAll = overrideRows ? overrideRows : filterReadyQuestions(flushBatchRevalidation());
       if (latestAll.length === 0) return;
 
+      committingRef.current = true;
+
+      // Strip transient signed previewUrl before chunking/committing (commit reads tempStoragePath/dataUrl)
+      const stripPreviewUrl = <T extends { previewUrl?: string }>(m: T): Omit<T, "previewUrl"> => {
+        const { previewUrl: _unused, ...rest } = m;
+        void _unused;
+        return rest;
+      };
+      const commitPayloadQuestions: ParsedQuestion[] = latestAll.map((q) => ({
+        ...q,
+        promptMedia: q.promptMedia?.map((m) =>
+          stripPreviewUrl(m as typeof m & { previewUrl?: string }),
+        ),
+        options: q.options.map((o) => ({
+          ...o,
+          media: o.media?.map((m) =>
+            stripPreviewUrl(m as typeof m & { previewUrl?: string }),
+          ),
+        })),
+      }));
+
+      // Collect all unique staged `tempStoragePath` values across ALL chunks so the final
+      // chunk cleans them cleanly once all earlier chunks have finished reading them (SEC-12).
+      const allTempMediaPaths = Array.from(
+        new Set(
+          commitPayloadQuestions.flatMap((q) => [
+            ...(q.promptMedia ?? [])
+              .map((m) => m.tempStoragePath)
+              .filter((p): p is string => Boolean(p)),
+            ...q.options.flatMap((o) =>
+              (o.media ?? [])
+                .map((m) => m.tempStoragePath)
+                .filter((p): p is string => Boolean(p)),
+            ),
+          ]),
+        ),
+      );
+
       // Keep every JSON commit chunk <= 2.5 MB and <= 500 questions across ALL formats
       // so multi-chunk commits never exceed Vercel Hobby's 4.5 MB request body cap.
-      const chunks: ParsedQuestion[][] = buildVercelSafeCommitChunks(latestAll);
+      const chunks: ParsedQuestion[][] = buildVercelSafeCommitChunks(commitPayloadQuestions);
       const defaultTags = defaultTagsText
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
 
+      const batchId = commitBatchIdRef.current;
+      const resumable =
+        commitSessionRef.current?.batchId === batchId &&
+        commitSessionRef.current.completedChunks < chunks.length
+          ? commitSessionRef.current
+          : null;
+
+      const startChunkIndex = resumable ? resumable.completedChunks : 0;
+      let importJobId = resumable?.importJobId;
+      let totalImported = resumable?.totalImported ?? 0;
+      let totalSkipped = resumable?.totalSkipped ?? 0;
+      let totalReplaced = resumable?.totalReplaced ?? 0;
+      let finalSetTotal = resumable?.finalSetTotal ?? 0;
+
       setStep(3);
       setCommitProgress({
         status: "committing",
-        completedChunks: 0,
+        completedChunks: startChunkIndex,
         totalChunks: chunks.length,
-        importedCount: 0,
-        skippedCount: 0,
-        replacedCount: 0,
-        totalSetQuestions: 0,
+        importedCount: totalImported,
+        skippedCount: totalSkipped,
+        replacedCount: totalReplaced,
+        totalSetQuestions: finalSetTotal,
         errorMessage: null,
       });
 
-      let importJobId: string | undefined;
-      let totalImported = 0;
-      let totalSkipped = 0;
-      let totalReplaced = 0;
-      let finalSetTotal = 0;
-
       try {
-        for (let i = 0; i < chunks.length; i += 1) {
+        for (let i = startChunkIndex; i < chunks.length; i += 1) {
           const chunk = chunks[i];
-          const idempotencyKey = `${commitBatchIdRef.current}-chunk-${i}`;
+          const idempotencyKey = `${batchId}-chunk-${i}`;
+          const isFinalChunk = i === chunks.length - 1;
 
           const response = await fetch("/api/import/commit", {
             method: "POST",
@@ -738,7 +873,11 @@ export function ImportWizard({
               idempotencyKey,
               importJobId,
               isFirstChunk: i === 0,
-              isFinalChunk: i === chunks.length - 1,
+              isFinalChunk,
+              tempMediaPathsToCleanup:
+                isFinalChunk && allTempMediaPaths.length > 0
+                  ? allTempMediaPaths
+                  : undefined,
               sourceFormat: formatOverride ?? detectedFormat,
               fileName: parsedFileName,
               fileSizeBytes,
@@ -771,8 +910,18 @@ export function ImportWizard({
           totalReplaced += payload.data.replacedCount;
           finalSetTotal = payload.data.totalSetQuestions;
 
+          commitSessionRef.current = {
+            batchId,
+            importJobId,
+            completedChunks: i + 1,
+            totalImported,
+            totalSkipped,
+            totalReplaced,
+            finalSetTotal,
+          };
+
           setCommitProgress({
-            status: i === chunks.length - 1 ? "completed" : "committing",
+            status: isFinalChunk ? "completed" : "committing",
             completedChunks: i + 1,
             totalChunks: chunks.length,
             importedCount: totalImported,
@@ -783,12 +932,19 @@ export function ImportWizard({
           });
         }
 
+        // Invalidate all study set, question list, bundle, library & dashboard caches immediately
+        // so returning to `/sets/[id]` NEVER shows stale `0 câu hỏi` (FUNC-12 / SEC-08)!
+        await invalidateStudySetCaches(queryClient, studySetId);
+
         toast.success(
           locale === "en"
             ? `Imported ${totalImported.toLocaleString()} question(s) successfully.`
             : `Đã nhập thành công ${totalImported.toLocaleString()} câu hỏi.`,
         );
       } catch (err) {
+        if (totalImported > 0 || totalReplaced > 0) {
+          void invalidateStudySetCaches(queryClient, studySetId);
+        }
         const msg =
           err instanceof Error
             ? err.message
@@ -801,6 +957,8 @@ export function ImportWizard({
           errorMessage: msg,
         }));
         toast.error(msg);
+      } finally {
+        committingRef.current = false;
       }
     },
     [
@@ -816,12 +974,14 @@ export function ImportWizard({
       locale,
       mode,
       parsedFileName,
+      queryClient,
       skipInvalidRows,
       studySetId,
     ],
   );
 
   const handleRequestImport = React.useCallback(() => {
+    if (committingRef.current) return;
     const flushed = flushBatchRevalidation();
     const activeRows = filterReadyQuestions(flushed);
     if (activeRows.length === 0) return;
@@ -834,6 +994,9 @@ export function ImportWizard({
   }, [executeCommit, filterReadyQuestions, flushBatchRevalidation, mode]);
 
   const handleImportAnother = React.useCallback(() => {
+    parseRequestIdRef.current += 1;
+    parseAbortControllerRef.current?.abort();
+    setIsParsing(false);
     setSelectedFile(null);
     setRawText("");
     setQuestions([]);
@@ -857,6 +1020,7 @@ export function ImportWizard({
     setSourceVersion(nextVer);
     lastParsedKeyRef.current = null;
     commitBatchIdRef.current = crypto.randomUUID();
+    commitSessionRef.current = null;
     setStep(1);
   }, []);
 

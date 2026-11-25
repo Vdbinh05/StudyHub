@@ -5,6 +5,10 @@ import {
   handleApiError,
   parseJsonBody,
 } from "@/lib/security/errors";
+import {
+  isMissingRpcError,
+  rpcPatchUserPreferences,
+} from "@/lib/supabase/rpc";
 import type { Json } from "@/types/database";
 import { updatePreferencesSchema } from "@/lib/validation/profile";
 
@@ -63,6 +67,18 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     const { supabase, user } = await requireAuth();
     const body = await parseJsonBody(request);
     const input = updatePreferencesSchema.parse(body);
+
+    // DB-02 (Migration 0019): Atomic FOR UPDATE JSONB 2-level merge prevents concurrent preference clobbering
+    const { data: rpcPrefs, error: rpcErr } = await rpcPatchUserPreferences(
+      supabase,
+      input as Record<string, unknown>,
+    );
+    if (!rpcErr && rpcPrefs) {
+      return apiSuccess(rpcPrefs);
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
 
     const { mode_preferences, ...rest } = input;
     let mergedModePreferences: Json | undefined;

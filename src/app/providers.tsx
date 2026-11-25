@@ -82,7 +82,7 @@ const EXACT_ROUTE_TITLES: Record<string, { vi: string; en: string }> = {
   "/offline": { vi: "Học ngoại tuyến | StudyHub", en: "Offline Study | StudyHub" },
 };
 
-function resolveLocalizedTitle(pathname: string, locale: Locale): string | null {
+export function resolveLocalizedTitle(pathname: string, locale: Locale): string | null {
   const exact = EXACT_ROUTE_TITLES[pathname];
   if (exact) return exact[locale];
 
@@ -131,6 +131,16 @@ function resolveLocalizedTitle(pathname: string, locale: Locale): string | null 
     /^\/exams\/[^/]+\/results$/.test(pathname)
   ) {
     return locale === "vi" ? "Kết quả bài thi | StudyHub" : "Exam Results | StudyHub";
+  }
+  if (/^\/sets\/[^/]+$/.test(pathname)) {
+    return locale === "vi"
+      ? "Chi tiết học phần | StudyHub"
+      : "Study Set | StudyHub";
+  }
+  if (/^\/folders\/[^/]+$/.test(pathname)) {
+    return locale === "vi"
+      ? "Thư mục học phần | StudyHub"
+      : "Folder | StudyHub";
   }
   if (/^\/exams\/[^/]+$/.test(pathname)) {
     return locale === "vi" ? "Đang làm bài thi | StudyHub" : "Live Exam | StudyHub";

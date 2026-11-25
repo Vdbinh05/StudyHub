@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import { motion, useReducedMotion } from "motion/react";
 import {
   CheckCircle2,
@@ -36,6 +37,7 @@ import {
   selectMatchTile,
   type MatchBoardState,
 } from "@/lib/learning/match-engine";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
 import { lText } from "./learning-copy";
@@ -61,6 +63,7 @@ function formatTenths(ms: number): string {
 
 export function MatchClient({ setId }: MatchClientProps) {
   const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
   const { preferences, playFeedbackSound } = useUserPreferences();
   const prefersReducedMotion = useReducedMotion() || preferences.reduced_motion;
   const {
@@ -170,7 +173,11 @@ export function MatchClient({ setId }: MatchClientProps) {
               completed_items: next.pairs.length,
               correct_items: next.pairs.length,
               duration_seconds: Math.max(1, Math.round(next.elapsedMs / 1000)),
-            }).catch(() => {});
+            })
+              .then(() => invalidateLearningCaches(queryClient, setId))
+              .catch(() => {});
+          } else {
+            invalidateLearningCaches(queryClient, setId);
           }
         }
       } else if (next.lastOutcome === "mismatch" && next.lastPairTileIds) {
@@ -185,7 +192,7 @@ export function MatchClient({ setId }: MatchClientProps) {
         }, 450);
       }
     },
-    [board, locale, playFeedbackSound],
+    [board, locale, playFeedbackSound, queryClient, setId],
   );
 
   // Keyboard grid arrow navigation dynamically reading rendered CSS grid column count (LM-07!)
@@ -237,8 +244,9 @@ export function MatchClient({ setId }: MatchClientProps) {
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
+      studySetId={setId}
       title={bundle.studySet.title}
-      subtitle={lText(locale, "Chế độ Ghép thẻ", "Match Mode")}
+      subtitle={lText(locale, "Ghép thẻ", "Match Mode")}
       progressCurrent={
         phase === "playing" && board ? board.matchedPairIds.length : undefined
       }

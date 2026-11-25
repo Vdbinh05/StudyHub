@@ -3,6 +3,8 @@ export {
   usePwa,
   useOptionalPwa,
   isActiveExamRoutePath,
+  isLiveExamAttemptRoutePath,
+  isFocusStudyOrExamRoutePath,
   clearOfflineDataForLogout,
   type PwaContextValue,
   type PwaProviderProps,

@@ -7,6 +7,10 @@ import {
   fetchInChunks,
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
+import {
+  isMissingRpcError,
+  rpcGetUserStatisticsSummary,
+} from "@/lib/supabase/rpc";
 
 const statsQuerySchema = z.object({
   days: z.coerce.number().int().min(7).max(365).default(30),
@@ -64,6 +68,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const { days } = statsQuerySchema.parse({
       days: request.nextUrl.searchParams.get("days") ?? 30,
     });
+
+    // DB-07 (Migration 0019): Single-RTT SQL aggregation replaces 6+ paginated full-table scans in Node
+    const { data: rpcStats, error: rpcErr } = await rpcGetUserStatisticsSummary(
+      supabase,
+      days,
+    );
+    if (!rpcErr && rpcStats) {
+      return apiSuccess(rpcStats);
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
 
     const sinceDate = new Date(Date.now() - days * 86_400_000);
     const sinceIso = sinceDate.toISOString();

@@ -229,6 +229,58 @@ export async function fetchAccessibleFolders(): Promise<Folder[]> {
   return [];
 }
 
+export interface HydratedStudyQuestion extends Question {
+  is_starred?: boolean;
+  progress?: Partial<UserQuestionProgress> | null;
+}
+
+export interface StudySetQuestionsPageResult {
+  items: HydratedStudyQuestion[];
+  total: number | undefined;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+/**
+ * Fetch a single page of full questions (including embedded `options`, `accepted_answers`,
+ * `tags`, `is_starred`, and `progress` from `/api/sets/[id]/questions`) for progressive streaming.
+ */
+export async function fetchStudySetQuestionsPage(
+  setId: string,
+  page: number = 1,
+  pageSize: number = 50,
+  signal?: AbortSignal,
+): Promise<StudySetQuestionsPageResult> {
+  const encodedSetId = encodeURIComponent(setId);
+  const res = await requestJson<
+    HydratedStudyQuestion[] | { questions: HydratedStudyQuestion[] }
+  >(
+    `/api/sets/${encodedSetId}/questions?page=${page}&pageSize=${pageSize}`,
+    signal ? { signal } : undefined,
+  );
+  const items = Array.isArray(res.data)
+    ? res.data
+    : res.data && "questions" in res.data
+      ? res.data.questions
+      : [];
+  const total =
+    typeof res.meta?.total === "number" ? res.meta.total : undefined;
+  const hasMore =
+    typeof res.meta?.hasMore === "boolean"
+      ? res.meta.hasMore
+      : typeof total === "number"
+        ? (page - 1) * pageSize + items.length < total
+        : items.length >= pageSize;
+  return {
+    items,
+    total,
+    page,
+    pageSize,
+    hasMore,
+  };
+}
+
 /**
  * Fetch questions for a study set in safe `pageSize=100` chunks (<=400 options/call,
  * strictly immune to PostgREST's 1,000-row cap — fixes SH-005 & SH-025).
@@ -238,30 +290,12 @@ export async function fetchAccessibleFolders(): Promise<Folder[]> {
 export async function fetchStudySetQuestions(
   setId: string,
   maxQuestions: number = 10_000,
-): Promise<Question[]> {
+): Promise<HydratedStudyQuestion[]> {
   const pageSize = 100;
   const concurrency = 4;
-  const encodedSetId = encodeURIComponent(setId);
 
-  const fetchPage = async (
-    page: number,
-  ): Promise<{ items: Question[]; total?: number }> => {
-    const res = await requestJson<Question[] | { questions: Question[] }>(
-      `/api/sets/${encodedSetId}/questions?page=${page}&pageSize=${pageSize}`,
-    );
-    const items = Array.isArray(res.data)
-      ? res.data
-      : res.data && "questions" in res.data
-        ? res.data.questions
-        : [];
-    return {
-      items,
-      total: typeof res.meta?.total === "number" ? res.meta.total : undefined,
-    };
-  };
-
-  const first = await fetchPage(1);
-  const all: Question[] = [...first.items];
+  const first = await fetchStudySetQuestionsPage(setId, 1, pageSize);
+  const all: HydratedStudyQuestion[] = [...first.items];
   const targetCount =
     typeof first.total === "number"
       ? Math.min(first.total, maxQuestions)
@@ -278,7 +312,9 @@ export async function fetchStudySetQuestions(
       for (let p = start; p < start + concurrency && p <= totalPages; p += 1) {
         batchPages.push(p);
       }
-      const results = await Promise.all(batchPages.map((p) => fetchPage(p)));
+      const results = await Promise.all(
+        batchPages.map((p) => fetchStudySetQuestionsPage(setId, p, pageSize)),
+      );
       for (const r of results) {
         all.push(...r.items);
       }
@@ -290,7 +326,7 @@ export async function fetchStudySetQuestions(
   let page = 2;
   const maxPages = Math.ceil(Math.max(1, maxQuestions) / pageSize) + 1;
   while (all.length < maxQuestions && page <= maxPages) {
-    const next = await fetchPage(page);
+    const next = await fetchStudySetQuestionsPage(setId, page, pageSize);
     all.push(...next.items);
     if (next.items.length < pageSize) break;
     page += 1;
@@ -943,6 +979,53 @@ export async function saveExamAnswers(
   return lastResult;
 }
 
+/**
+ * Best-effort `keepalive: true` exam autosave flush for `pagehide` / `visibilitychange`.
+ * Splits chunks conservatively to stay comfortably under the browser 64 KiB keepalive cap.
+ */
+export function saveExamAnswersKeepalive(
+  attemptId: string,
+  items: ExamAnswerSaveItem[],
+): void {
+  if (items.length === 0 || typeof fetch === "undefined") return;
+  const url = `/api/exams/${encodeURIComponent(attemptId)}/answers`;
+  const MAX_KEEPALIVE_BYTES = 48_000;
+
+  let currentBatch: ExamAnswerSaveItem[] = [];
+  const flushBatch = (batch: ExamAnswerSaveItem[]) => {
+    if (batch.length === 0) return;
+    const payload = batch.length === 1 ? batch[0] : { answers: batch };
+    try {
+      void fetch(url, {
+        method: "PUT",
+        keepalive: true,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).catch(() => undefined);
+    } catch {
+      // Ignore synchronous fetch restrictions during teardown
+    }
+  };
+
+  for (const item of items) {
+    const candidate = [...currentBatch, item];
+    const bodyStr = JSON.stringify(
+      candidate.length === 1 ? candidate[0] : { answers: candidate },
+    );
+    if (currentBatch.length > 0 && bodyStr.length > MAX_KEEPALIVE_BYTES) {
+      flushBatch(currentBatch);
+      currentBatch = [item];
+    } else if (candidate.length >= 40) {
+      flushBatch(candidate);
+      currentBatch = [];
+    } else {
+      currentBatch = candidate;
+    }
+  }
+  flushBatch(currentBatch);
+}
+
 export async function submitExamAttempt(
   attemptId: string,
 ): Promise<ExamAttemptPayload> {
@@ -1201,6 +1284,26 @@ export async function upsertCheckpoint(
     body: JSON.stringify(payload),
   });
   return res.data;
+}
+
+/**
+ * Best-effort `keepalive: true` checkpoint upsert for `pagehide` / `visibilitychange` (`RU-01`).
+ */
+export function upsertCheckpointKeepalive(payload: UpsertCheckpointPayload): void {
+  if (typeof fetch === "undefined") return;
+  try {
+    const body = JSON.stringify(payload);
+    if (body.length > 56_000) return;
+    void fetch("/api/checkpoints", {
+      method: "PUT",
+      keepalive: true,
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body,
+    }).catch(() => undefined);
+  } catch {
+    // Ignore teardown fetch restrictions
+  }
 }
 
 export async function deleteCheckpoint(params: {

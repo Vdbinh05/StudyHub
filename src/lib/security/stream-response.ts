@@ -38,6 +38,12 @@ export function streamBinaryResponse(
   if (!headers.has("x-content-type-options")) {
     headers.set("X-Content-Type-Options", "nosniff");
   }
+  if (!headers.has("cache-control")) {
+    headers.set("Cache-Control", "private, no-store");
+  }
+  if (!headers.has("vary")) {
+    headers.set("Vary", "Cookie");
+  }
 
   return new Response(createChunkedByteStream(bytes), {
     status: init.status ?? 200,
@@ -61,6 +67,12 @@ export function streamJsonResponse(
   }
   if (!headers.has("x-content-type-options")) {
     headers.set("X-Content-Type-Options", "nosniff");
+  }
+  if (!headers.has("cache-control")) {
+    headers.set("Cache-Control", "private, no-store");
+  }
+  if (!headers.has("vary")) {
+    headers.set("Vary", "Cookie");
   }
 
   return new Response(createChunkedByteStream(encoded), {

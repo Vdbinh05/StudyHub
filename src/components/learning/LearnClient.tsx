@@ -2,21 +2,36 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
   Brain,
   CheckCircle2,
+  ChevronDown,
   Clock,
+  Crosshair,
   Layers,
   RotateCcw,
   Settings2,
   SkipForward,
   Star,
+  Target,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,11 +54,14 @@ import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
 import {
   advanceAdaptiveLearnRound,
+  appendAdaptiveLearnSeeds,
   buildSessionChoiceAnswerPayload,
+  computeAdaptiveLearnProgress,
   createAdaptiveLearnState,
   filterAdaptiveLearnSeeds,
   getAdaptiveLearnSummary,
   getCurrentAdaptiveCard,
+  getLearnObjectiveMeta,
   isValidUuid,
   LEARN_OBJECTIVES,
   LEARN_STAGE_LABELS,
@@ -54,15 +72,19 @@ import {
   type LearnObjective,
 } from "@/lib/learning/adaptive-learn";
 import {
+  formatCorrectAnswerDisplay,
+  isMultiSelectChoiceQuestion,
+} from "@/lib/learning/answer-display";
+import {
   createStudySession,
   deleteCheckpoint,
-  isEditableEventTarget,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
   upsertCheckpoint,
+  upsertCheckpointKeepalive,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
 import {
@@ -91,6 +113,8 @@ import {
   gradeWriteAnswer,
 } from "@/lib/learning/write-grader";
 import { gradeQuestionResponse } from "@/lib/questions";
+import { invalidateLearningCaches } from "@/lib/query-keys";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import type {
   ConfidenceLevel,
   NormalizedPoint,
@@ -110,8 +134,24 @@ import {
   StudyEmptyState,
   StudyErrorState,
   StudyLoadingSkeleton,
+  useAuthenticatedUserId,
   useStudySetBundle,
 } from "./useStudySetBundle";
+import { deterministicShuffleBySeed } from "./V3StructuredPracticeControls";
+
+function mapPreferenceLearnObjective(
+  prefObj?: "quick_familiarity" | "exam_prep" | "long_term_retention",
+): LearnObjective {
+  switch (prefObj) {
+    case "quick_familiarity":
+      return "familiarize";
+    case "exam_prep":
+      return "exam_prep";
+    case "long_term_retention":
+    default:
+      return "master";
+  }
+}
 
 export interface LearnClientProps {
   setId: string;
@@ -128,7 +168,12 @@ interface LearnFeedbackState {
 
 export function LearnClient({ setId }: LearnClientProps) {
   const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const isFreshLaunch = searchParams.get("fresh") === "1";
   const { preferences, playFeedbackSound } = useUserPreferences();
+  const authenticatedUserId = useAuthenticatedUserId();
+  const learnPrefs = preferences.mode_preferences?.learn;
 
   const {
     data: bundle,
@@ -140,8 +185,13 @@ export function LearnClient({ setId }: LearnClientProps) {
     updateLocalProgress,
   } = useStudySetBundle(setId);
 
-  // Clean simple default mode + full V3 session configuration
-  const [objective, setObjective] = React.useState<LearnObjective>("master");
+  // Clean simple default mode + full session configuration hydrated from mode_preferences.learn (V32-025)
+  const [objective, setObjective] = React.useState<LearnObjective>(() =>
+    mapPreferenceLearnObjective(learnPrefs?.objective),
+  );
+  const [pendingObjectiveSwitch, setPendingObjectiveSwitch] =
+    React.useState<LearnObjective | null>(null);
+  const [goalPopoverOpen, setGoalPopoverOpen] = React.useState(false);
   const [selectedChapter, setSelectedChapter] = React.useState<string>("all");
   const [selectedTagId, setSelectedTagId] = React.useState<string>("all");
   const [onlyNew, setOnlyNew] = React.useState(false);
@@ -150,22 +200,25 @@ export function LearnClient({ setId }: LearnClientProps) {
   const [onlyLowConfidence, setOnlyLowConfidence] = React.useState(false);
   const [onlyStarred, setOnlyStarred] = React.useState(false);
   const [maxItems, setMaxItems] = React.useState<string>("all");
-  const [roundSize, setRoundSize] = React.useState<number>(7);
+  const [roundSize, setRoundSize] = React.useState<number>(
+    () => learnPrefs?.batch_size ?? 7,
+  );
   const [forcedCorrection, setForcedCorrection] = React.useState<boolean>(false);
   const [confidenceOverride, setConfidenceOverride] = React.useState<
     boolean | null
   >(null);
   const confidenceEnabled =
-    confidenceOverride ?? Boolean(preferences.confidence_enabled);
+    confidenceOverride ??
+    (Boolean(preferences.confidence_enabled) ||
+      Boolean(learnPrefs?.ask_confidence));
   const setConfidenceEnabled = React.useCallback((next: boolean) => {
     setConfidenceOverride(next);
   }, []);
   const [configNonce, setConfigNonce] = React.useState(0);
 
   // Active Learn state
-  const [learnState, setLearnState] = React.useState<AdaptiveLearnState | null>(
-    null,
-  );
+  const [rawLearnState, setLearnState] =
+    React.useState<AdaptiveLearnState | null>(null);
   const [completedDurationSeconds, setCompletedDurationSeconds] =
     React.useState(1);
 
@@ -185,12 +238,37 @@ export function LearnClient({ setId }: LearnClientProps) {
   const [hotspotClicks, setHotspotClicks] = React.useState<NormalizedPoint[]>(
     [],
   );
+  const [keyboardCursor, setKeyboardCursor] = React.useState<NormalizedPoint>({
+    x: 0.5,
+    y: 0.5,
+  });
   const [selectedConfidence, setSelectedConfidence] =
     React.useState<ConfidenceLevel | null>(null);
   const [pendingNextState, setPendingNextState] =
     React.useState<AdaptiveLearnState | null>(null);
   const [feedback, setFeedback] = React.useState<LearnFeedbackState | null>(null);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+
+  const requestObjectiveChange = React.useCallback(
+    (nextObj: LearnObjective) => {
+      if (nextObj === objective) {
+        setGoalPopoverOpen(false);
+        return;
+      }
+      if (
+        rawLearnState &&
+        rawLearnState.totalAttempts > 0 &&
+        !rawLearnState.sessionCompleted
+      ) {
+        setGoalPopoverOpen(false);
+        setPendingObjectiveSwitch(nextObj);
+      } else {
+        setGoalPopoverOpen(false);
+        setObjective(nextObj);
+      }
+    },
+    [objective, rawLearnState],
+  );
 
   // Checkpoint resume banner state
   const sessionKey = React.useMemo(
@@ -327,8 +405,10 @@ export function LearnClient({ setId }: LearnClientProps) {
     maxItems,
     roundSize,
     forcedCorrection,
+    learnPrefs?.enable_written_recall ?? true,
+    learnPrefs?.require_independent_recall ?? true,
     configNonce,
-    bundleQuestions ? bundleQuestions.length : -1,
+    bundleQuestions && bundleQuestions.length > 0 ? "ready" : "empty",
   ].join("|");
 
   React.useEffect(() => {
@@ -343,8 +423,11 @@ export function LearnClient({ setId }: LearnClientProps) {
       batchSize: roundSize,
       forcedCorrection,
       maxForcedRetries: 2,
+      enableWrittenRecall: learnPrefs?.enable_written_recall,
+      requireIndependentRecall: learnPrefs?.require_independent_recall,
     });
     setLearnState(nextState);
+    setPendingNextState(null);
     const firstCard = getCurrentAdaptiveCard(nextState);
     clearCardInputs(
       firstCard ? activeBundle.questions.find((q) => q.id === firstCard.questionId) : null,
@@ -365,9 +448,21 @@ export function LearnClient({ setId }: LearnClientProps) {
         })
         .catch(() => {});
 
-      // Check resumable checkpoints
+      // Honor ?fresh=1 (FUNC-17): clear local + remote checkpoints and start fresh
+      if (isFreshLaunch) {
+        if (authenticatedUserId) {
+          clearLocalCheckpoint(authenticatedUserId, sessionKey);
+        }
+        void deleteCheckpoint({ sessionKey }).catch(() => {});
+        setPendingResume(null);
+        return;
+      }
+
+      // Check resumable checkpoints keyed by authenticatedUserId (NEVER bundle.studySet.owner_id — FUNC-17!)
       const liveSet = new Set(currentSeeds.map((s) => s.question.id));
-      const localCp = loadLocalCheckpoint(activeBundle.studySet.owner_id, sessionKey);
+      const localCp = authenticatedUserId
+        ? loadLocalCheckpoint(authenticatedUserId, sessionKey)
+        : null;
       void listCheckpoints({ studySetId: setId, mode: "learn", sessionKey })
         .then((remotes) => {
           const picked = pickNewestCheckpoint(remotes[0] ?? null, localCp);
@@ -407,11 +502,16 @@ export function LearnClient({ setId }: LearnClientProps) {
           }
           if (cleaned.activeQueue.length === 0) return;
 
+          // Compute accurate progress for Resume banner (V32-027 / RU-06)
+          const restoredProgress = computeAdaptiveLearnProgress(cleaned);
           setPendingResume({
             source: picked.source,
-            currentIndex: cleaned.graduatedIds.length,
+            currentIndex: Math.max(picked.currentIndex, restoredProgress.currentIndex),
             totalItems: cleaned.totalItems,
-            progressPercent: picked.progressPercent,
+            progressPercent: Math.max(
+              picked.progressPercent,
+              restoredProgress.progressPercent,
+            ),
             updatedAt: picked.updatedAt,
             removedCount: rec.removedIds.length,
             restoredState: cleaned,
@@ -420,9 +520,13 @@ export function LearnClient({ setId }: LearnClientProps) {
         .catch(() => {});
     }
   }, [
+    authenticatedUserId,
     clearCardInputs,
     forcedCorrection,
     initConfigKey,
+    isFreshLaunch,
+    learnPrefs?.enable_written_recall,
+    learnPrefs?.require_independent_recall,
     objective,
     roundSize,
     selectedChapter,
@@ -430,7 +534,19 @@ export function LearnClient({ setId }: LearnClientProps) {
     setId,
   ]);
 
-  const currentCard = learnState ? getCurrentAdaptiveCard(learnState) : null;
+  // Progressive background streaming append (100% pure derived state — V32-015):
+  // Appends Pages 2..N into pendingQueue without resetting activeQueue[0] or causing effect setState cascades.
+  const learnState = React.useMemo(
+    () =>
+      rawLearnState
+        ? appendAdaptiveLearnSeeds(rawLearnState, filteredSeeds)
+        : null,
+    [filteredSeeds, rawLearnState],
+  );
+
+  const currentCard = learnState
+    ? getCurrentAdaptiveCard(learnState)
+    : null;
   const currentQuestion = currentCard
     ? questionMap.get(currentCard.questionId) ?? null
     : null;
@@ -513,43 +629,72 @@ export function LearnClient({ setId }: LearnClientProps) {
   ]);
 
   const saveLearnCheckpoint = React.useCallback(
-    (nextState: AdaptiveLearnState) => {
+    (nextState: AdaptiveLearnState, keepalive: boolean = false) => {
       if (!bundle) return;
       if (nextState.sessionCompleted) {
-        clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+        if (authenticatedUserId) {
+          clearLocalCheckpoint(authenticatedUserId, sessionKey);
+        }
         void deleteCheckpoint({ sessionKey }).catch(() => {});
         return;
       }
-      const pct =
-        nextState.totalItems > 0
-          ? Math.round((nextState.graduatedIds.length / nextState.totalItems) * 100)
-          : 0;
+      const progress = computeAdaptiveLearnProgress(nextState);
       const stateJson = { learnState: nextState };
-      saveLocalCheckpoint({
-        version: 1,
-        userId: bundle.studySet.owner_id,
-        studySetId: setId,
-        mode: "learn",
-        sessionKey,
-        currentIndex: nextState.graduatedIds.length,
-        totalItems: nextState.totalItems,
-        progressPercent: pct,
-        stateJson,
-        committedEventKeys: [],
-        updatedAt: new Date().toISOString(),
-      });
-      void upsertCheckpoint({
+      if (authenticatedUserId) {
+        saveLocalCheckpoint({
+          version: 1,
+          userId: authenticatedUserId,
+          studySetId: setId,
+          mode: "learn",
+          sessionKey,
+          currentIndex: progress.currentIndex,
+          totalItems: progress.totalItems,
+          progressPercent: progress.progressPercent,
+          stateJson,
+          committedEventKeys: [],
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      const remotePayload = {
         study_set_id: setId,
-        mode: "learn",
+        mode: "learn" as const,
         session_key: sessionKey,
         state_json: stateJson,
-        progress_percent: pct,
-        current_index: nextState.graduatedIds.length,
-        total_items: nextState.totalItems,
-      }).catch(() => {});
+        progress_percent: progress.progressPercent,
+        current_index: progress.currentIndex,
+        total_items: progress.totalItems,
+      };
+      if (keepalive) {
+        upsertCheckpointKeepalive(remotePayload);
+      } else {
+        void upsertCheckpoint(remotePayload).catch(() => {});
+      }
     },
-    [bundle, sessionKey, setId],
+    [authenticatedUserId, bundle, sessionKey, setId],
   );
+
+  // Flush Learn checkpoint synchronously on pagehide / hidden tab so progress is never dropped (V32-027)
+  const latestLearnStateRef = React.useRef<AdaptiveLearnState | null>(null);
+  React.useEffect(() => {
+    latestLearnStateRef.current = pendingNextState ?? learnState;
+  }, [learnState, pendingNextState]);
+
+  React.useEffect(() => {
+    const flushNow = () => {
+      const state = latestLearnStateRef.current;
+      if (!state || state.sessionCompleted || state.totalAttempts === 0) return;
+      saveLearnCheckpoint(state, true);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushNow();
+    };
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", flushNow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [saveLearnCheckpoint]);
 
   const persistProgressAndAdvance = React.useCallback(
     (
@@ -686,6 +831,8 @@ export function LearnClient({ setId }: LearnClientProps) {
 
       // Defer queue transition until user clicks "Continue" so feedback never jumps mid-read (SH-008!)
       setPendingNextState(stepRes.nextState);
+      // Persist checkpoint immediately so navigating back before clicking Continue still saves progress (RU-06)
+      saveLearnCheckpoint(stepRes.nextState);
     },
     [
       bundle,
@@ -724,7 +871,13 @@ export function LearnClient({ setId }: LearnClientProps) {
           completed_items: nextState.graduatedIds.length,
           correct_items: nextState.correctAttempts,
           duration_seconds: dur,
-        }).catch(() => {});
+        })
+          .then(() => {
+            invalidateLearningCaches(queryClient, setId);
+          })
+          .catch(() => {});
+      } else {
+        invalidateLearningCaches(queryClient, setId);
       }
       return;
     }
@@ -736,8 +889,10 @@ export function LearnClient({ setId }: LearnClientProps) {
     clearCardInputs,
     pendingNextState,
     playFeedbackSound,
+    queryClient,
     questionMap,
     saveLearnCheckpoint,
+    setId,
   ]);
 
   const handleSubmitCurrentActivity = React.useCallback(
@@ -819,15 +974,18 @@ export function LearnClient({ setId }: LearnClientProps) {
         return;
       }
 
-      // Write / Spell recall
+      // Write / Spell recall (V32-003 FUNC-02: formatCorrectAnswerDisplay — ZERO [object Object]!)
       if (activity === "write" || activity === "spell") {
         if (!typedAnswer.trim()) return;
         const expected = getExpectedWriteAnswers(currentQuestion);
         const isCorrect = gradeWriteAnswer(typedAnswer, expected).isCorrect;
+        const formattedExpected =
+          formatCorrectAnswerDisplay(currentQuestion, locale) ||
+          expected.map((e) => e.answer_text).filter(Boolean).join(" / ");
         persistProgressAndAdvance(
           currentQuestion,
           isCorrect,
-          expected.join(" / "),
+          formattedExpected,
           [],
           typedAnswer.trim(),
           { kind: "text", value: typedAnswer.trim() },
@@ -844,7 +1002,7 @@ export function LearnClient({ setId }: LearnClientProps) {
           unit: numericalUnit.trim() || null,
         };
         const grade = gradeQuestionResponse(currentQuestion, resp);
-        const expectedText = `${currentQuestion.type_payload.correct_value}${currentQuestion.type_payload.unit ? ` ${currentQuestion.type_payload.unit}` : ""}`;
+        const expectedText = formatCorrectAnswerDisplay(currentQuestion, locale);
         persistProgressAndAdvance(
           currentQuestion,
           grade.isCorrect,
@@ -856,16 +1014,19 @@ export function LearnClient({ setId }: LearnClientProps) {
         return;
       }
 
-      // Fill in the blank
-      if (activity === "fill_in_blank" && currentQuestion.type_payload?.type === "fill_in_blank") {
+      // Fill in the blank (also supports listening + fill_in_blank)
+      if (
+        activity === "fill_in_blank" &&
+        (currentQuestion.type_payload?.type === "fill_in_blank" ||
+          (currentQuestion.type_payload?.type === "listening" &&
+            currentQuestion.type_payload.sub_answer_kind === "fill_in_blank"))
+      ) {
         const resp: StructuredAnswerResponse = {
           kind: "blanks",
           answers: blankAnswers,
         };
         const grade = gradeQuestionResponse(currentQuestion, resp);
-        const expectedText = currentQuestion.type_payload.blanks
-          .map((b, i) => `(${i + 1}) ${b.accepted_answers.join(" / ")}`)
-          .join(" · ");
+        const expectedText = formatCorrectAnswerDisplay(currentQuestion, locale);
         persistProgressAndAdvance(
           currentQuestion,
           grade.isCorrect,
@@ -967,13 +1128,14 @@ export function LearnClient({ setId }: LearnClientProps) {
     ],
   );
 
-  // Keyboard shortcuts (guarded against inputs & IME & buttons!)
+  const shortcutsEnabled =
+    preferences.mode_preferences?.shortcuts?.enabled !== false;
+
+  // Keyboard shortcuts (strictly guarded against inputs, IME, dialogs & user shortcut toggle — V32-023)
   React.useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!currentCard || !currentQuestion) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.isComposing || e.keyCode === 229) return;
-      if (isEditableEventTarget(e.target)) return;
+      if (shouldIgnoreShortcutEvent(e, { shortcutsEnabled })) return;
 
       if (feedback && !feedback.isForcedCorrectionPrompt) {
         if (e.key === "Enter" && !isInteractiveControlTarget(e.target)) {
@@ -993,7 +1155,7 @@ export function LearnClient({ setId }: LearnClientProps) {
         if (!Number.isNaN(num) && num >= 1 && num <= displayedOptions.length) {
           e.preventDefault();
           const opt = displayedOptions[num - 1];
-          if (currentQuestion.question_type === "multiple_choice") {
+          if (isMultiSelectChoiceQuestion(currentQuestion)) {
             setSelectedOptionIds((prev) =>
               prev.includes(opt.id)
                 ? prev.filter((id) => id !== opt.id)
@@ -1015,11 +1177,17 @@ export function LearnClient({ setId }: LearnClientProps) {
     feedback,
     handleContinueAfterFeedback,
     handleSubmitCurrentActivity,
+    shortcutsEnabled,
   ]);
 
   if (isLoading) {
     return (
-      <FocusModeShell backHref={`/sets/${setId}`} title={t("study.learn")}>
+      <FocusModeShell
+        backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="learn"
+        title={t("study.learn")}
+      >
         <StudyLoadingSkeleton />
       </FocusModeShell>
     );
@@ -1027,7 +1195,12 @@ export function LearnClient({ setId }: LearnClientProps) {
 
   if (isError || !bundle) {
     return (
-      <FocusModeShell backHref={`/sets/${setId}`} title={t("study.learn")}>
+      <FocusModeShell
+        backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="learn"
+        title={t("study.learn")}
+      >
         <StudyErrorState
           message={error instanceof Error ? error.message : undefined}
           onRetry={() => void refetch()}
@@ -1038,6 +1211,13 @@ export function LearnClient({ setId }: LearnClientProps) {
   }
 
   const summary = learnState ? getAdaptiveLearnSummary(learnState) : null;
+  const learnProgress = learnState
+    ? computeAdaptiveLearnProgress(learnState)
+    : null;
+  const activeObjectiveMeta = getLearnObjectiveMeta(objective);
+  const isCurrentMultiChoice = currentQuestion
+    ? isMultiSelectChoiceQuestion(currentQuestion)
+    : false;
   const isStarred = currentQuestion
     ? bundle.starredIds.has(currentQuestion.id)
     : false;
@@ -1048,16 +1228,18 @@ export function LearnClient({ setId }: LearnClientProps) {
   return (
     <FocusModeShell
       backHref={`/sets/${setId}`}
+      studySetId={setId}
+      activeMode="learn"
       title={bundle.studySet.title}
-      subtitle={lText(locale, "Chế độ Học thích ứng V3", "Adaptive Learn Mode")}
-      progressCurrent={summary?.graduatedCount ?? 0}
-      progressTotal={summary?.totalItems ?? 0}
+      subtitle={lText(locale, "Học thích ứng", "Adaptive Learn")}
+      progressCurrent={learnProgress?.visitedCount ?? 0}
+      progressTotal={learnProgress?.totalItems ?? 0}
       headerRight={
         <div className="flex items-center gap-1.5">
           {summary ? (
-            <Badge variant="outline" className="hidden sm:inline-flex tabular-nums">
+            <Badge variant="outline" className="hidden md:inline-flex tabular-nums">
               {lText(locale, `Vòng ${summary.roundNumber}`, `Round ${summary.roundNumber}`)} ·{" "}
-              {summary.graduatedCount}/{summary.totalItems}
+              {lText(locale, "Thuộc", "Done")} {summary.graduatedCount}/{summary.totalItems}
             </Badge>
           ) : null}
 
@@ -1067,22 +1249,22 @@ export function LearnClient({ setId }: LearnClientProps) {
                 type="button"
                 variant="outline"
                 size="sm"
-                className="min-h-10 sm:min-h-9"
+                className="min-h-11 sm:min-h-9"
               >
                 <Settings2 className="size-4" aria-hidden="true" />
                 <span className="hidden sm:inline">
-                  {lText(locale, "Mục tiêu & Lọc", "Goal & Filters")}
+                  {lText(locale, "Bộ lọc & Tùy chọn", "Filters & Options")}
                 </span>
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80 space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="learn-objective" className="text-xs font-semibold">
-                  {lText(locale, "Mục tiêu học (5 chế độ)", "Learning Objective")}
+                  {lText(locale, "Mục tiêu học", "Learning Goal")}
                 </Label>
                 <Select
                   value={objective}
-                  onValueChange={(v) => setObjective(v as LearnObjective)}
+                  onValueChange={(v) => requestObjectiveChange(v as LearnObjective)}
                 >
                   <SelectTrigger id="learn-objective" className="h-9 text-xs">
                     <SelectValue />
@@ -1282,27 +1464,67 @@ export function LearnClient({ setId }: LearnClientProps) {
       }
     >
       <div className="mx-auto w-full max-w-3xl space-y-4">
-        {/* Compact Objective Selector Strip */}
+        {/* Compact Goal Selector Popover & Mastery Summary (V32-032 / UX31-11) */}
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card px-3 py-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {LEARN_OBJECTIVES.map((obj) => (
+          <Popover open={goalPopoverOpen} onOpenChange={setGoalPopoverOpen}>
+            <PopoverTrigger asChild>
               <Button
-                key={obj.id}
                 type="button"
+                variant="outline"
                 size="sm"
-                variant={objective === obj.id ? "default" : "ghost"}
-                className="h-8 text-xs"
-                onClick={() => setObjective(obj.id)}
+                className="min-h-11 gap-1.5 text-xs font-medium sm:min-h-9"
               >
-                {lText(locale, obj.viLabel, obj.enLabel)}
+                <Target className="size-3.5 text-primary" aria-hidden="true" />
+                <span>
+                  {lText(locale, "Mục tiêu", "Goal")}:{" "}
+                  <strong>
+                    {lText(
+                      locale,
+                      activeObjectiveMeta.viLabel,
+                      activeObjectiveMeta.enLabel,
+                    )}
+                  </strong>
+                </span>
+                <ChevronDown className="size-3.5 text-muted-foreground" aria-hidden="true" />
               </Button>
-            ))}
-          </div>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-80 space-y-1.5 p-2">
+              <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {lText(locale, "Chọn mục tiêu phiên học", "Choose Session Goal")}
+              </p>
+              {LEARN_OBJECTIVES.map((obj) => {
+                const isSelected = objective === obj.id;
+                return (
+                  <button
+                    key={obj.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    onClick={() => requestObjectiveChange(obj.id)}
+                    className={cn(
+                      "flex min-h-11 w-full flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors",
+                      isSelected
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-transparent hover:bg-muted/60",
+                    )}
+                  >
+                    <span className="text-xs font-semibold">
+                      {lText(locale, obj.viLabel, obj.enLabel)}
+                    </span>
+                    <span className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+                      {lText(locale, obj.viDesc, obj.enDesc)}
+                    </span>
+                  </button>
+                );
+              })}
+            </PopoverContent>
+          </Popover>
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
             <span>
-              {lText(locale, "Thành thạo", "Mastered")}: {masterySummary.mastered}/
-              {masterySummary.total}
+              {lText(locale, "Đã thành thạo", "Mastered")}:{" "}
+              <strong className="text-foreground">
+                {masterySummary.mastered}/{masterySummary.total}
+              </strong>
             </span>
           </div>
         </div>
@@ -1310,7 +1532,7 @@ export function LearnClient({ setId }: LearnClientProps) {
         {/* Resume Checkpoint Banner */}
         {pendingResume ? (
           <ResumeSessionBanner
-            modeLabel={lText(locale, "Chế độ Học thích ứng", "Adaptive Learn")}
+            modeLabel={lText(locale, "Học thích ứng", "Adaptive Learn")}
             currentIndex={pendingResume.currentIndex}
             totalItems={pendingResume.totalItems}
             progressPercent={pendingResume.progressPercent}
@@ -1325,13 +1547,17 @@ export function LearnClient({ setId }: LearnClientProps) {
             }}
             onRestart={() => {
               setPendingResume(null);
-              clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+              if (authenticatedUserId) {
+                clearLocalCheckpoint(authenticatedUserId, sessionKey);
+              }
               void deleteCheckpoint({ sessionKey }).catch(() => {});
               setConfigNonce((n) => n + 1);
             }}
             onDiscard={() => {
               setPendingResume(null);
-              clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+              if (authenticatedUserId) {
+                clearLocalCheckpoint(authenticatedUserId, sessionKey);
+              }
               void deleteCheckpoint({ sessionKey }).catch(() => {});
             }}
           />
@@ -1696,7 +1922,7 @@ export function LearnClient({ setId }: LearnClientProps) {
                               disabled={revealed}
                               aria-pressed={isSelected}
                               onClick={() => {
-                                if (currentQuestion.question_type === "multiple_choice") {
+                                if (isCurrentMultiChoice) {
                                   setSelectedOptionIds((prev) =>
                                     prev.includes(opt.id)
                                       ? prev.filter((id) => id !== opt.id)
@@ -1742,10 +1968,10 @@ export function LearnClient({ setId }: LearnClientProps) {
                         })}
                       </div>
 
-                      {currentQuestion.question_type === "multiple_choice" &&
-                      !feedback ? (
+                      {isCurrentMultiChoice && !feedback ? (
                         <Button
                           type="button"
+                          className="min-h-11 sm:min-h-9"
                           disabled={selectedOptionIds.length === 0}
                           onClick={() => handleSubmitCurrentActivity()}
                         >
@@ -1775,25 +2001,30 @@ export function LearnClient({ setId }: LearnClientProps) {
                             }
                           }}
                           placeholder={lText(locale, "Nhập giá trị số...", "Enter numeric value...")}
-                          className="w-48 tabular-nums"
+                          className="min-h-11 w-48 tabular-nums sm:min-h-9"
                         />
-                        {currentQuestion.type_payload.unit ? (
+                        {currentQuestion.type_payload.unit_required ? (
                           <Input
                             value={numericalUnit}
                             readOnly={Boolean(feedback)}
                             onChange={(e) => setNumericalUnit(e.target.value)}
                             placeholder={lText(
                               locale,
-                              `Đơn vị (vd: ${currentQuestion.type_payload.unit})`,
-                              `Unit (e.g. ${currentQuestion.type_payload.unit})`,
+                              "Nhập đơn vị...",
+                              "Enter unit...",
                             )}
-                            className="w-36"
+                            className="min-h-11 w-36 sm:min-h-9"
                           />
+                        ) : currentQuestion.type_payload.unit ? (
+                          <Badge variant="outline" className="min-h-9 px-3 text-xs">
+                            {currentQuestion.type_payload.unit}
+                          </Badge>
                         ) : null}
                       </div>
                       {!feedback ? (
                         <Button
                           type="button"
+                          className="min-h-11 sm:min-h-9"
                           disabled={!numericalValue.trim()}
                           onClick={() => handleSubmitCurrentActivity()}
                         >
@@ -1802,9 +2033,23 @@ export function LearnClient({ setId }: LearnClientProps) {
                       ) : null}
                     </div>
                   ) : currentCard.activity === "fill_in_blank" &&
-                    currentQuestion.type_payload?.type === "fill_in_blank" ? (
+                    (currentQuestion.type_payload?.type === "fill_in_blank" ||
+                      (currentQuestion.type_payload?.type === "listening" &&
+                        currentQuestion.type_payload.sub_answer_kind ===
+                          "fill_in_blank")) ? (
                     <div className="space-y-3">
-                      {currentQuestion.type_payload.blanks.map((blank, idx) => (
+                      {(currentQuestion.type_payload.type === "fill_in_blank"
+                        ? currentQuestion.type_payload.blanks
+                        : [
+                            {
+                              blank_id: "blank_1",
+                              accepted_answers: getExpectedWriteAnswers(
+                                currentQuestion,
+                              ).map((a) => a.answer_text),
+                              hint: null as string | null,
+                            },
+                          ]
+                      ).map((blank, idx) => (
                         <div key={blank.blank_id} className="space-y-1">
                           <Label htmlFor={`learn-blank-${blank.blank_id}`} className="text-xs">
                             {lText(locale, `Ô trống #${idx + 1}`, `Blank #${idx + 1}`)}
@@ -1820,12 +2065,14 @@ export function LearnClient({ setId }: LearnClientProps) {
                                 [blank.blank_id]: e.target.value,
                               }))
                             }
+                            className="min-h-11 sm:min-h-9"
                           />
                         </div>
                       ))}
                       {!feedback ? (
                         <Button
                           type="button"
+                          className="min-h-11 sm:min-h-9"
                           onClick={() => handleSubmitCurrentActivity()}
                         >
                           {lText(locale, "Kiểm tra chỗ trống", "Check Blanks")}
@@ -1859,6 +2106,7 @@ export function LearnClient({ setId }: LearnClientProps) {
                                 type="button"
                                 size="icon"
                                 variant="ghost"
+                                className="size-11 sm:size-9"
                                 disabled={Boolean(feedback) || idx === 0}
                                 aria-label={lText(locale, "Di chuyển lên", "Move up")}
                                 onClick={() => {
@@ -1878,6 +2126,7 @@ export function LearnClient({ setId }: LearnClientProps) {
                                 type="button"
                                 size="icon"
                                 variant="ghost"
+                                className="size-11 sm:size-9"
                                 disabled={
                                   Boolean(feedback) || idx === orderedIds.length - 1
                                 }
@@ -1902,6 +2151,7 @@ export function LearnClient({ setId }: LearnClientProps) {
                       {!feedback ? (
                         <Button
                           type="button"
+                          className="min-h-11 sm:min-h-9"
                           onClick={() => handleSubmitCurrentActivity()}
                         >
                           {lText(locale, "Kiểm tra thứ tự", "Check Order")}
@@ -1910,126 +2160,230 @@ export function LearnClient({ setId }: LearnClientProps) {
                     </div>
                   ) : currentCard.activity === "matching" &&
                     currentQuestion.type_payload?.type === "matching" ? (
-                    <div className="space-y-3">
-                      {currentQuestion.type_payload.pairs.map((pair) => {
-                        const rightChoices =
-                          currentQuestion.type_payload?.type === "matching"
-                            ? [
-                                ...currentQuestion.type_payload.pairs.map((p) => ({
-                                  id: p.right_id,
-                                  text: p.right_text,
-                                })),
-                                ...(currentQuestion.type_payload.distractors ?? []).map(
-                                  (d) => ({ id: d.right_id, text: d.right_text }),
-                                ),
-                              ]
-                            : [];
-                        return (
-                          <div
-                            key={pair.id}
-                            className="grid items-center gap-2 rounded-lg border border-border p-3 sm:grid-cols-2"
-                          >
-                            <span className="text-sm font-medium">
-                              {pair.left_text}
-                            </span>
-                            <Select
-                              disabled={Boolean(feedback)}
-                              value={matchingPairs[pair.id] ?? ""}
-                              onValueChange={(val) =>
-                                setMatchingPairs((prev) => ({
-                                  ...prev,
-                                  [pair.id]: val,
-                                }))
-                              }
+                    (() => {
+                      const rawRightChoices = [
+                        ...currentQuestion.type_payload.pairs.map((p) => ({
+                          id: p.right_id,
+                          text: p.right_text,
+                        })),
+                        ...(currentQuestion.type_payload.distractors ?? []).map(
+                          (d) => ({ id: d.right_id, text: d.right_text }),
+                        ),
+                      ];
+                      // Deterministic shuffle so right column never exposes 1:1 row order (V32-021 FUNC-09)
+                      const rightChoices = deterministicShuffleBySeed(
+                        rawRightChoices,
+                        `learn-match:${currentQuestion.id}`,
+                      );
+                      return (
+                        <div className="space-y-3">
+                          {currentQuestion.type_payload.pairs.map((pair) => (
+                            <div
+                              key={pair.id}
+                              className="grid items-center gap-2 rounded-lg border border-border p-3 sm:grid-cols-2"
                             >
-                              <SelectTrigger>
-                                <SelectValue
-                                  placeholder={lText(
-                                    locale,
-                                    "Chọn đáp án ghép cặp...",
-                                    "Choose matching item...",
-                                  )}
-                                />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {rightChoices.map((rc) => (
-                                  <SelectItem key={rc.id} value={rc.id}>
-                                    {rc.text}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        );
-                      })}
-                      {!feedback ? (
-                        <Button
-                          type="button"
-                          onClick={() => handleSubmitCurrentActivity()}
-                        >
-                          {lText(locale, "Kiểm tra ghép cặp", "Check Matches")}
-                        </Button>
-                      ) : null}
-                    </div>
+                              <span className="text-sm font-medium">
+                                {pair.left_text}
+                              </span>
+                              <Select
+                                disabled={Boolean(feedback)}
+                                value={matchingPairs[pair.id] ?? ""}
+                                onValueChange={(val) =>
+                                  setMatchingPairs((prev) => ({
+                                    ...prev,
+                                    [pair.id]: val,
+                                  }))
+                                }
+                              >
+                                <SelectTrigger className="min-h-11 sm:min-h-9">
+                                  <SelectValue
+                                    placeholder={lText(
+                                      locale,
+                                      "Chọn đáp án ghép cặp...",
+                                      "Choose matching item...",
+                                    )}
+                                  />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {rightChoices.map((rc) => (
+                                    <SelectItem key={rc.id} value={rc.id}>
+                                      {rc.text}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          ))}
+                          {!feedback ? (
+                            <Button
+                              type="button"
+                              className="min-h-11 sm:min-h-9"
+                              onClick={() => handleSubmitCurrentActivity()}
+                            >
+                              {lText(locale, "Kiểm tra ghép cặp", "Check Matches")}
+                            </Button>
+                          ) : null}
+                        </div>
+                      );
+                    })()
                   ) : (currentCard.activity === "hotspot" ||
                       currentCard.activity === "diagram_identify") &&
                     currentQuestion.type_payload?.type === "image_hotspot" ? (
-                    <div className="space-y-3">
-                      <p className="text-xs text-muted-foreground">
-                        {lText(
-                          locale,
-                          "Nhấp vào vị trí đúng trên hình ảnh:",
-                          "Click or tap the target location on the image:",
-                        )}
-                      </p>
-                      {isSafeDisplayImageUrl(
-                        currentQuestion.type_payload.image_url,
-                      ) ? (
-                        <div className="relative inline-flex min-h-48 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/20">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={currentQuestion.type_payload.image_url}
-                            alt={lText(locale, "Hình ảnh điểm đánh dấu", "Hotspot image")}
-                            loading="lazy"
-                            decoding="async"
-                            className="max-h-80 w-auto cursor-crosshair object-contain"
-                            onClick={(e) => {
-                              if (feedback) return;
-                              const rect = e.currentTarget.getBoundingClientRect();
-                              const x = (e.clientX - rect.left) / rect.width;
-                              const y = (e.clientY - rect.top) / rect.height;
-                              setHotspotClicks([
-                                {
-                                  x: Math.max(0, Math.min(1, x)),
-                                  y: Math.max(0, Math.min(1, y)),
-                                },
-                              ]);
-                            }}
-                          />
-                          {hotspotClicks.map((pt, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                left: `${pt.x * 100}%`,
-                                top: `${pt.y * 100}%`,
-                              }}
-                              className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 size-5 rounded-full border-2 border-white bg-primary shadow"
-                            />
-                          ))}
+                    (() => {
+                      const hp = currentQuestion.type_payload;
+                      const requireAll = Boolean(hp.require_all_targets);
+                      const maxClicks = requireAll
+                        ? Math.max(1, hp.target_hotspots.length)
+                        : 1;
+                      const addPoint = (pt: NormalizedPoint) => {
+                        if (feedback) return;
+                        const clamped = {
+                          x: Math.max(0, Math.min(1, pt.x)),
+                          y: Math.max(0, Math.min(1, pt.y)),
+                        };
+                        if (!requireAll) {
+                          setHotspotClicks([clamped]);
+                          return;
+                        }
+                        setHotspotClicks((prev) => {
+                          const next = [...prev, clamped];
+                          return next.length > maxClicks
+                            ? next.slice(next.length - maxClicks)
+                            : next;
+                        });
+                      };
+                      return (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span>
+                              {requireAll
+                                ? lText(
+                                    locale,
+                                    `Nhấp chọn ${maxClicks} điểm mục tiêu trên ảnh (${hotspotClicks.length}/${maxClicks}):`,
+                                    `Click ${maxClicks} target points on the image (${hotspotClicks.length}/${maxClicks}):`,
+                                  )
+                                : lText(
+                                    locale,
+                                    "Nhấp vào vị trí đúng trên hình ảnh (hoặc dùng phím mũi tên + Enter):",
+                                    "Click or tap the target location on the image (or use arrow keys + Enter):",
+                                  )}
+                            </span>
+                            {hotspotClicks.length > 0 && !feedback ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs"
+                                onClick={() => setHotspotClicks([])}
+                              >
+                                {lText(locale, "Xóa điểm", "Clear pins")}
+                              </Button>
+                            ) : null}
+                          </div>
+                          {isSafeDisplayImageUrl(hp.image_url) ? (
+                            <div className="flex flex-col items-start gap-2">
+                              {/* Tight inline-block wrapper matching exact img box (V32-036 FUNC-25) */}
+                              <div
+                                role="button"
+                                tabIndex={feedback ? -1 : 0}
+                                aria-label={lText(
+                                  locale,
+                                  "Vùng chọn điểm trên ảnh. Dùng phím mũi tên di chuyển tâm ngắm và Enter để đặt điểm.",
+                                  "Image hotspot canvas. Use arrow keys to move crosshair and Enter to place pin.",
+                                )}
+                                onKeyDown={(e) => {
+                                  if (feedback) return;
+                                  const step = e.shiftKey ? 0.1 : 0.03;
+                                  if (e.key === "ArrowLeft") {
+                                    e.preventDefault();
+                                    setKeyboardCursor((c) => ({
+                                      ...c,
+                                      x: Math.max(0, c.x - step),
+                                    }));
+                                  } else if (e.key === "ArrowRight") {
+                                    e.preventDefault();
+                                    setKeyboardCursor((c) => ({
+                                      ...c,
+                                      x: Math.min(1, c.x + step),
+                                    }));
+                                  } else if (e.key === "ArrowUp") {
+                                    e.preventDefault();
+                                    setKeyboardCursor((c) => ({
+                                      ...c,
+                                      y: Math.max(0, c.y - step),
+                                    }));
+                                  } else if (e.key === "ArrowDown") {
+                                    e.preventDefault();
+                                    setKeyboardCursor((c) => ({
+                                      ...c,
+                                      y: Math.min(1, c.y + step),
+                                    }));
+                                  } else if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    addPoint(keyboardCursor);
+                                  }
+                                }}
+                                className="relative inline-block max-w-full overflow-hidden rounded-lg border border-border bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={hp.image_url}
+                                  alt={lText(locale, "Hình ảnh điểm đánh dấu", "Hotspot image")}
+                                  loading="lazy"
+                                  decoding="async"
+                                  className="block max-h-80 w-auto max-w-full cursor-crosshair select-none object-contain"
+                                  onClick={(e) => {
+                                    if (feedback) return;
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    if (rect.width <= 0 || rect.height <= 0) return;
+                                    const x = (e.clientX - rect.left) / rect.width;
+                                    const y = (e.clientY - rect.top) / rect.height;
+                                    setKeyboardCursor({ x, y });
+                                    addPoint({ x, y });
+                                  }}
+                                />
+                                {!feedback ? (
+                                  <span
+                                    aria-hidden="true"
+                                    style={{
+                                      left: `${keyboardCursor.x * 100}%`,
+                                      top: `${keyboardCursor.y * 100}%`,
+                                    }}
+                                    className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 text-primary/70"
+                                  >
+                                    <Crosshair className="size-4" />
+                                  </span>
+                                ) : null}
+                                {hotspotClicks.map((pt, i) => (
+                                  <span
+                                    key={i}
+                                    style={{
+                                      left: `${pt.x * 100}%`,
+                                      top: `${pt.y * 100}%`,
+                                    }}
+                                    className="pointer-events-none absolute flex size-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-primary text-[10px] font-bold text-primary-foreground shadow"
+                                  >
+                                    {i + 1}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          {!feedback ? (
+                            <div>
+                              <Button
+                                type="button"
+                                className="min-h-11 sm:min-h-9"
+                                disabled={hotspotClicks.length === 0}
+                                onClick={() => handleSubmitCurrentActivity()}
+                              >
+                                {lText(locale, "Kiểm tra vị trí", "Check Location")}
+                              </Button>
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
-                      {!feedback ? (
-                        <div>
-                          <Button
-                            type="button"
-                            disabled={hotspotClicks.length === 0}
-                            onClick={() => handleSubmitCurrentActivity()}
-                          >
-                            {lText(locale, "Kiểm tra vị trí", "Check Location")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </div>
+                      );
+                    })()
                   ) : (
                     /* Default Recall Input (Write / Spell) */
                     <div className="space-y-3">
@@ -2154,6 +2508,47 @@ export function LearnClient({ setId }: LearnClientProps) {
         ) : null}
       </div>
 
+      <AlertDialog
+        open={Boolean(pendingObjectiveSwitch)}
+        onOpenChange={(open) => {
+          if (!open) setPendingObjectiveSwitch(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {lText(
+                locale,
+                "Đổi mục tiêu phiên học hiện tại?",
+                "Switch current session goal?",
+              )}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {lText(
+                locale,
+                "Đổi mục tiêu sẽ sắp xếp lại hàng đợi phiên hiện tại theo mục tiêu mới. Tiến độ SM-2 các câu bạn vừa làm vẫn được lưu an toàn.",
+                "Switching goals will rebuild the current session queue for the new goal. SM-2 progress for answered cards stays safely saved.",
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {lText(locale, "Giữ nguyên", "Cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingObjectiveSwitch) {
+                  setObjective(pendingObjectiveSwitch);
+                  setPendingObjectiveSwitch(null);
+                }
+              }}
+            >
+              {lText(locale, "Đổi mục tiêu", "Switch Goal")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <ResetProgressDialog
         open={resetDialogOpen}
         onOpenChange={setResetDialogOpen}
@@ -2163,7 +2558,7 @@ export function LearnClient({ setId }: LearnClientProps) {
         subject={bundle.studySet.subject ?? undefined}
         chapters={bundle.chapters}
         mode="learn"
-        userId={bundle.studySet.owner_id}
+        userId={authenticatedUserId ?? ""}
         onResetComplete={() => {
           void refetch();
           setConfigNonce((n) => n + 1);

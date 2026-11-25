@@ -72,6 +72,10 @@ const sql0018 = readFileSync(
   path.join(MIGRATIONS_DIR, "0018_v3_1_performance_rpcs_and_indexes.sql"),
   "utf8",
 );
+const sql0019 = readFileSync(
+  path.join(MIGRATIONS_DIR, "0019_v3_2_stability_security_and_perf.sql"),
+  "utf8",
+);
 const allSql = [sql0001, sql0002, sql0003, sql0004].join("\n");
 
 const ALL_20_TABLES = [
@@ -482,6 +486,122 @@ describe("Security: Supabase SQL Migrations Structural Audit", () => {
       );
       expect(exec0018).toMatch(
         new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${fn}\\([^)]*\\) TO authenticated;`, "i"),
+      );
+    }
+  });
+
+  it("V3.2 migration 0019 remains non-destructive/idempotent, preserves 37/37 RLS & zero bare auth.uid(), drops 12 redundant indexes, and hardens all V3.2 security/perf RPCs", () => {
+    const exec0019 = sql0019
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+
+    // Zero destructive policy/trigger/table drops or temp tables
+    expect(exec0019).not.toMatch(/\bDROP\s+POLICY\b/i);
+    expect(exec0019).not.toMatch(/\bDROP\s+TRIGGER\b/i);
+    expect(exec0019).not.toMatch(/\bDROP\s+TABLE\b/i);
+    expect(exec0019).not.toMatch(/\bCREATE\s+TEMP\s+TABLE\b/i);
+
+    // Zero deprecated auth.role() and 100% wrapped (SELECT auth.uid())
+    expect(exec0019).not.toMatch(/\bauth\.role\s*\(\s*\)/i);
+    const wrapped = exec0019.match(/\(\s*SELECT\s+auth\.uid\s*\(\s*\)\s*\)/gi) ?? [];
+    const total = exec0019.match(/\bauth\.uid\s*\(\s*\)/gi) ?? [];
+    expect(total.length).toBeGreaterThanOrEqual(15);
+    expect(wrapped.length).toBe(total.length);
+
+    // Balanced $$ delimiters
+    const dollarDelims = exec0019.match(/\$\$/g) ?? [];
+    expect(dollarDelims.length % 2).toBe(0);
+
+    // Every function sets search_path = '' and revokes PUBLIC, anon
+    const fnBlocks = exec0019.split(/CREATE OR REPLACE FUNCTION\s+/i).slice(1);
+    expect(fnBlocks.length).toBeGreaterThanOrEqual(19);
+    for (const block of fnBlocks) {
+      const header = block.split(/AS \$\$/i)[0] ?? "";
+      const fnName = header.match(/^([^\s(]+)/)?.[1] ?? "unknown";
+      expect(header, `0019 function ${fnName} missing SET search_path = ''`).toMatch(
+        /SET\s+search_path\s*=\s*''/i,
+      );
+    }
+
+    // SEC-05: Nullable media_assets.owner_id ON DELETE SET NULL + scoped profile trigger
+    expect(exec0019).toMatch(/ALTER COLUMN owner_id DROP NOT NULL/i);
+    expect(exec0019).toMatch(/ON DELETE SET NULL/i);
+    expect(exec0019).toMatch(
+      /REVOKE ALL ON FUNCTION public\.cleanup_profile_media_relations\(\) FROM PUBLIC, anon, authenticated;/i,
+    );
+
+    // DB-08: All 12 redundant indexes dropped cleanly (preserving unindexed_foreign_keys = 0)
+    for (const redundantIdx of [
+      "idx_exam_attempt_questions_attempt_id",
+      "idx_exam_attempt_answers_attempt_id",
+      "idx_study_set_members_study_set_id",
+      "idx_tags_owner_id",
+      "idx_content_media_rel_media",
+      "idx_question_options_study_set_id",
+      "idx_question_accepted_answers_study_set_id",
+      "idx_question_tags_study_set_id",
+      "idx_user_question_progress_study_set_id",
+      "idx_starred_questions_study_set_id",
+      "idx_study_session_answers_study_set_id",
+      "idx_study_session_answers_session_id",
+    ]) {
+      expect(exec0019, `Missing DROP INDEX IF EXISTS public.${redundantIdx}`).toMatch(
+        new RegExp(`DROP INDEX IF EXISTS public\\.${redundantIdx};`, "i"),
+      );
+    }
+
+    // DB-05, DB-09, DB-12, DB-14
+    expect(exec0019).toMatch(/WHERE \(source_metadata->>'import_idempotency_key'\) IS NOT NULL/i);
+    expect(exec0019).toMatch(/CREATE INDEX IF NOT EXISTS idx_study_sets_owner_last_studied\b/i);
+    expect(exec0019).toMatch(/ADD COLUMN IF NOT EXISTS is_answered boolean NOT NULL DEFAULT false/i);
+    expect(exec0019).toMatch(/VALIDATE CONSTRAINT questions_prompt_or_media_v3_chk/i);
+    expect(exec0019).toMatch(/VALIDATE CONSTRAINT questions_audio_url_safe_chk/i);
+    expect(exec0019).toMatch(/VALIDATE CONSTRAINT question_options_content_or_image_v3_chk/i);
+
+    // DB-04: global_library_search removes source_metadata::text ILIKE & caps branches
+    expect(exec0019).not.toMatch(/source_metadata::text/i);
+    expect(exec0019).toMatch(/LIMIT 200/i);
+
+    // SEC-10 & DB-01: pre-claim processing + rejected_inaccessible + FOR UPDATE
+    expect(exec0019).toContain("'rejected_inaccessible'");
+    expect(exec0019).toContain("'processing'");
+    expect(exec0019).toMatch(/ON CONFLICT \(event_id\) DO NOTHING\s+RETURNING event_id/i);
+
+    // All new/updated callable RPCs have REVOKE FROM PUBLIC, anon and GRANT TO authenticated
+    for (const fn of [
+      "save_exam_attempt_answers",
+      "sanitize_pre_submit_type_payload_seeded",
+      "sanitize_pre_submit_type_payload",
+      "create_exam_attempt_v2",
+      "get_exam_attempt_detail",
+      "get_coverage_cycle_subject_progress",
+      "issue_coverage_cycle_next_exam",
+      "sync_offline_learning_events",
+      "record_study_session_answer",
+      "toggle_starred_question",
+      "record_progress_answer",
+      "bump_study_set_content_version",
+      "allocate_question_position",
+      "patch_user_preferences",
+      "save_diagram_patch",
+      "url_encode_query_param",
+      "global_library_search",
+      "get_dashboard_summary",
+      "get_study_set_summary",
+      "list_accessible_study_sets",
+      "get_study_set_questions_page",
+      "get_user_statistics_summary",
+      "get_user_mistakes_page",
+    ]) {
+      expect(exec0019, `Missing function public.${fn}`).toMatch(
+        new RegExp(`CREATE OR REPLACE FUNCTION public\\.${fn}\\b`, "i"),
+      );
+      expect(exec0019, `Missing REVOKE for public.${fn}`).toMatch(
+        new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}\\([\\s\\S]*?\\) FROM PUBLIC, anon;`, "i"),
+      );
+      expect(exec0019, `Missing GRANT for public.${fn}`).toMatch(
+        new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${fn}\\([\\s\\S]*?\\) TO authenticated;`, "i"),
       );
     }
   });

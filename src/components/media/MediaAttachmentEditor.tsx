@@ -8,10 +8,12 @@ import {
   Crop,
   Eye,
   FileAudio,
+  ImageOff,
   ImagePlus,
   Loader2,
   Mic,
   RefreshCw,
+  RotateCcw,
   RotateCw,
   Trash2,
   Upload,
@@ -23,6 +25,7 @@ import {
 } from "@/components/audio/AudioRecorderControl";
 import { ApiError, getFriendlyErrorMessage } from "@/components/layout/api-client";
 import { ImageLightbox } from "@/components/media/ImageLightbox";
+import { useResilientImage } from "@/components/media/use-resilient-image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,7 +41,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useOptionalI18n } from "@/lib/i18n";
 import { uploadAudioSmart, uploadImageSmart } from "@/lib/media/direct-upload";
-import { resolveSafeMediaUrl } from "@/lib/media/urls";
+import { appendMediaRetryParam, resolveSafeMediaUrl } from "@/lib/media/urls";
 import {
   cropAndRotateImageFile,
   extractImageDimensionsFromBytes,
@@ -145,6 +148,54 @@ async function parseSmartUploadResponse(
   }
 
   return (payload?.data ?? payload ?? {}) as Record<string, unknown>;
+}
+
+function AttachmentImageThumbnail({
+  url,
+  alt,
+  vi,
+  onPreview,
+}: {
+  url: string;
+  alt: string;
+  vi: boolean;
+  onPreview: () => void;
+}) {
+  const { resolvedSrc, hasError, handleLoad, handleError, retry } = useResilientImage(url);
+
+  if (hasError) {
+    return (
+      <div className="flex size-20 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-1 text-center">
+        <ImageOff className="size-4 text-destructive/80" aria-hidden="true" />
+        <button
+          type="button"
+          onClick={retry}
+          className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <RotateCcw className="size-2.5" aria-hidden="true" />
+          <span>{vi ? "Thử lại" : "Retry"}</span>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onPreview}
+      aria-label={vi ? "Xem trước ảnh phóng to" : "Preview enlarged image"}
+      className="relative flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={resolvedSrc}
+        alt={alt}
+        onLoad={handleLoad}
+        onError={handleError}
+        className="max-h-full max-w-full object-contain"
+      />
+    </button>
+  );
 }
 
 export function MediaAttachmentEditor({
@@ -429,8 +480,24 @@ export function MediaAttachmentEditor({
     try {
       let sourceFile = localFilesCacheRef.current.get(item.localId);
       if (!sourceFile) {
-        const res = await fetch(item.url, { credentials: "same-origin" });
-        if (!res.ok) throw new Error("Failed to load image for editing");
+        // Signed-URL cache-bust retry (FUNC-31): retry once with fresh `&_r=` & `cache: "no-store"`
+        let res: Response | null = null;
+        try {
+          res = await fetch(item.url, { credentials: "same-origin" });
+        } catch {
+          res = null;
+        }
+        if (
+          (!res || !res.ok) &&
+          !item.url.startsWith("blob:") &&
+          !item.url.startsWith("data:")
+        ) {
+          res = await fetch(appendMediaRetryParam(item.url), {
+            credentials: "same-origin",
+            cache: "no-store",
+          });
+        }
+        if (!res || !res.ok) throw new Error("Failed to load image for editing");
         const blob = await res.blob();
         sourceFile = new File([blob], item.file_name || "image.png", {
           type: blob.type || item.mime_type || "image/png",
@@ -706,9 +773,11 @@ export function MediaAttachmentEditor({
               <div className="flex flex-wrap items-start gap-3">
                 {/* Thumbnail or Audio badge */}
                 {item.kind === "image" ? (
-                  <button
-                    type="button"
-                    onClick={() =>
+                  <AttachmentImageThumbnail
+                    url={item.url}
+                    alt={item.alt_text || item.file_name}
+                    vi={vi}
+                    onPreview={() =>
                       setPreviewLightbox({
                         open: true,
                         src: item.url,
@@ -716,16 +785,7 @@ export function MediaAttachmentEditor({
                         caption: item.caption,
                       })
                     }
-                    aria-label={vi ? "Xem trước ảnh phóng to" : "Preview enlarged image"}
-                    className="relative flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={item.url}
-                      alt={item.alt_text || item.file_name}
-                      className="max-h-full max-w-full object-contain"
-                    />
-                  </button>
+                  />
                 ) : (
                   <div className="flex size-12 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40 text-primary">
                     <FileAudio className="size-5" aria-hidden="true" />

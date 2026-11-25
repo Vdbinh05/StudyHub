@@ -8,6 +8,10 @@ import {
 } from "@/lib/security/errors";
 import { upsertQuestionProgress } from "@/lib/supabase/progress-helper";
 import {
+  isMissingRpcError,
+  rpcRecordProgressAnswer,
+} from "@/lib/supabase/rpc";
+import {
   listProgressQuerySchema,
   upsertProgressSchema,
 } from "@/lib/validation/learning";
@@ -58,6 +62,45 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const { supabase, user } = await requireAuth();
     const body = await parseJsonBody(request);
     const input = upsertProgressSchema.parse(body);
+
+    // DB-02 (Migration 0019): Single-RTT atomic FOR UPDATE SM-2 progress RPC
+    const { data: rpcProgress, error: rpcErr } = await rpcRecordProgressAnswer(
+      supabase,
+      {
+        p_question_id: input.question_id,
+        p_study_set_id: input.study_set_id ?? null,
+        p_is_correct: input.is_correct,
+        p_self_rating: input.self_rating ?? null,
+        p_confidence: input.confidence ?? null,
+        p_hint_used: input.hint_used ?? false,
+        p_mode: null,
+        p_response_time_ms: null,
+        p_override_mastery_level: input.mastery_level ?? null,
+        p_override_mistake_status: input.mistake_status ?? null,
+        p_override_ease_factor: input.ease_factor ?? null,
+        p_override_interval_days: input.interval_days ?? null,
+        p_override_repetitions: input.repetitions ?? null,
+        p_override_next_review_at:
+          input.next_review_at !== undefined ? input.next_review_at : null,
+        p_has_override_next_review_at: input.next_review_at !== undefined,
+      },
+    );
+    if (!rpcErr && rpcProgress) {
+      return apiSuccess(rpcProgress);
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      if (rpcErr.code === "P0002") {
+        throw new AppError("NOT_FOUND", "Question not found.", 404);
+      }
+      if (rpcErr.code === "22023") {
+        throw new AppError(
+          "INVALID_REFERENCE",
+          "Question does not belong to the specified study set.",
+          400,
+        );
+      }
+      throw rpcErr;
+    }
 
     // SH-012 / SEC-003: Always resolve true `questions.study_set_id` from DB (eliminates UUID oracle!)
     const { data: qRow, error: qErr } = await supabase

@@ -56,6 +56,7 @@ function CreateSetFormInner() {
   const [submitted, setSubmitted] = React.useState(false);
 
   const titleInputRef = React.useRef<HTMLInputElement>(null);
+  const submittingRef = React.useRef(false);
 
   const foldersQuery = useQuery<Folder[]>({
     queryKey: ["folders"],
@@ -93,6 +94,7 @@ function CreateSetFormInner() {
       router.push(`/sets/${set.id}/${nextAction}`);
     },
     onError: (err) => {
+      submittingRef.current = false;
       toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
@@ -100,11 +102,15 @@ function CreateSetFormInner() {
   const titleInvalid = (touchedTitle || submitted) && title.trim().length === 0;
 
   const triggerCreate = (nextAction: "edit" | "import") => {
+    if (submittingRef.current || createMutation.isPending) {
+      return;
+    }
     setSubmitted(true);
     if (!title.trim()) {
       titleInputRef.current?.focus();
       return;
     }
+    submittingRef.current = true;
     createMutation.mutate(nextAction);
   };
 

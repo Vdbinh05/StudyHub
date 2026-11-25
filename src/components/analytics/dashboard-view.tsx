@@ -33,6 +33,7 @@ import {
 } from "@/components/layout/api-client";
 import { EmptyState } from "@/components/layout/empty-state";
 import { ResumeSessionBanner } from "@/components/learning/ResumeSessionBanner";
+import { useOptionalPwa } from "@/components/pwa/PwaProvider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +46,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
+import { clearLocalCheckpoint } from "@/lib/learning/checkpoints";
 import type {
   ExamAttempt,
   LearningSessionCheckpoint,
@@ -248,6 +250,7 @@ export function DashboardView() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const configured = isSupabaseConfiguredClient();
+  const pwa = useOptionalPwa();
 
   const { data, isLoading, error, refetch } = useQuery<DashboardSummary>({
     queryKey: ["dashboard"],
@@ -266,12 +269,26 @@ export function DashboardView() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["set-checkpoints"] });
       toast.success(vi ? "Đã bỏ phiên học dở." : "In-progress session discarded.");
     },
     onError: (err) => {
       toast.error(getFriendlyErrorMessage(err, locale));
     },
   });
+
+  const clearCheckpointLocally = React.useCallback(
+    (cp: LearningSessionCheckpoint) => {
+      const activeId = pwa?.activeUserId;
+      if (activeId) {
+        clearLocalCheckpoint(activeId, cp.session_key);
+      }
+      if (cp.user_id && cp.user_id !== activeId) {
+        clearLocalCheckpoint(cp.user_id, cp.session_key);
+      }
+    },
+    [pwa?.activeUserId],
+  );
 
   if (!configured) {
     return (
@@ -396,10 +413,14 @@ export function DashboardView() {
         isBusy={discardCheckpointMutation.isPending}
         onContinue={() => router.push(resolveCheckpointHref(cp, false))}
         onRestart={async () => {
+          clearCheckpointLocally(cp);
           await discardCheckpointMutation.mutateAsync(cp.id).catch(() => {});
           router.push(resolveCheckpointHref(cp, true));
         }}
-        onDiscard={() => discardCheckpointMutation.mutate(cp.id)}
+        onDiscard={() => {
+          clearCheckpointLocally(cp);
+          discardCheckpointMutation.mutate(cp.id);
+        }}
       />
     );
   };
@@ -447,19 +468,19 @@ export function DashboardView() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button asChild size="sm">
+            <Button asChild size="sm" className="min-h-11 sm:min-h-8">
               <Link href="/library" prefetch={false}>
                 <FolderOpen className="size-4" aria-hidden="true" />
                 <span>{vi ? "Thư viện" : "Library"}</span>
               </Link>
             </Button>
-            <Button asChild size="sm" variant="outline">
+            <Button asChild size="sm" variant="outline" className="min-h-11 sm:min-h-8">
               <Link href="/exams/new" prefetch={false}>
                 <FileCheck2 className="size-4" aria-hidden="true" />
                 <span>{vi ? "Thi thử" : "Mock Exam"}</span>
               </Link>
             </Button>
-            <Button asChild size="sm" variant="outline">
+            <Button asChild size="sm" variant="outline" className="min-h-11 sm:min-h-8">
               <Link href="/import" prefetch={false}>
                 <Upload className="size-4" aria-hidden="true" />
                 <span>{vi ? "Nhập tài liệu" : "Import"}</span>
@@ -589,13 +610,22 @@ export function DashboardView() {
                 {vi ? "Học phần của bạn" : "Your Study Sets"}
               </h2>
               <div className="flex items-center gap-1">
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href="/sets/new" prefetch={false}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  className="min-h-11 min-w-11 sm:min-h-8 sm:min-w-0"
+                >
+                  <Link
+                    href="/sets/new"
+                    prefetch={false}
+                    aria-label={t("library.newSet")}
+                  >
                     <Plus className="size-4" aria-hidden="true" />
                     <span className="hidden sm:inline">{t("library.newSet")}</span>
                   </Link>
                 </Button>
-                <Button variant="ghost" size="sm" asChild>
+                <Button variant="ghost" size="sm" asChild className="min-h-11 sm:min-h-8">
                   <Link href="/library" prefetch={false}>
                     <span>{vi ? "Xem tất cả" : "View all"}</span>
                     <ArrowRight className="size-4" aria-hidden="true" />
@@ -653,13 +683,23 @@ export function DashboardView() {
                             : "Ready to study"}
                       </span>
                       <div className="flex shrink-0 items-center gap-1.5">
-                        <Button asChild size="sm" variant="secondary" className="h-8 px-2.5 text-xs">
+                        <Button
+                          asChild
+                          size="sm"
+                          variant="secondary"
+                          className="min-h-11 px-3 text-xs sm:h-8 sm:min-h-8 sm:px-2.5"
+                        >
                           <Link href={quickStudyHref} prefetch={false}>
                             <Play className="size-3" aria-hidden="true" />
                             <span>{vi ? "Học" : "Study"}</span>
                           </Link>
                         </Button>
-                        <Button asChild size="sm" variant="ghost" className="h-8 px-2 text-xs">
+                        <Button
+                          asChild
+                          size="sm"
+                          variant="ghost"
+                          className="min-h-11 px-2.5 text-xs sm:h-8 sm:min-h-8 sm:px-2"
+                        >
                           <Link href={`/sets/${set.id}`} prefetch={false}>
                             {vi ? "Chi tiết" : "Open"}
                           </Link>
@@ -770,7 +810,7 @@ export function DashboardView() {
                           <Link
                             href={targetHref}
                             prefetch={false}
-                            className="hover:bg-secondary/60 flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 transition-colors"
+                            className="hover:bg-secondary/60 flex min-h-11 items-center justify-between gap-3 rounded-lg px-2 py-2 transition-colors sm:min-h-0 sm:py-1.5"
                           >
                             <div className="min-w-0">
                               <p className="text-foreground truncate text-sm font-medium">

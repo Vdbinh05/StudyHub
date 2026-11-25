@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -36,18 +38,19 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { detectSpeechLanguage } from "@/lib/audio/tts";
 import { useI18n } from "@/lib/i18n";
 import { useUserPreferences } from "@/lib/preferences";
 import {
   createStudySession,
   deleteCheckpoint,
-  isEditableEventTarget,
   isInteractiveControlTarget,
   isSafeDisplayImageUrl,
   listCheckpoints,
   recordStudySessionAnswer,
   updateStudySession,
   upsertCheckpoint,
+  upsertCheckpointKeepalive,
   upsertQuestionProgress,
 } from "@/lib/learning/api-client";
 import {
@@ -64,6 +67,8 @@ import {
 } from "@/lib/learning/flashcard-projection";
 import { createSeededRng, fisherYatesShuffle } from "@/lib/learning/shuffle";
 import { calculateNextReview } from "@/lib/learning/sm2";
+import { invalidateLearningCaches } from "@/lib/query-keys";
+import { shouldIgnoreShortcutEvent } from "@/lib/ui/shortcuts";
 import type { SelfRating } from "@/types/domain";
 import { cn, formatDuration } from "@/lib/utils";
 import { FocusModeShell } from "./FocusModeShell";
@@ -76,6 +81,7 @@ import {
   StudyEmptyState,
   StudyErrorState,
   StudyLoadingSkeleton,
+  useAuthenticatedUserId,
   useStudySetBundle,
 } from "./useStudySetBundle";
 
@@ -101,7 +107,19 @@ function getReducedMotionServerSnapshot(): boolean {
 
 export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const isFreshLaunch = searchParams.get("fresh") === "1";
   const { preferences, playFeedbackSound } = useUserPreferences();
+  const authenticatedUserId = useAuthenticatedUserId();
+  const flashcardsPrefs = preferences.mode_preferences?.flashcards;
+  const showHints = flashcardsPrefs?.show_hints !== false;
+  const showKeyboardHints =
+    flashcardsPrefs?.show_keyboard_hints !== false &&
+    preferences.mode_preferences?.shortcuts?.show_hints !== false;
+  const shortcutsEnabled =
+    preferences.mode_preferences?.shortcuts?.enabled !== false;
+
   const systemReducedMotion = React.useSyncExternalStore(
     subscribeReducedMotion,
     getReducedMotionSnapshot,
@@ -126,7 +144,9 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
   const [isShuffled, setIsShuffled] = React.useState<boolean>(
     () => preferences.default_shuffle_questions,
   );
-  const [swapSides, setSwapSides] = React.useState(false);
+  const [swapSides, setSwapSides] = React.useState<boolean>(
+    () => flashcardsPrefs?.start_side === "back",
+  );
   const [reviewSubsetIds, setReviewSubsetIds] = React.useState<string[] | null>(
     null,
   );
@@ -137,7 +157,8 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     if (syncedPrefsRef.current) return;
     syncedPrefsRef.current = true;
     setIsShuffled(preferences.default_shuffle_questions);
-  }, [preferences.default_shuffle_questions]);
+    setSwapSides(flashcardsPrefs?.start_side === "back");
+  }, [flashcardsPrefs?.start_side, preferences.default_shuffle_questions]);
 
   const [currentIndex, setCurrentIndex] = React.useState(0);
   const [isFlipped, setIsFlipped] = React.useState(false);
@@ -200,8 +221,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     return () => document.removeEventListener("fullscreenchange", handleFsChange);
   }, []);
 
-  // Stable deck ordering: depends ONLY on `bundle?.questions` & explicit seeded shuffle
-  // NEVER depends on mutable `bundle` object, preventing deck reshuffle on every card rating (SH-021)!
+  // Pure chunk-based deterministic shuffle (50/page) so background Pages 2..N append cleanly without reshuffling Card 1 (V32-015)
   const bundleQuestions = bundle?.questions;
   const cards = React.useMemo<ProjectedFlashcard[]>(() => {
     if (!bundleQuestions) return [];
@@ -222,13 +242,21 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     }
 
     const projected = filtered.map(projectQuestionToFlashcard);
-    if (isShuffled) {
-      const rng = createSeededRng(
-        `${setId}:${selectedChapter}:${starredOnly}:${shuffleSeed}`,
-      );
-      return fisherYatesShuffle(projected, rng);
+    if (!isShuffled) {
+      return projected;
     }
-    return projected;
+
+    const CHUNK_SIZE = 50;
+    const out: ProjectedFlashcard[] = [];
+    for (let offset = 0; offset < projected.length; offset += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(offset / CHUNK_SIZE);
+      const chunk = projected.slice(offset, offset + CHUNK_SIZE);
+      const rng = createSeededRng(
+        `${setId}:${selectedChapter}:${starredOnly}:${shuffleSeed}:c${chunkIdx}`,
+      );
+      out.push(...fisherYatesShuffle(chunk, rng));
+    }
+    return out;
   }, [
     bundleQuestions,
     isShuffled,
@@ -293,8 +321,9 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       stopSpeech();
       try {
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang =
+        const fallbackLang =
           bundle?.studySet.source_language === "en" ? "en-US" : "vi-VN";
+        utterance.lang = detectSpeechLanguage(text, fallbackLang);
         utterance.onend = () => setIsSpeaking(false);
         utterance.onerror = () => setIsSpeaking(false);
         setIsSpeaking(true);
@@ -305,6 +334,31 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     },
     [ttsSupported, stopSpeech, bundle],
   );
+
+  // Respect mode_preferences.flashcards.auto_play_audio on card change (V32-025 FUNC-14)
+  React.useEffect(() => {
+    if (
+      !flashcardsPrefs?.auto_play_audio ||
+      !activeCard ||
+      isCompleted ||
+      isFlipped
+    ) {
+      return;
+    }
+    const textToSpeak = swapSides ? activeCard.backText : activeCard.frontText;
+    if (!textToSpeak?.trim()) return;
+    const timer = window.setTimeout(() => {
+      handleSpeak(textToSpeak);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeCard,
+    flashcardsPrefs?.auto_play_audio,
+    handleSpeak,
+    isCompleted,
+    isFlipped,
+    swapSides,
+  ]);
 
   const toggleFullscreen = React.useCallback(async () => {
     const el = containerRef.current;
@@ -335,11 +389,11 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     sessionStartRef.current = Date.now();
     cardShownAtRef.current = Date.now();
     sessionIdRef.current = null;
-    if (bundle) {
-      clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+    if (authenticatedUserId) {
+      clearLocalCheckpoint(authenticatedUserId, sessionKey);
     }
     void deleteCheckpoint({ sessionKey }).catch(() => {});
-  }, [bundle, sessionKey, stopSpeech]);
+  }, [authenticatedUserId, sessionKey, stopSpeech]);
 
   const persistFlashcardCheckpoint = React.useCallback(
     (
@@ -347,57 +401,127 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       nextKnown: Set<string>,
       nextUnknown: Set<string>,
       completed: boolean,
+      keepalive: boolean = false,
     ) => {
       if (!bundle || cards.length === 0) return;
       if (completed) {
-        clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+        if (authenticatedUserId) {
+          clearLocalCheckpoint(authenticatedUserId, sessionKey);
+        }
         void deleteCheckpoint({ sessionKey }).catch(() => {});
         return;
       }
+      const answeredCount = nextKnown.size + nextUnknown.size;
       const pct = Math.min(
         99,
-        Math.round(((nextKnown.size + nextUnknown.size) / cards.length) * 100),
+        Math.max(
+          answeredCount > 0 || nextIndex > 0 ? 1 : 0,
+          Math.round((Math.max(answeredCount, nextIndex) / cards.length) * 100),
+        ),
       );
       const stateJson = {
         cardIds: cards.map((c) => c.questionId),
         knownIds: Array.from(nextKnown),
         unknownIds: Array.from(nextUnknown),
       };
-      saveLocalCheckpoint({
-        version: 1,
-        userId: bundle.studySet.owner_id,
-        studySetId: setId,
-        mode: "flashcards",
-        sessionKey,
-        currentIndex: nextIndex,
-        totalItems: cards.length,
-        progressPercent: pct,
-        stateJson,
-        committedEventKeys: [],
-        updatedAt: new Date().toISOString(),
-      });
-      void upsertCheckpoint({
+      if (authenticatedUserId) {
+        saveLocalCheckpoint({
+          version: 1,
+          userId: authenticatedUserId,
+          studySetId: setId,
+          mode: "flashcards",
+          sessionKey,
+          currentIndex: nextIndex,
+          totalItems: cards.length,
+          progressPercent: pct,
+          stateJson,
+          committedEventKeys: [],
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      const remotePayload = {
         study_set_id: setId,
-        mode: "flashcards",
+        mode: "flashcards" as const,
         session_key: sessionKey,
         state_json: stateJson,
         progress_percent: pct,
         current_index: nextIndex,
         total_items: cards.length,
-      }).catch(() => {});
+      };
+      if (keepalive) {
+        upsertCheckpointKeepalive(remotePayload);
+      } else {
+        void upsertCheckpoint(remotePayload).catch(() => {});
+      }
     },
-    [bundle, cards, sessionKey, setId],
+    [authenticatedUserId, bundle, cards, sessionKey, setId],
   );
 
-  // Check for resumable Flashcards checkpoint once per (setId, chapter)
+  // Flush Flashcards checkpoint synchronously on pagehide / hidden tab (V32-027)
+  const latestFlashcardsRef = React.useRef({
+    safeIndex: 0,
+    knownIds: new Set<string>(),
+    unknownIds: new Set<string>(),
+    isCompleted: false,
+  });
+  React.useEffect(() => {
+    latestFlashcardsRef.current = {
+      safeIndex,
+      knownIds,
+      unknownIds,
+      isCompleted,
+    };
+  }, [isCompleted, knownIds, safeIndex, unknownIds]);
+
+  React.useEffect(() => {
+    const flushNow = () => {
+      const snap = latestFlashcardsRef.current;
+      if (
+        snap.isCompleted ||
+        (snap.safeIndex === 0 &&
+          snap.knownIds.size === 0 &&
+          snap.unknownIds.size === 0)
+      ) {
+        return;
+      }
+      persistFlashcardCheckpoint(
+        snap.safeIndex,
+        snap.knownIds,
+        snap.unknownIds,
+        false,
+        true,
+      );
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flushNow();
+    };
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushNow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [persistFlashcardCheckpoint]);
+
+  // Check for resumable Flashcards checkpoint once per (setId, chapter) — keyed by authenticatedUserId (FUNC-17)
   React.useEffect(() => {
     if (!bundle || cards.length === 0) return;
-    const key = `${setId}:${selectedChapter}:${cards.length}`;
+    const key = `${setId}:${selectedChapter}:ready`;
     if (checkpointCheckedRef.current === key) return;
     checkpointCheckedRef.current = key;
 
+    if (isFreshLaunch) {
+      if (authenticatedUserId) {
+        clearLocalCheckpoint(authenticatedUserId, sessionKey);
+      }
+      void deleteCheckpoint({ sessionKey }).catch(() => {});
+      return;
+    }
+
     const liveIds = new Set(cards.map((c) => c.questionId));
-    const localCp = loadLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+    const localCp = authenticatedUserId
+      ? loadLocalCheckpoint(authenticatedUserId, sessionKey)
+      : null;
     void listCheckpoints({ studySetId: setId, mode: "flashcards", sessionKey })
       .then((remotes) => {
         const picked = pickNewestCheckpoint(remotes[0] ?? null, localCp);
@@ -431,7 +555,15 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         });
       })
       .catch(() => {});
-  }, [bundle, cards, selectedChapter, sessionKey, setId]);
+  }, [
+    authenticatedUserId,
+    bundle,
+    cards,
+    isFreshLaunch,
+    selectedChapter,
+    sessionKey,
+    setId,
+  ]);
 
   const goToIndex = React.useCallback(
     (nextIdx: number) => {
@@ -444,13 +576,18 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         );
         setCompletedDurationSeconds(durationSeconds);
         setIsCompleted(true);
+        persistFlashcardCheckpoint(safeIndex, knownIds, unknownIds, true);
         if (sessionIdRef.current) {
           updateStudySession(sessionIdRef.current, {
             status: "completed",
             completed_items: knownIds.size + unknownIds.size,
             correct_items: knownIds.size,
             duration_seconds: durationSeconds,
-          }).catch(() => {});
+          })
+            .then(() => invalidateLearningCaches(queryClient, setId))
+            .catch(() => {});
+        } else {
+          invalidateLearningCaches(queryClient, setId);
         }
         return;
       }
@@ -458,14 +595,39 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       setIsFlipped(false);
       cardShownAtRef.current = Date.now();
     },
-    [cards.length, knownIds.size, unknownIds.size, stopSpeech],
+    [
+      cards.length,
+      knownIds,
+      persistFlashcardCheckpoint,
+      queryClient,
+      safeIndex,
+      setId,
+      stopSpeech,
+      unknownIds,
+    ],
+  );
+
+  // Synchronous ref lock to block rapid double-click SM-2 duplicate updates on the same card (FUNC-18(5))
+  const ratingLockRef = React.useRef<{ cardKey: string; at: number } | null>(
+    null,
   );
 
   const handleRateCard = React.useCallback(
     async (rating: SelfRating) => {
       if (!activeCard || !bundle) return;
+      const cardKey = `${safeIndex}:${activeCard.questionId}`;
+      const now = Date.now();
+      if (
+        ratingLockRef.current &&
+        ratingLockRef.current.cardKey === cardKey &&
+        now - ratingLockRef.current.at < 400
+      ) {
+        return;
+      }
+      ratingLockRef.current = { cardKey, at: now };
+
       const isKnown = rating !== "again";
-      const responseTimeMs = Math.max(0, Date.now() - cardShownAtRef.current);
+      const responseTimeMs = Math.max(0, now - cardShownAtRef.current);
 
       const nextKnown = new Set(knownIds);
       const nextUnknown = new Set(unknownIds);
@@ -545,7 +707,11 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
             completed_items: nextKnown.size + nextUnknown.size,
             correct_items: nextKnown.size,
             duration_seconds: durationSeconds,
-          }).catch(() => {});
+          })
+            .then(() => invalidateLearningCaches(queryClient, setId))
+            .catch(() => {});
+        } else {
+          invalidateLearningCaches(queryClient, setId);
         }
       } else {
         setCurrentIndex(safeIndex + 1);
@@ -561,6 +727,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
       knownIds,
       persistFlashcardCheckpoint,
       playFeedbackSound,
+      queryClient,
       safeIndex,
       setId,
       stopSpeech,
@@ -585,12 +752,11 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     }
   }, [activeCard, toggleStar, t]);
 
-  // Global keyboard shortcuts: strictly 1=Again, 2=Hard, 3=Good, 4=Easy (SH-021!)
+  // Global keyboard shortcuts: strictly 1=Again, 2=Hard, 3=Good, 4=Easy (SH-021 + V32-023!)
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isCompleted || !activeCard) return;
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditableEventTarget(event.target)) return;
+      if (shouldIgnoreShortcutEvent(event, { shortcutsEnabled })) return;
 
       if (event.code === "Space" && !isInteractiveControlTarget(event.target)) {
         event.preventDefault();
@@ -629,12 +795,15 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     handleStarToggle,
     isCompleted,
     safeIndex,
+    shortcutsEnabled,
   ]);
 
   if (isLoading) {
     return (
       <FocusModeShell
         backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="flashcards"
         title={t("study.flashcards")}
       >
         <StudyLoadingSkeleton />
@@ -646,6 +815,8 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     return (
       <FocusModeShell
         backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="flashcards"
         title={t("study.flashcards")}
       >
         <StudyErrorState
@@ -720,8 +891,10 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
     >
       <FocusModeShell
         backHref={`/sets/${setId}`}
+        studySetId={setId}
+        activeMode="flashcards"
         title={bundle.studySet.title}
-        subtitle={lText(locale, "Chế độ Flashcards", "Flashcards Mode")}
+        subtitle={lText(locale, "Thẻ ghi nhớ", "Flashcards")}
         progressCurrent={cards.length > 0 ? Math.min(safeIndex + 1, cards.length) : 0}
         progressTotal={cards.length}
         headerRight={
@@ -902,7 +1075,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
         </div>
 
         {/* Resumable Checkpoint Banner */}
-        {pendingResume ? (
+        {!isFreshLaunch && pendingResume ? (
           <div className="mx-auto mb-4 w-full max-w-3xl">
             <ResumeSessionBanner
               modeLabel={lText(locale, "Thẻ ghi nhớ (Flashcards)", "Flashcards")}
@@ -922,7 +1095,9 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
               onRestart={() => resetDeckState(null)}
               onDiscard={() => {
                 setPendingResume(null);
-                clearLocalCheckpoint(bundle.studySet.owner_id, sessionKey);
+                if (authenticatedUserId) {
+                  clearLocalCheckpoint(authenticatedUserId, sessionKey);
+                }
                 void deleteCheckpoint({ sessionKey }).catch(() => {});
               }}
             />
@@ -1299,7 +1474,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
                                   />
                                 </div>
                               ) : null}
-                              {activeCard.hint || activeCard.hintRich ? (
+                              {showHints && (activeCard.hint || activeCard.hintRich) ? (
                                 <div className="text-xs text-muted-foreground">
                                   <span className="font-semibold">
                                     {lText(locale, "Gợi ý", "Hint")}:{" "}
@@ -1428,57 +1603,119 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
               </div>
             </div>
 
-            {/* All 4 SM-2 Rating Controls (1=Again, 2=Hard, 3=Good, 4=Easy — SH-021!) */}
+            {/* SM-2 Rating Controls (de-emphasized pre-flip per RU-17; vivid full-color once flipped!) */}
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {!isFlipped ? (
+                <div className="space-y-2">
+                  <Button
+                    type="button"
+                    size="lg"
+                    className="min-h-12 w-full"
+                    onClick={handleFlipToggle}
+                  >
+                    {lText(
+                      locale,
+                      "Lật thẻ để xem đáp án",
+                      "Flip card to reveal answer",
+                    )}
+                    {showKeyboardHints ? (
+                      <kbd className="ml-2 hidden rounded bg-white/20 px-1.5 py-0.5 font-mono text-[11px] sm:inline">
+                        Space
+                      </kbd>
+                    ) : null}
+                  </Button>
+                  <p className="text-center text-xs text-muted-foreground">
+                    {lText(
+                      locale,
+                      "Hoặc tự đánh giá nhanh nếu bạn đã thuộc sẵn:",
+                      "Or quick-rate if you already recall it:",
+                    )}
+                  </p>
+                </div>
+              ) : null}
+
+              <div
+                className={cn(
+                  "grid grid-cols-2 gap-2 transition-opacity sm:grid-cols-4",
+                  !isFlipped && "opacity-60 hover:opacity-100 focus-within:opacity-100",
+                )}
+              >
                 <Button
                   type="button"
                   variant="outline"
-                  className="min-h-12 border-destructive/50 text-destructive-subtle-foreground hover:bg-destructive-subtle"
+                  className={cn(
+                    "min-h-12",
+                    isFlipped
+                      ? "border-destructive/50 text-destructive-subtle-foreground hover:bg-destructive-subtle"
+                      : "text-muted-foreground",
+                  )}
                   onClick={() => void handleRateCard("again")}
                 >
                   <XCircle className="size-4 shrink-0" aria-hidden="true" />
                   <span>{lText(locale, "Lại", "Again")}</span>
-                  <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
-                    1
-                  </kbd>
+                  {showKeyboardHints ? (
+                    <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
+                      1
+                    </kbd>
+                  ) : null}
                 </Button>
 
                 <Button
                   type="button"
                   variant="outline"
-                  className="min-h-12 border-warning/50 text-warning-subtle-foreground hover:bg-warning-subtle"
+                  className={cn(
+                    "min-h-12",
+                    isFlipped
+                      ? "border-warning/50 text-warning-subtle-foreground hover:bg-warning-subtle"
+                      : "text-muted-foreground",
+                  )}
                   onClick={() => void handleRateCard("hard")}
                 >
                   <span>{lText(locale, "Khó", "Hard")}</span>
-                  <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
-                    2
-                  </kbd>
+                  {showKeyboardHints ? (
+                    <kbd className="ml-1 hidden rounded bg-secondary px-1.5 py-0.5 font-mono text-[11px] sm:inline">
+                      2
+                    </kbd>
+                  ) : null}
                 </Button>
 
                 <Button
                   type="button"
-                  variant="default"
-                  className="min-h-12"
+                  variant={isFlipped ? "default" : "outline"}
+                  className={cn("min-h-12", !isFlipped && "text-muted-foreground")}
                   onClick={() => void handleRateCard("good")}
                 >
                   <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
                   <span>{lText(locale, "Tốt", "Good")}</span>
-                  <kbd className="ml-1 hidden rounded bg-white/20 px-1.5 py-0.5 font-mono text-[11px] sm:inline">
-                    3
-                  </kbd>
+                  {showKeyboardHints ? (
+                    <kbd
+                      className={cn(
+                        "ml-1 hidden rounded px-1.5 py-0.5 font-mono text-[11px] sm:inline",
+                        isFlipped ? "bg-white/20" : "bg-secondary",
+                      )}
+                    >
+                      3
+                    </kbd>
+                  ) : null}
                 </Button>
 
                 <Button
                   type="button"
-                  variant="success"
-                  className="min-h-12"
+                  variant={isFlipped ? "success" : "outline"}
+                  className={cn("min-h-12", !isFlipped && "text-muted-foreground")}
                   onClick={() => void handleRateCard("easy")}
                 >
                   <span>{lText(locale, "Dễ", "Easy")}</span>
-                  <kbd className="ml-1 hidden rounded bg-white/20 px-1.5 py-0.5 font-mono text-[11px] sm:inline">
-                    4
-                  </kbd>
+                  {showKeyboardHints ? (
+                    <kbd
+                      className={cn(
+                        "ml-1 hidden rounded px-1.5 py-0.5 font-mono text-[11px] sm:inline",
+                        isFlipped ? "bg-white/20" : "bg-secondary",
+                      )}
+                    >
+                      4
+                    </kbd>
+                  ) : null}
                 </Button>
               </div>
 
@@ -1527,7 +1764,7 @@ export function FlashcardsClient({ setId }: FlashcardsClientProps) {
           subject={bundle.studySet.subject ?? undefined}
           chapters={bundle.chapters}
           mode="flashcards"
-          userId={bundle.studySet.owner_id}
+          userId={authenticatedUserId ?? ""}
           onResetComplete={() => {
             void refetch();
             resetDeckState(null);

@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
   FileSpreadsheet,
@@ -12,6 +12,7 @@ import {
   Plus,
   Search,
   Upload,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -42,7 +43,20 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
+import { setPendingImportFile } from "@/lib/import/pending-file-handoff";
+import { invalidateStudySetCaches } from "@/lib/query-keys";
 import type { StudySet, StudySetType } from "@/types/domain";
+
+const MAX_IMPORT_FILE_BYTES = 15 * 1024 * 1024;
+const ALLOWED_IMPORT_EXTS = [
+  ".docx",
+  ".xlsx",
+  ".pdf",
+  ".csv",
+  ".tsv",
+  ".txt",
+  ".json",
+];
 
 function titleFromFilename(fileName: string): string {
   return fileName
@@ -56,6 +70,7 @@ export function ImportHubView() {
   const { locale, t } = useI18n();
   const vi = locale === "vi";
   const router = useRouter();
+  const queryClient = useQueryClient();
   const configured = isSupabaseConfiguredClient();
 
   const [search, setSearch] = React.useState("");
@@ -63,6 +78,8 @@ export function ImportHubView() {
   const [quickTitle, setQuickTitle] = React.useState("");
   const [quickSubject, setQuickSubject] = React.useState("");
   const [quickType, setQuickType] = React.useState<StudySetType>("multiple_choice");
+  const [pickedFile, setPickedFile] = React.useState<File | null>(null);
+  const quickFileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 200);
@@ -93,11 +110,19 @@ export function ImportHubView() {
       });
       return res.data;
     },
-    onSuccess: (created) => {
+    onSuccess: async (created) => {
+      if (pickedFile) {
+        setPendingImportFile(created.id, pickedFile);
+      }
+      await invalidateStudySetCaches(queryClient, created.id);
       toast.success(
-        vi
-          ? "Đã tạo học phần — đang mở trình nhập câu hỏi."
-          : "Study set created — opening import wizard.",
+        pickedFile
+          ? vi
+            ? "Đã tạo học phần — đang phân tích tệp đã chọn."
+            : "Study set created — analyzing your selected file."
+          : vi
+            ? "Đã tạo học phần — đang mở trình nhập câu hỏi."
+            : "Study set created — opening import wizard.",
       );
       router.push(`/sets/${created.id}/import`);
     },
@@ -109,6 +134,31 @@ export function ImportHubView() {
   const handleFileSuggestTitle = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith(".docm") || lower.endsWith(".xlsm")) {
+      toast.error(
+        vi
+          ? "Không hỗ trợ tệp chứa macro (.docm, .xlsm). Vui lòng lưu thành .docx hoặc .xlsx."
+          : "Macro files (.docm, .xlsm) are rejected. Save as .docx or .xlsx.",
+      );
+      e.target.value = "";
+      return;
+    }
+    if (!ALLOWED_IMPORT_EXTS.some((ext) => lower.endsWith(ext))) {
+      toast.error(
+        vi
+          ? "Định dạng không hỗ trợ. Chấp nhận: .docx, .xlsx, .pdf, .csv, .tsv, .txt, .json."
+          : "Unsupported format. Allowed: .docx, .xlsx, .pdf, .csv, .tsv, .txt, .json.",
+      );
+      e.target.value = "";
+      return;
+    }
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      toast.error(vi ? "Tệp vượt quá giới hạn tối đa 15 MB." : "File exceeds 15 MB limit.");
+      e.target.value = "";
+      return;
+    }
+    setPickedFile(file);
     if (!quickTitle.trim()) {
       setQuickTitle(titleFromFilename(file.name));
     }
@@ -122,8 +172,8 @@ export function ImportHubView() {
         title={t("import.title")}
         description={
           vi
-            ? "Chọn học phần có sẵn hoặc tạo nhanh học phần mới rồi nhập trực tiếp từ Word (.docx), Excel (.xlsx), CSV, TXT hoặc JSON."
-            : "Pick an existing study set or create a new one in seconds, then import from Word (.docx), Excel (.xlsx), CSV, TXT, or JSON."
+            ? "Chọn học phần có sẵn hoặc tạo nhanh học phần mới rồi nhập trực tiếp từ Word (.docx), Excel (.xlsx), PDF (.pdf), CSV, TXT hoặc JSON."
+            : "Pick an existing study set or create a new one in seconds, then import from Word (.docx), Excel (.xlsx), PDF (.pdf), CSV, TXT, or JSON."
         }
       />
 
@@ -141,8 +191,8 @@ export function ImportHubView() {
             </CardTitle>
             <CardDescription>
               {vi
-                ? "Nhập nhanh tên học phần (hoặc chọn file để tự điền tên) rồi chuyển thẳng tới bước tải tệp."
-                : "Enter a set title (or pick a file to auto-fill the name) and jump straight to the upload wizard."}
+                ? "Chọn tệp để tự điền tên và phân tích tự động (không cần chọn lại tệp), hoặc nhập tên học phần rồi dán nội dung."
+                : "Pick a file to auto-fill the title and start parsing automatically (no double upload), or enter a title to paste content."}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -163,15 +213,38 @@ export function ImportHubView() {
             >
               <div className="space-y-1.5">
                 <Label htmlFor="import-quick-file">
-                  {vi ? "Gợi ý tên từ file (tùy chọn)" : "Suggest title from file (optional)"}
+                  {vi
+                    ? "Chọn tệp câu hỏi (tùy chọn — tự điền tên & phân tích ngay)"
+                    : "Choose question file (optional — auto-fills title & parses right away)"}
                 </Label>
                 <Input
+                  ref={quickFileInputRef}
                   id="import-quick-file"
                   type="file"
-                  accept=".docx,.xlsx,.csv,.tsv,.txt,.json"
+                  accept=".docx,.xlsx,.pdf,.csv,.tsv,.txt,.json"
                   onChange={handleFileSuggestTitle}
                   disabled={!configured}
                 />
+                {pickedFile && (
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs">
+                    <span className="min-w-0 truncate font-medium text-foreground">
+                      {pickedFile.name}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 shrink-0"
+                      aria-label={vi ? "Bỏ chọn tệp" : "Clear selected file"}
+                      onClick={() => {
+                        setPickedFile(null);
+                        if (quickFileInputRef.current) quickFileInputRef.current.value = "";
+                      }}
+                    >
+                      <X className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -323,6 +396,11 @@ export function ImportHubView() {
                   <li key={set.id}>
                     <Link
                       href={`/sets/${set.id}/import`}
+                      onClick={() => {
+                        if (pickedFile) {
+                          setPendingImportFile(set.id, pickedFile);
+                        }
+                      }}
                       className="border-border bg-background hover:border-primary/40 hover:bg-secondary/50 flex min-h-14 items-center justify-between gap-3 rounded-lg border px-3.5 py-2.5 transition-colors"
                     >
                       <div className="min-w-0 flex-1">

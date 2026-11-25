@@ -2,7 +2,12 @@
 
 import * as React from "react";
 import { usePathname } from "next/navigation";
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   ApiError,
   apiFetch,
@@ -15,6 +20,10 @@ import {
 } from "@/components/pwa/PwaProvider";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  purgeAllUserClientState,
+  subscribeAuthBroadcastEvents,
+} from "@/lib/auth/client-session-cleanup";
 import {
   hasStoredLocalPreferences,
   PreferencesProvider,
@@ -75,6 +84,8 @@ function ResponsiveToaster() {
   return (
     <Toaster
       position={isMobile ? "top-center" : "bottom-right"}
+      offset={isMobile ? { top: 12 } : { bottom: 24, right: 20 }}
+      mobileOffset={{ top: 12, left: 12, right: 12 }}
       richColors
       closeButton
     />
@@ -83,29 +94,52 @@ function ResponsiveToaster() {
 
 /**
  * Single shared authenticated user bootstrap:
+ * - Receives server-verified `initialUserId` from `src/app/(app)/layout.tsx` (`supabase.auth.getUser()`),
+ *   so we NEVER trust `localStorage["studyhub-offline-active-user"]` before server verification (`SEC-01`).
  * - Shares `["current-profile"]` with `AppShell` and `ProfileView` so only ONE
  *   `GET /api/profile` request fires on authenticated app load.
  * - Seeds `["user-preferences"]` from the same response -> ZERO duplicate `GET /api/preferences`.
- * - Supplies explicit `userId` to `PwaProvider` -> ZERO `@supabase/supabase-js` dynamic import
- *   or redundant browser `auth.getUser()` on authenticated routes.
+ * - Purges React Query & local caches immediately on user-id transition or cross-tab auth broadcast (`SEC-02`/`SEC-03`).
  */
-function AuthenticatedBootstrap({ children }: { children: React.ReactNode }) {
+function AuthenticatedBootstrap({
+  children,
+  initialUserId = null,
+}: {
+  children: React.ReactNode;
+  initialUserId?: string | null;
+}) {
   const pathname = usePathname() ?? "/dashboard";
   const queryClient = useQueryClient();
   const supabaseConfigured = isSupabaseConfiguredClient();
   const isFocusRoute = FOCUS_ROUTE_PATTERN.test(pathname);
 
-  const [storedUserId] = React.useState<string | null>(() =>
-    readStoredActiveUserId(),
-  );
+  const [stalePointerOnMount] = React.useState<string | null>(() => {
+    const storedPointer = readStoredActiveUserId();
+    return storedPointer && initialUserId && storedPointer !== initialUserId
+      ? storedPointer
+      : null;
+  });
   const [hasCachedPrefs] = React.useState<boolean>(() =>
     hasStoredLocalPreferences(),
   );
 
-  // On focus routes (e.g. live exam / flashcards / practice), skip eager /api/profile
-  // if we already have cached local preferences & stored user pointer from prior navigation.
+  // If a prior user's session expired without UI Sign Out, purge their stale local state immediately
+  React.useEffect(() => {
+    if (stalePointerOnMount) {
+      void purgeAllUserClientState(queryClient, stalePointerOnMount, {
+        broadcast: false,
+      });
+    }
+  }, [stalePointerOnMount, queryClient]);
+
+  // On focus routes, only skip eager /api/profile when we have a SERVER-VERIFIED initialUserId,
+  // no cross-account mismatch, and local preferences already exist.
   const shouldFetchProfile =
-    supabaseConfigured && (!isFocusRoute || !storedUserId || !hasCachedPrefs);
+    supabaseConfigured &&
+    (!isFocusRoute ||
+      !initialUserId ||
+      Boolean(stalePointerOnMount) ||
+      !hasCachedPrefs);
 
   const profileQuery = useQuery<ProfileBundle | null>({
     queryKey: ["current-profile"],
@@ -137,11 +171,48 @@ function AuthenticatedBootstrap({ children }: { children: React.ReactNode }) {
     },
   });
 
-  const resolvedUserId: string | null = profileQuery.data?.profile?.id
-    ? profileQuery.data.profile.id
-    : profileQuery.isSuccess && profileQuery.data === null
+  // Strictly server-verified identity only — NEVER fall back to untrusted localStorage pointer
+  const resolvedUserId: string | null =
+    profileQuery.isSuccess && profileQuery.data === null
       ? null
-      : storedUserId;
+      : (profileQuery.data?.profile?.id ?? initialUserId ?? null);
+
+  const prevUserIdRef = React.useRef<string | null>(resolvedUserId);
+  const resolvedUserIdRef = React.useRef<string | null>(resolvedUserId);
+
+  React.useEffect(() => {
+    resolvedUserIdRef.current = resolvedUserId;
+    const prev = prevUserIdRef.current;
+    if (prev !== resolvedUserId) {
+      prevUserIdRef.current = resolvedUserId;
+      if (prev !== null) {
+        void purgeAllUserClientState(queryClient, prev, { broadcast: false });
+      }
+    }
+  }, [resolvedUserId, queryClient]);
+
+  // Multi-tab isolation: purge React Query & redirect/reload immediately when another tab logs out or switches accounts
+  React.useEffect(() => {
+    return subscribeAuthBroadcastEvents((event) => {
+      const currentId = resolvedUserIdRef.current;
+      if (event.type === "logout") {
+        void purgeAllUserClientState(queryClient, currentId, {
+          broadcast: false,
+        }).finally(() => {
+          window.location.replace("/login");
+        });
+        return;
+      }
+
+      if (event.type === "account-switch" && event.userId !== currentId) {
+        void purgeAllUserClientState(queryClient, currentId, {
+          broadcast: false,
+        }).finally(() => {
+          window.location.reload();
+        });
+      }
+    });
+  }, [queryClient]);
 
   return (
     <PreferencesProvider
@@ -162,14 +233,18 @@ function AuthenticatedBootstrap({ children }: { children: React.ReactNode }) {
 
 export function AuthenticatedProviders({
   children,
+  initialUserId = null,
 }: {
   children: React.ReactNode;
+  initialUserId?: string | null;
 }) {
   const [queryClient] = React.useState(makeQueryClient);
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthenticatedBootstrap>{children}</AuthenticatedBootstrap>
+      <AuthenticatedBootstrap initialUserId={initialUserId}>
+        {children}
+      </AuthenticatedBootstrap>
     </QueryClientProvider>
   );
 }

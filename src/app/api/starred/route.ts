@@ -12,6 +12,10 @@ import {
   SAFE_IN_CHUNK_SIZE,
 } from "@/lib/supabase/query-helpers";
 import {
+  isMissingRpcError,
+  rpcToggleStarredQuestion,
+} from "@/lib/supabase/rpc";
+import {
   listStarredQuerySchema,
   toggleStarSchema,
 } from "@/lib/validation/learning";
@@ -120,6 +124,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const body = await parseJsonBody(request);
     const input = toggleStarSchema.parse(body);
 
+    // DB-02 (Migration 0019): Atomic single-RTT toggle RPC eliminates double-click 23505 race
+    const { data: rpcToggle, error: rpcErr } = await rpcToggleStarredQuestion(
+      supabase,
+      {
+        p_question_id: input.question_id,
+        p_study_set_id: input.study_set_id ?? null,
+      },
+    );
+    if (!rpcErr && rpcToggle) {
+      return apiSuccess(
+        rpcToggle,
+        undefined,
+        rpcToggle.starred ? { status: 201 } : undefined,
+      );
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      if (rpcErr.code === "P0002") {
+        throw new AppError("NOT_FOUND", "Question not found.", 404);
+      }
+      if (rpcErr.code === "22023") {
+        throw new AppError(
+          "INVALID_REFERENCE",
+          "Question does not belong to the specified study set.",
+          400,
+        );
+      }
+      throw rpcErr;
+    }
+
     // SH-012 / SEC-003: Always resolve `questions.study_set_id` from DB (never trust caller alone!)
     const { data: q, error: qErr } = await supabase
       .from("questions")
@@ -167,7 +200,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       question_id: input.question_id,
       study_set_id: studySetId,
     });
-    if (insErr) throw insErr;
+    if (insErr) {
+      // DB-02 fallback parity: handle concurrent double-click 23505 idempotently
+      if (insErr.code === "23505") {
+        return apiSuccess({ starred: true, question_id: input.question_id });
+      }
+      throw insErr;
+    }
 
     return apiSuccess(
       { starred: true, question_id: input.question_id },

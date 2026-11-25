@@ -431,6 +431,10 @@ export interface AdaptiveLearnOptions {
   maxForcedRetries?: number;
   /** Minimum intervening cards required before Stage 4 Independent Verification (default 2). */
   verificationMinGap?: number;
+  /** When false (from mode_preferences.learn.enable_written_recall), skip Stage 3+ typed recall where MC exists. */
+  enableWrittenRecall?: boolean;
+  /** When false (from mode_preferences.learn.require_independent_recall), allow graduation without Stage 4 verification. */
+  requireIndependentRecall?: boolean;
   now?: Date;
 }
 
@@ -590,9 +594,17 @@ export function createAdaptiveLearnState(
   const pendingQueue = sorted.slice(batchSize);
   const isEmpty = activeQueue.length === 0;
 
+  let resolvedTargetStage = meta.targetStage;
+  if (options.requireIndependentRecall === false && resolvedTargetStage > 3) {
+    resolvedTargetStage = 3;
+  }
+  if (options.enableWrittenRecall === false && resolvedTargetStage > 2) {
+    resolvedTargetStage = 2;
+  }
+
   return {
     objective,
-    targetStage: meta.targetStage,
+    targetStage: resolvedTargetStage,
     batchSize,
     forcedCorrection,
     maxForcedRetries,
@@ -607,6 +619,131 @@ export function createAdaptiveLearnState(
     correctAttempts: 0,
     sessionCompleted: isEmpty,
     roundCompleted: isEmpty,
+  };
+}
+
+/**
+ * Append newly streamed study set questions into pendingQueue without disrupting activeQueue[0] (`V32-015`).
+ */
+export function appendAdaptiveLearnSeeds(
+  state: AdaptiveLearnState,
+  newSeeds: readonly AdaptiveLearnItemSeed[],
+): AdaptiveLearnState {
+  if (newSeeds.length === 0) return state;
+  const seen = new Set<string>([
+    ...state.activeQueue.map((c) => c.questionId),
+    ...state.pendingQueue.map((c) => c.questionId),
+    ...state.graduatedIds,
+  ]);
+  const added: AdaptiveLearnCardState[] = [];
+  for (const seed of newSeeds) {
+    if (seen.has(seed.question.id)) continue;
+    seen.add(seed.question.id);
+    added.push(makeCardFromSeed(seed, state.objective));
+  }
+  if (added.length === 0) return state;
+
+  if (state.activeQueue.length === 0 && !state.roundCompleted) {
+    const nextActive = added.slice(0, state.batchSize);
+    const nextPending = added.slice(state.batchSize);
+    return {
+      ...state,
+      activeQueue: nextActive,
+      pendingQueue: [...state.pendingQueue, ...nextPending],
+      totalItems: state.totalItems + added.length,
+      sessionCompleted: false,
+      roundCompleted: false,
+    };
+  }
+
+  return {
+    ...state,
+    pendingQueue: [...state.pendingQueue, ...added],
+    totalItems: state.totalItems + added.length,
+    sessionCompleted: false,
+  };
+}
+
+export interface AdaptiveLearnProgressMetrics {
+  /** Number of unique items graduated or actively progressed in this session (for top counter). */
+  visitedCount: number;
+  graduatedCount: number;
+  totalItems: number;
+  /** 0-based saved checkpoint item index for accurate ResumeSessionBanner display (`RU-06`). */
+  currentIndex: number;
+  /** Stage-weighted 0..100 progress percentage (never 0% once cards have been answered!). */
+  progressPercent: number;
+}
+
+/**
+ * Compute truthful Learn progress reflecting BOTH graduated items AND mid-stage progression (`V32-027` / `RU-06`).
+ */
+export function computeAdaptiveLearnProgress(
+  state: AdaptiveLearnState,
+): AdaptiveLearnProgressMetrics {
+  const totalItems = Math.max(0, state.totalItems);
+  const graduatedCount = state.graduatedIds.length;
+  if (totalItems === 0) {
+    return {
+      visitedCount: 0,
+      graduatedCount: 0,
+      totalItems: 0,
+      currentIndex: 0,
+      progressPercent: 0,
+    };
+  }
+  if (state.sessionCompleted) {
+    return {
+      visitedCount: totalItems,
+      graduatedCount,
+      totalItems,
+      currentIndex: Math.max(0, totalItems - 1),
+      progressPercent: 100,
+    };
+  }
+
+  const meta = getLearnObjectiveMeta(state.objective);
+  const span = Math.max(1, state.targetStage - 1);
+  let engagedInQueues = 0;
+  let partialCredit = 0;
+
+  for (const card of [...state.activeQueue, ...state.pendingQueue]) {
+    const hasEngaged =
+      card.recognitionPasses > 0 ||
+      card.recallPasses > 0 ||
+      card.verificationPasses > 0 ||
+      card.missedInSession ||
+      card.stage > meta.initialStageForNew;
+    if (hasEngaged) {
+      engagedInQueues += 1;
+      const stageFrac = Math.max(0.25, Math.min(0.85, (card.stage - 1) / span));
+      partialCredit += stageFrac;
+    }
+  }
+
+  const visitedCount = Math.min(
+    totalItems,
+    Math.max(
+      graduatedCount + engagedInQueues,
+      state.totalAttempts > 0 ? Math.min(totalItems, state.totalAttempts) : 0,
+    ),
+  );
+
+  const hasActivity = graduatedCount > 0 || state.totalAttempts > 0 || engagedInQueues > 0;
+  const rawPercent = Math.round(((graduatedCount + partialCredit) / totalItems) * 100);
+  const progressPercent = hasActivity
+    ? Math.max(1, Math.min(99, rawPercent || Math.round((visitedCount / totalItems) * 50)))
+    : 0;
+  const currentIndex = hasActivity
+    ? Math.min(Math.max(0, totalItems - 1), visitedCount)
+    : 0;
+
+  return {
+    visitedCount,
+    graduatedCount,
+    totalItems,
+    currentIndex,
+    progressPercent,
   };
 }
 

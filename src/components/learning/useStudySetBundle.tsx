@@ -4,16 +4,16 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, BookOpen, RefreshCw } from "lucide-react";
+import { useOptionalPwa } from "@/components/pwa/PwaProvider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
 import {
-  fetchSetProgress,
-  fetchStarredQuestions,
   fetchStudySet,
-  fetchStudySetQuestions,
+  fetchStudySetQuestionsPage,
   toggleStarQuestion,
+  type HydratedStudyQuestion,
 } from "@/lib/learning/api-client";
 import type { Question, StudySet, UserQuestionProgress } from "@/types/domain";
 import { lText } from "./learning-copy";
@@ -24,6 +24,164 @@ export interface StudySetBundle {
   progressMap: Map<string, UserQuestionProgress>;
   starredIds: Set<string>;
   chapters: string[];
+  /** Total questions reported by backend (may exceed `questions.length` while background pages stream in). */
+  totalQuestions: number;
+  /** True while pages 2..N are streaming in the background after Page 1 rendered Q1 immediately. */
+  isLoadingMore: boolean;
+  /** Monotonic ID incremented only on fresh Page-1 fetch so background merges never self-abort. */
+  fetchId: number;
+}
+
+const STREAM_PAGE_SIZE = 50;
+const STREAM_CONCURRENCY = 2;
+let nextBundleFetchId = 1;
+
+function normalizeProgressEntry(
+  question: HydratedStudyQuestion,
+): UserQuestionProgress | null {
+  const raw = question.progress;
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    id: raw.id ?? question.id,
+    user_id: raw.user_id ?? "",
+    study_set_id: raw.study_set_id ?? question.study_set_id,
+    question_id: raw.question_id ?? question.id,
+    mastery_level: raw.mastery_level ?? "new",
+    correct_count: raw.correct_count ?? 0,
+    wrong_count: raw.wrong_count ?? 0,
+    consecutive_correct: raw.consecutive_correct ?? 0,
+    consecutive_wrong: raw.consecutive_wrong ?? 0,
+    ease_factor: raw.ease_factor ?? 2.5,
+    interval_days: raw.interval_days ?? 0,
+    repetitions: raw.repetitions ?? 0,
+    last_reviewed_at: raw.last_reviewed_at ?? null,
+    last_wrong_at: raw.last_wrong_at ?? null,
+    next_review_at: raw.next_review_at ?? null,
+    last_confidence: raw.last_confidence ?? null,
+    low_confidence_count: raw.low_confidence_count ?? 0,
+    high_conf_wrong_count: raw.high_conf_wrong_count ?? 0,
+    guess_correct_count: raw.guess_correct_count ?? 0,
+    independent_recall_count: raw.independent_recall_count ?? 0,
+    hint_used_count: raw.hint_used_count ?? 0,
+    mistake_status: raw.mistake_status ?? "active",
+    progress_generation: raw.progress_generation,
+    updated_at: raw.updated_at ?? raw.last_reviewed_at ?? question.updated_at,
+  };
+}
+
+function buildBundleFromQuestions(
+  studySet: StudySet,
+  hydratedQuestions: readonly HydratedStudyQuestion[],
+  totalQuestions: number,
+  isLoadingMore: boolean,
+  fetchId: number,
+): StudySetBundle {
+  const progressMap = new Map<string, UserQuestionProgress>();
+  const starredIds = new Set<string>();
+  const chapterSet = new Set<string>();
+  const seenIds = new Set<string>();
+  const questions: Question[] = [];
+
+  for (const q of hydratedQuestions) {
+    if (!q?.id || seenIds.has(q.id)) continue;
+    seenIds.add(q.id);
+    questions.push(q);
+
+    if (q.is_starred) {
+      starredIds.add(q.id);
+    }
+    const normProgress = normalizeProgressEntry(q);
+    if (normProgress) {
+      progressMap.set(q.id, normProgress);
+    }
+    if (q.chapter && q.chapter.trim()) {
+      chapterSet.add(q.chapter.trim());
+    }
+  }
+
+  return {
+    studySet,
+    questions,
+    progressMap,
+    starredIds,
+    chapters: Array.from(chapterSet),
+    totalQuestions: Math.max(totalQuestions, questions.length),
+    isLoadingMore,
+    fetchId,
+  };
+}
+
+function mergeStreamedPageIntoBundle(
+  prev: StudySetBundle,
+  incoming: readonly HydratedStudyQuestion[],
+  totalQuestions: number,
+  isLoadingMore: boolean,
+): StudySetBundle {
+  const existingIds = new Set(prev.questions.map((q) => q.id));
+  const nextQuestions = [...prev.questions];
+  const nextProgressMap = new Map(prev.progressMap);
+  const nextStarredIds = new Set(prev.starredIds);
+  const nextChapters = new Set(prev.chapters);
+
+  for (const q of incoming) {
+    if (!q?.id || existingIds.has(q.id)) continue;
+    existingIds.add(q.id);
+    nextQuestions.push(q);
+
+    if (q.is_starred) {
+      nextStarredIds.add(q.id);
+    }
+    const normProgress = normalizeProgressEntry(q);
+    if (normProgress && !nextProgressMap.has(q.id)) {
+      nextProgressMap.set(q.id, normProgress);
+    }
+    if (q.chapter && q.chapter.trim()) {
+      nextChapters.add(q.chapter.trim());
+    }
+  }
+
+  return {
+    ...prev,
+    questions: nextQuestions,
+    progressMap: nextProgressMap,
+    starredIds: nextStarredIds,
+    chapters: Array.from(nextChapters),
+    totalQuestions: Math.max(prev.totalQuestions, totalQuestions, nextQuestions.length),
+    isLoadingMore,
+  };
+}
+
+function extractCachedStudySet(raw: unknown): StudySet | null {
+  if (!raw || typeof raw !== "object") return null;
+  if ("set" in raw && raw.set && typeof raw.set === "object" && "id" in raw.set && "title" in raw.set) {
+    return raw.set as StudySet;
+  }
+  if ("id" in raw && "title" in raw) {
+    return raw as StudySet;
+  }
+  return null;
+}
+
+/**
+ * Resolve the currently authenticated user's ID from verified client identity providers
+ * (`PwaProvider.activeUserId` seeded from server layout, or cached `["current-profile"]`).
+ * NEVER falls back to `studySet.owner_id` (fixes `FUNC-17` cross-account checkpoint leak).
+ */
+export function useAuthenticatedUserId(): string | null {
+  const pwa = useOptionalPwa();
+  const queryClient = useQueryClient();
+
+  if (pwa?.activeUserId && pwa.activeUserId.trim().length > 0) {
+    return pwa.activeUserId.trim();
+  }
+
+  const cachedProfile = queryClient.getQueryData<{
+    profile?: { id?: string } | null;
+    id?: string;
+  } | null>(["current-profile"]);
+
+  const profileId = cachedProfile?.profile?.id ?? cachedProfile?.id ?? null;
+  return profileId && profileId.trim().length > 0 ? profileId.trim() : null;
 }
 
 export function useStudySetBundle(
@@ -33,66 +191,156 @@ export function useStudySetBundle(
   const queryClient = useQueryClient();
   const enabled = options?.enabled ?? true;
   const maxQuestions = options?.maxQuestions ?? 10_000;
+  const streamingRunIdRef = React.useRef(0);
 
   const query = useQuery<StudySetBundle>({
     queryKey: ["study-set-bundle", setId, maxQuestions],
     enabled: Boolean(setId) && enabled,
-    queryFn: async () => {
-      // Seed studySet from React Query cache (`["study-set", setId]`) when recently fetched on `/sets/[id]` (`P1-3`)
+    queryFn: async ({ signal }) => {
+      // Seed studySet from React Query cache (`["study-set", setId]`) when recently fetched on `/sets/[id]`
       const cachedSetState = queryClient.getQueryState<unknown>([
         "study-set",
         setId,
       ]);
-      const cachedRaw = cachedSetState?.data;
       const isFreshCached =
         Boolean(cachedSetState?.dataUpdatedAt) &&
         Date.now() - (cachedSetState?.dataUpdatedAt ?? 0) < 60_000;
-      const cachedStudySet: StudySet | null =
-        isFreshCached &&
-        cachedRaw &&
-        typeof cachedRaw === "object" &&
-        "id" in cachedRaw &&
-        "title" in cachedRaw
-          ? (cachedRaw as StudySet)
-          : null;
+      const cachedStudySet = isFreshCached
+        ? extractCachedStudySet(cachedSetState?.data)
+        : null;
 
-      const [studySet, questions, progressList, starredList] = await Promise.all([
+      // V32-015: Eliminate redundant `/api/progress` and `/api/starred` calls!
+      // Request Page 1 (`pageSize=50`) immediately alongside studySet metadata so Q1 renders ASAP.
+      const firstPageSize = Math.min(STREAM_PAGE_SIZE, Math.max(1, maxQuestions));
+      const [studySet, page1] = await Promise.all([
         cachedStudySet ? Promise.resolve(cachedStudySet) : fetchStudySet(setId),
-        fetchStudySetQuestions(setId, maxQuestions),
-        fetchSetProgress(setId, maxQuestions).catch(
-          () => [] as UserQuestionProgress[],
-        ),
-        fetchStarredQuestions(setId).catch(() => []),
+        fetchStudySetQuestionsPage(setId, 1, firstPageSize, signal),
       ]);
 
-      // Populate `["study-set", setId]` cache for sibling views
       if (!cachedStudySet && studySet) {
         queryClient.setQueryData(["study-set", setId], studySet);
       }
 
-      const progressMap = new Map<string, UserQuestionProgress>();
-      for (const p of progressList) {
-        progressMap.set(p.question_id, p);
-      }
+      const reportedTotal =
+        typeof page1.total === "number"
+          ? Math.min(page1.total, maxQuestions)
+          : Math.min(
+              Math.max(page1.items.length, studySet.question_count ?? page1.items.length),
+              maxQuestions,
+            );
+      const hasMore =
+        page1.hasMore &&
+        page1.items.length >= firstPageSize &&
+        page1.items.length < reportedTotal;
 
-      const starredIds = new Set<string>(starredList.map((s) => s.question_id));
-      const chapterSet = new Set<string>();
-      for (const q of questions) {
-        if (q.chapter && q.chapter.trim()) {
-          chapterSet.add(q.chapter.trim());
-        }
-      }
-
-      return {
+      return buildBundleFromQuestions(
         studySet,
-        questions,
-        progressMap,
-        starredIds,
-        chapters: Array.from(chapterSet),
-      };
+        page1.items.slice(0, maxQuestions),
+        reportedTotal,
+        hasMore,
+        nextBundleFetchId++,
+      );
     },
     staleTime: 30_000,
   });
+
+  // Progressive rolling loader: fetch pages 2..N in bounded batches (`concurrency = 2`)
+  // and append cleanly into React Query cache without resetting Q1 or duplicating items.
+  const bundleFetchId = query.data?.fetchId ?? 0;
+
+  React.useEffect(() => {
+    const queryKey = ["study-set-bundle", setId, maxQuestions] as const;
+    const snapshot = queryClient.getQueryData<StudySetBundle>(queryKey);
+    if (!enabled || !setId || !bundleFetchId || !snapshot?.isLoadingMore) return;
+
+    const targetTotal = Math.min(snapshot.totalQuestions, maxQuestions);
+    if (snapshot.questions.length >= targetTotal) return;
+
+    const runId = ++streamingRunIdRef.current;
+    const controller = new AbortController();
+
+    const run = async () => {
+      const firstPageSize = Math.min(STREAM_PAGE_SIZE, Math.max(1, maxQuestions));
+      const totalPages = Math.ceil(targetTotal / firstPageSize);
+      const startPage = Math.max(
+        2,
+        Math.floor(snapshot.questions.length / firstPageSize) + 1,
+      );
+
+      try {
+        for (let page = startPage; page <= totalPages; page += STREAM_CONCURRENCY) {
+          if (controller.signal.aborted || runId !== streamingRunIdRef.current) {
+            return;
+          }
+          const batchPages: number[] = [];
+          for (
+            let p = page;
+            p < page + STREAM_CONCURRENCY && p <= totalPages;
+            p += 1
+          ) {
+            batchPages.push(p);
+          }
+
+          const batchResults = await Promise.all(
+            batchPages.map((p) =>
+              fetchStudySetQuestionsPage(setId, p, firstPageSize, controller.signal),
+            ),
+          );
+
+          if (controller.signal.aborted || runId !== streamingRunIdRef.current) {
+            return;
+          }
+
+          const combinedItems: HydratedStudyQuestion[] = [];
+          let latestTotal = targetTotal;
+          let batchEndedEarly = false;
+          for (const res of batchResults) {
+            combinedItems.push(...res.items);
+            if (typeof res.total === "number") {
+              latestTotal = Math.min(res.total, maxQuestions);
+            }
+            if (res.items.length < firstPageSize || !res.hasMore) {
+              batchEndedEarly = true;
+            }
+          }
+
+          const nextBatchStart = page + STREAM_CONCURRENCY;
+          const stillMore = !batchEndedEarly && nextBatchStart <= totalPages;
+
+          queryClient.setQueryData<StudySetBundle>(queryKey, (prev) => {
+            if (!prev || prev.fetchId !== bundleFetchId) return prev;
+            const remainingBudget = Math.max(0, maxQuestions - prev.questions.length);
+            const sliceToAppend = combinedItems.slice(0, remainingBudget);
+            return mergeStreamedPageIntoBundle(
+              prev,
+              sliceToAppend,
+              latestTotal,
+              stillMore && prev.questions.length + sliceToAppend.length < latestTotal,
+            );
+          });
+
+          if (!stillMore) {
+            break;
+          }
+        }
+      } catch {
+        // On abort or transient error, mark background loading stopped without clobbering Page 1
+        if (!controller.signal.aborted && runId === streamingRunIdRef.current) {
+          queryClient.setQueryData<StudySetBundle>(queryKey, (prev) =>
+            prev && prev.fetchId === bundleFetchId
+              ? { ...prev, isLoadingMore: false }
+              : prev,
+          );
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      controller.abort();
+    };
+  }, [enabled, setId, maxQuestions, bundleFetchId, queryClient]);
 
   const toggleStar = React.useCallback(
     async (questionId: string) => {

@@ -166,6 +166,53 @@ export function chunkArray<T>(items: readonly T[], chunkSize = 500): T[][] {
 }
 
 /**
+ * Deterministic bounded-concurrency async mapper preserving input index order.
+ * Prevents serial N-RTT waterfalls while capping in-flight Storage/DB connections.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(Math.floor(concurrency) || 1, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      const current = nextIndex;
+      nextIndex += 1;
+      if (current >= items.length) return;
+      results[current] = await worker(items[current], current);
+    }
+  };
+
+  await Promise.all(Array.from({ length: limit }, () => runWorker()));
+  return results;
+}
+
+const LEADING_OPTION_PREFIX_RE =
+  /^\s*(?:\([A-Ha-h]\)|\[[A-Ha-h]\]|[A-Ha-h][.):])\s+/;
+
+/**
+ * Strips duplicated leading option markers (`A. `, `(A) `, `B) `, `[C] `) from
+ * option content before displaying next to an option badge (`RU-14`), without
+ * stripping ordinary words like `"A plane flies"`.
+ */
+export function stripLeadingOptionPrefix(content: string): string {
+  if (!content) return "";
+  let cleaned = content;
+  // Strip up to 2 stacked markers (e.g. `(A) A. Text` -> `Text`)
+  for (let i = 0; i < 2; i += 1) {
+    const next = cleaned.replace(LEADING_OPTION_PREFIX_RE, "");
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+  return cleaned;
+}
+
+/**
  * Extract lowercase file extension including the leading dot (e.g. ".docx"), or "".
  */
 export function getFileExtension(fileName: string): string {

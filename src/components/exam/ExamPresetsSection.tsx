@@ -59,54 +59,13 @@ import {
   updateExamPreset,
 } from "@/lib/learning/api-client";
 import type {
-  AllocationStrategy,
   ExamPreset,
   ExamSourceInput,
-  SelectionPolicy,
 } from "@/types/domain";
 import { cn } from "@/lib/utils";
+import { getAllocationLabel, getPolicyLabel } from "./exam-labels";
 
-export function getAllocationLabel(
-  locale: "vi" | "en",
-  strategy: AllocationStrategy,
-): string {
-  switch (strategy) {
-    case "global_random":
-      return lText(locale, "Ngẫu nhiên toàn bộ", "Global Random");
-    case "equal":
-      return lText(locale, "Chia đều môn", "Equal Split");
-    case "proportional":
-      return lText(locale, "Theo tỷ lệ môn", "Proportional");
-    case "custom":
-      return lText(locale, "Tự nhập từng môn", "Custom Counts");
-    case "weighted":
-      return lText(locale, "Tỷ trọng %", "Weighted %");
-  }
-}
-
-export function getPolicyLabel(
-  locale: "vi" | "en",
-  policy: SelectionPolicy,
-): string {
-  switch (policy) {
-    case "random":
-      return lText(locale, "Ngẫu nhiên", "Random");
-    case "unseen_first":
-      return lText(locale, "Ưu tiên chưa làm", "Unseen First");
-    case "mistakes_first":
-      return lText(locale, "Ưu tiên câu sai", "Mistakes First");
-    case "weak_topics_first":
-      return lText(locale, "Chủ đề yếu trước", "Weak Topics First");
-    case "due_for_review":
-      return lText(locale, "Đến hạn SM-2", "SM-2 Due First");
-    case "starred_only":
-      return lText(locale, "Chỉ câu gắn sao", "Starred Only");
-    case "incorrect_only":
-      return lText(locale, "Chỉ câu đã sai", "Incorrect Only");
-    case "anti_repeat":
-      return lText(locale, "Hạn chế lặp lại", "Anti-Repeat");
-  }
-}
+export { getAllocationLabel, getPolicyLabel };
 
 interface ExamPresetsSectionProps {
   onSelectPresetInBuilder?: (preset: ExamPreset) => void;

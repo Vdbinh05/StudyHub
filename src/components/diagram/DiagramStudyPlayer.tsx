@@ -48,6 +48,7 @@ import {
 } from "@/lib/diagram/study-engine";
 import { useOptionalI18n } from "@/lib/i18n";
 import { resolveSafeMediaUrl } from "@/lib/media/urls";
+import { useUserPreferences } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 import type { DiagramHotspot, DiagramSet, DiagramStudyMode } from "@/types/v3";
 
@@ -128,7 +129,7 @@ function renderHotspotSvgShape(
 
 export function DiagramStudyPlayer({
   diagram,
-  initialMode = "explore",
+  initialMode,
   previewOnly = false,
   backHref,
   onAttemptRecord,
@@ -136,7 +137,14 @@ export function DiagramStudyPlayer({
 }: DiagramStudyPlayerProps) {
   const i18n = useOptionalI18n();
   const vi = (i18n?.locale ?? "vi") === "vi";
-  const prefersReduced = useReducedMotion();
+  const { preferences } = useUserPreferences();
+  const diagramPrefs = preferences.mode_preferences?.diagram;
+  const showHotspotHints = diagramPrefs?.show_hotspot_hints !== false;
+  const pointToleranceScale = Math.max(
+    0.5,
+    Math.min(2.0, diagramPrefs?.point_tolerance_scale ?? 1.0),
+  );
+  const prefersReduced = useReducedMotion() || preferences.reduced_motion;
   const baseId = React.useId();
 
   const hotspots = React.useMemo(
@@ -154,7 +162,11 @@ export function DiagramStudyPlayer({
     [diagram.base_image_url, diagram.base_media],
   );
 
-  const [mode, setMode] = React.useState<DiagramStudyMode>(initialMode);
+  const [mode, setMode] = React.useState<DiagramStudyMode>(
+    () =>
+      initialMode ??
+      (previewOnly ? "explore" : diagramPrefs?.default_mode ?? "explore"),
+  );
   const [shuffleSeed, setShuffleSeed] = React.useState(1);
   const [incorrectIds, setIncorrectIds] = React.useState<string[]>([]);
   const [selectedExploreId, setSelectedExploreId] = React.useState<string | null>(
@@ -345,7 +357,32 @@ export function DiagramStudyPlayer({
   const evaluateIdentifyPoint = (clickNorm: NormalizedPoint) => {
     if (!activeHotspot || feedback) return;
     setLastClickPoint(clickNorm);
-    const result = gradeDiagramIdentifyClick(clickNorm, activeHotspot, hotspots);
+    const effectiveTarget: DiagramHotspot =
+      activeHotspot.geometry.shape === "point" && pointToleranceScale !== 1
+        ? {
+            ...activeHotspot,
+            geometry: {
+              ...activeHotspot.geometry,
+              radius: Math.max(
+                0.01,
+                Math.min(
+                  0.25,
+                  (activeHotspot.geometry.radius ?? 0.04) * pointToleranceScale,
+                ),
+              ),
+            },
+          }
+        : activeHotspot;
+    const extraTolerance =
+      activeHotspot.geometry.shape !== "point" && pointToleranceScale > 1
+        ? (pointToleranceScale - 1) * 0.04
+        : 0;
+    const result = gradeDiagramIdentifyClick(
+      clickNorm,
+      effectiveTarget,
+      hotspots,
+      extraTolerance,
+    );
     recordOutcome(activeHotspot, result.isCorrect);
 
     if (result.isCorrect) {
@@ -1375,8 +1412,8 @@ export function DiagramStudyPlayer({
                   </div>
                 )}
 
-                {/* Optional Hint Toggle */}
-                {activeHotspot.hint && !feedback && (
+                {/* Optional Hint Toggle (respects mode_preferences.diagram.show_hotspot_hints — V32-025) */}
+                {showHotspotHints && activeHotspot.hint && !feedback && (
                   <div>
                     <Button
                       type="button"

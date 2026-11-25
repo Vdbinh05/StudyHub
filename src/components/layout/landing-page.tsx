@@ -167,6 +167,7 @@ function LandingHeaderActions({ locale }: { locale: Locale }) {
     <>
       <Link
         href="/login"
+        prefetch={false}
         className={cn(
           buttonVariants({ variant: "ghost", size: "sm" }),
           "hidden min-h-11 px-2.5 sm:inline-flex sm:min-h-9 sm:px-3",
@@ -176,6 +177,7 @@ function LandingHeaderActions({ locale }: { locale: Locale }) {
       </Link>
       <Link
         href="/register"
+        prefetch={false}
         className={cn(
           buttonVariants({ size: "sm" }),
           "min-h-11 px-3 sm:min-h-9 sm:px-4",
@@ -526,6 +528,7 @@ function LandingBody({ locale }: { locale: Locale }) {
             <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
               <Link
                 href="/register"
+                prefetch={false}
                 className={cn(buttonVariants({ size: "lg" }), "min-h-11")}
               >
                 <span>{vi ? "Đăng ký" : "Sign up"}</span>
@@ -533,6 +536,7 @@ function LandingBody({ locale }: { locale: Locale }) {
               </Link>
               <Link
                 href="/login"
+                prefetch={false}
                 className={cn(
                   buttonVariants({ variant: "outline", size: "lg" }),
                   "min-h-11",
@@ -558,27 +562,29 @@ function LandingBody({ locale }: { locale: Locale }) {
           <div className="text-muted-foreground flex flex-wrap items-center gap-4">
             <Link
               href="/login"
-              className="hover:text-foreground transition-colors"
+              prefetch={false}
+              className="hover:text-foreground inline-flex min-h-11 items-center transition-colors sm:min-h-0"
             >
               {vi ? "Đăng nhập" : "Sign in"}
             </Link>
             <Link
               href="/register"
-              className="hover:text-foreground transition-colors"
+              prefetch={false}
+              className="hover:text-foreground inline-flex min-h-11 items-center transition-colors sm:min-h-0"
             >
               {vi ? "Đăng ký" : "Sign up"}
             </Link>
             <Link
               href="/exams/new"
               prefetch={false}
-              className="hover:text-foreground transition-colors"
+              className="hover:text-foreground inline-flex min-h-11 items-center transition-colors sm:min-h-0"
             >
               {vi ? "Thi thử tùy chỉnh" : "Custom Exam"}
             </Link>
             <Link
               href="/dashboard"
               prefetch={false}
-              className="hover:text-foreground transition-colors"
+              className="hover:text-foreground inline-flex min-h-11 items-center transition-colors sm:min-h-0"
             >
               {vi ? "Trang chủ" : "Home"}
             </Link>

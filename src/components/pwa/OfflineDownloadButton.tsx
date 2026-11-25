@@ -59,6 +59,21 @@ import { cn } from "@/lib/utils";
 import { formatBytes } from "./format-bytes";
 import { useOptionalPwa } from "./PwaProvider";
 
+function subscribeFallbackOnline(callback: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  window.addEventListener("online", callback);
+  window.addEventListener("offline", callback);
+  return () => {
+    window.removeEventListener("online", callback);
+    window.removeEventListener("offline", callback);
+  };
+}
+
+function getFallbackOnlineSnapshot(): boolean {
+  if (typeof navigator === "undefined") return true;
+  return navigator.onLine;
+}
+
 export interface OfflineDownloadButtonProps {
   setId: string;
   setTitle: string;
@@ -91,8 +106,13 @@ export function OfflineDownloadButton({
   const locale = i18n?.locale ?? "vi";
   const vi = locale === "vi";
 
+  const fallbackOnline = React.useSyncExternalStore(
+    subscribeFallbackOnline,
+    getFallbackOnlineSnapshot,
+    () => true,
+  );
   const effectiveUserId = explicitUserId ?? pwa?.activeUserId ?? null;
-  const isOnline = pwa?.isOnline ?? true;
+  const isOnline = pwa ? pwa.isOnline : fallbackOnline;
 
   const [open, setOpen] = React.useState(false);
   const [record, setRecord] = React.useState<OfflineDownloadedSetRecord | null>(
@@ -113,6 +133,10 @@ export function OfflineDownloadButton({
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [confirmRemoveOpen, setConfirmRemoveOpen] = React.useState(false);
 
+  // Synchronous ref locks preventing rapid double-click download/check/remove races (`FUNC-31`)
+  const downloadingRef = React.useRef(false);
+  const checkingUpdateRef = React.useRef(false);
+  const removingRef = React.useRef(false);
   const abortRef = React.useRef<AbortController | null>(null);
   const includeMediaId = React.useId();
 
@@ -197,6 +221,7 @@ export function OfflineDownloadButton({
   };
 
   const handleStartDownload = async () => {
+    if (downloadingRef.current) return;
     if (!effectiveUserId) {
       setErrorMessage(
         vi
@@ -214,6 +239,7 @@ export function OfflineDownloadButton({
       return;
     }
 
+    downloadingRef.current = true;
     setErrorMessage(null);
     setDownloading(true);
     setProgress(null);
@@ -237,6 +263,7 @@ export function OfflineDownloadButton({
       setErrorMessage(describeOfflineError(err));
     } finally {
       abortRef.current = null;
+      downloadingRef.current = false;
       setDownloading(false);
     }
   };
@@ -246,7 +273,8 @@ export function OfflineDownloadButton({
   };
 
   const handleRetryFailed = async () => {
-    if (!effectiveUserId) return;
+    if (!effectiveUserId || downloadingRef.current) return;
+    downloadingRef.current = true;
     setErrorMessage(null);
     setDownloading(true);
     const controller = new AbortController();
@@ -263,12 +291,14 @@ export function OfflineDownloadButton({
       setErrorMessage(describeOfflineError(err));
     } finally {
       abortRef.current = null;
+      downloadingRef.current = false;
       setDownloading(false);
     }
   };
 
   const handleCheckUpdate = async () => {
-    if (!effectiveUserId || !isOnline) return;
+    if (!effectiveUserId || !isOnline || checkingUpdateRef.current) return;
+    checkingUpdateRef.current = true;
     setCheckingUpdate(true);
     setErrorMessage(null);
     try {
@@ -286,22 +316,42 @@ export function OfflineDownloadButton({
     } catch (err) {
       setErrorMessage(describeOfflineError(err));
     } finally {
+      checkingUpdateRef.current = false;
       setCheckingUpdate(false);
     }
   };
 
   const handleRemoveDownload = async () => {
-    if (!effectiveUserId) return;
-    await deleteDownloadedStudySet(effectiveUserId, setId);
-    setRecord(null);
-    setUpdateStatus(null);
-    setProgress(null);
-    setConfirmRemoveOpen(false);
-    await pwa?.refreshOfflineState();
+    if (!effectiveUserId || removingRef.current) return;
+    removingRef.current = true;
+    try {
+      await deleteDownloadedStudySet(effectiveUserId, setId);
+      setRecord(null);
+      setUpdateStatus(null);
+      setProgress(null);
+      setConfirmRemoveOpen(false);
+      await pwa?.refreshOfflineState();
+    } finally {
+      removingRef.current = false;
+    }
   };
 
   const isDownloaded = record !== null && record.status !== "revoked";
   const isPartial = record?.status === "partial";
+  const canOneClickDownload =
+    !isDownloaded &&
+    !downloading &&
+    chapters.length === 0 &&
+    !hasRequiredMedia &&
+    isOnline &&
+    Boolean(effectiveUserId);
+
+  const handleTriggerClick = () => {
+    if (canOneClickDownload) {
+      setOpen(true);
+      void handleStartDownload();
+    }
+  };
   const progressPct =
     progress && progress.totalItems > 0
       ? Math.min(100, Math.round((progress.completedItems / progress.totalItems) * 100))
@@ -321,8 +371,14 @@ export function OfflineDownloadButton({
             size={size}
             className={cn("gap-1.5", className)}
             data-testid="offline-download-trigger"
+            onClick={handleTriggerClick}
           >
-            {isDownloaded ? (
+            {downloading ? (
+              <Loader2
+                className="text-primary size-4 shrink-0 animate-spin"
+                aria-hidden="true"
+              />
+            ) : isDownloaded ? (
               <CheckCircle2
                 className="text-success size-4 shrink-0"
                 aria-hidden="true"
@@ -331,21 +387,25 @@ export function OfflineDownloadButton({
               <CloudDownload className="size-4 shrink-0" aria-hidden="true" />
             )}
             <span>
-              {isPartial
+              {downloading
                 ? vi
-                  ? "Tải chưa đủ"
-                  : "Partial offline"
-                : isDownloaded
-                  ? i18n
-                    ? i18n.t("pwa.downloaded")
-                    : vi
-                      ? "Đã sẵn sàng ngoại tuyến"
-                      : "Available offline"
-                  : i18n
-                    ? i18n.t("pwa.downloadOffline")
-                    : vi
-                      ? "Tải ngoại tuyến"
-                      : "Download offline"}
+                  ? `Đang tải (${progressPct}%)`
+                  : `Downloading (${progressPct}%)`
+                : isPartial
+                  ? vi
+                    ? "Tải chưa đủ"
+                    : "Partial offline"
+                  : isDownloaded
+                    ? i18n
+                      ? i18n.t("pwa.downloaded")
+                      : vi
+                        ? "Đã sẵn sàng ngoại tuyến"
+                        : "Available offline"
+                    : i18n
+                      ? i18n.t("pwa.downloadOffline")
+                      : vi
+                        ? "Tải ngoại tuyến"
+                        : "Download offline"}
             </span>
           </Button>
         </DialogTrigger>

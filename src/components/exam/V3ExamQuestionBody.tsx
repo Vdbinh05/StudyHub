@@ -30,10 +30,12 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n";
 import { isSafeDisplayImageUrl } from "@/lib/learning/api-client";
+import { dedupeQuestionMediaImages } from "@/lib/learning/answer-display";
 import { normalizeMatchingExamPayload } from "@/lib/learning/exam-scoring";
 import { indexToOptionLabel } from "@/lib/learning/shuffle";
 import type {
   ExamSnapshotQuestion,
+  FillInBlankSpec,
   NormalizedPoint,
   StructuredAnswerResponse,
 } from "@/types/domain";
@@ -112,17 +114,56 @@ function V3ExamQuestionBodyInner({
 
   const payload = question.type_payload_snapshot ?? null;
 
-  // Prompt media images from media_snapshot
-  const promptMediaImages = React.useMemo(
-    () =>
-      (question.media_snapshot ?? []).filter(
+  // Prompt media images deduplicated against `prompt_image_url_snapshot` (fixes RU-08!)
+  const { promptImageUrl: dedupedPromptImageUrl, attachments: promptMediaImages } =
+    React.useMemo(() => {
+      const rawPromptImages = (question.media_snapshot ?? []).filter(
         (m) =>
-          (m.role === "prompt" || m.role === "passage" || m.role === "diagram_base") &&
+          (m.role === "prompt" ||
+            m.role === "passage" ||
+            m.role === "diagram_base") &&
           m.mime_type.startsWith("image/") &&
           isSafeDisplayImageUrl(m.proxy_url),
-      ),
-    [question.media_snapshot],
-  );
+      );
+      return dedupeQuestionMediaImages(
+        isSafeDisplayImageUrl(question.prompt_image_url_snapshot)
+          ? question.prompt_image_url_snapshot
+          : null,
+        rawPromptImages,
+      );
+    }, [question.media_snapshot, question.prompt_image_url_snapshot]);
+
+  // Resolve Fill-in-the-Blank specs for BOTH `fill_in_blank` AND `listening` + `fill_in_blank` (fixes FUNC-10!)
+  const fillInBlankView = React.useMemo((): {
+    templateText?: string;
+    blanks: FillInBlankSpec[];
+  } | null => {
+    if (question.question_type === "fill_in_blank" && payload?.type === "fill_in_blank") {
+      return {
+        templateText: payload.template_text,
+        blanks: Array.isArray(payload.blanks) ? payload.blanks : [],
+      };
+    }
+    if (
+      question.question_type === "listening" &&
+      payload?.type === "listening" &&
+      payload.sub_answer_kind === "fill_in_blank"
+    ) {
+      const ext = payload as typeof payload & {
+        template_text?: string;
+        blanks?: FillInBlankSpec[];
+      };
+      const blanks: FillInBlankSpec[] =
+        Array.isArray(ext.blanks) && ext.blanks.length > 0
+          ? ext.blanks
+          : [{ blank_id: "b1", accepted_answers: [] }];
+      return {
+        templateText: ext.template_text,
+        blanks,
+      };
+    }
+    return null;
+  }, [payload, question.question_type]);
 
   // Reading passage context (never detached from question!)
   const passageText =
@@ -369,21 +410,25 @@ function V3ExamQuestionBodyInner({
           />
         </div>
 
-        <div className="flex flex-wrap gap-3">
-          <ZoomableImage
-            src={question.prompt_image_url_snapshot}
-            alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
-          />
-          {promptMediaImages.map((m) => (
-            <ZoomableImage
-              key={m.media_id}
-              src={m.proxy_url}
-              alt={m.alt_text ?? ""}
-              caption={m.caption}
-              className="max-h-56"
-            />
-          ))}
-        </div>
+        {dedupedPromptImageUrl || promptMediaImages.length > 0 ? (
+          <div className="flex flex-wrap gap-3">
+            {dedupedPromptImageUrl ? (
+              <ZoomableImage
+                src={dedupedPromptImageUrl}
+                alt={lText(locale, "Hình ảnh câu hỏi", "Question illustration")}
+              />
+            ) : null}
+            {promptMediaImages.map((m) => (
+              <ZoomableImage
+                key={m.media_id}
+                src={m.proxy_url}
+                alt={m.alt_text ?? ""}
+                caption={m.caption}
+                className="max-h-56"
+              />
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {/* Type-Specific Interactive Answer Area (ALL 12 Exam Question Types) */}
@@ -443,19 +488,11 @@ function V3ExamQuestionBodyInner({
                       `${currentNumValue} ${u}`.trim(),
                     );
                   }}
-                  placeholder={
-                    payload.unit
-                      ? lText(
-                          locale,
-                          `Đơn vị (bắt buộc, vd: ${payload.unit})`,
-                          `Unit (required, e.g., ${payload.unit})`,
-                        )
-                      : lText(
-                          locale,
-                          "Nhập đơn vị đo (bắt buộc)",
-                          "Enter unit (required)",
-                        )
-                  }
+                  placeholder={lText(
+                    locale,
+                    "Nhập đơn vị đo (bắt buộc)",
+                    "Enter unit (required)",
+                  )}
                   className="w-44 text-base sm:text-sm"
                 />
               ) : (
@@ -466,19 +503,16 @@ function V3ExamQuestionBodyInner({
             ) : null}
           </div>
         </div>
-      ) : (question.question_type === "fill_in_blank" ||
-          (payload?.type === "listening" &&
-            payload.sub_answer_kind === "fill_in_blank")) &&
-        payload?.type === "fill_in_blank" ? (
+      ) : fillInBlankView ? (
         <div className="space-y-3 rounded-xl border border-border bg-secondary/20 p-4">
-          {payload.template_text ? (
+          {fillInBlankView.templateText ? (
             <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-              {payload.template_text}
+              {fillInBlankView.templateText}
             </p>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
-            {(Array.isArray(payload.blanks) ? payload.blanks : []).map((blank, idx) => (
-              <div key={blank.blank_id} className="space-y-1">
+            {fillInBlankView.blanks.map((blank, idx) => (
+              <div key={`${blank.blank_id}-${idx}`} className="space-y-1">
                 <Label
                   htmlFor={`exam-blank-${question.id}-${blank.blank_id}`}
                   className="text-xs font-medium"
@@ -508,14 +542,22 @@ function V3ExamQuestionBodyInner({
         </div>
       ) : question.question_type === "ordering" &&
         payload?.type === "ordering" ? (
-        <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">
-            {lText(
-              locale,
-              "Kéo thả hoặc dùng nút Lên / Xuống để sắp xếp đúng thứ tự từ trên xuống dưới:",
-              "Drag or use Up / Down buttons to arrange items in the correct order:",
-            )}
-          </p>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {lText(
+                locale,
+                "Kéo thả hoặc dùng nút Lên / Xuống để sắp xếp đúng thứ tự từ trên xuống dưới:",
+                "Drag or use Up / Down buttons to arrange items in the correct order:",
+              )}
+            </p>
+            {record.structuredResponse?.kind === "ordering" ? (
+              <Badge variant="success" className="gap-1 text-xs">
+                <Check className="size-3" aria-hidden="true" />
+                {lText(locale, "Đã xác nhận thứ tự", "Order confirmed")}
+              </Badge>
+            ) : null}
+          </div>
           <div className="space-y-2">
             {currentOrderedIds.map((itemId, idx) => {
               const orderingItems = Array.isArray(payload.items)
@@ -558,7 +600,7 @@ function V3ExamQuestionBodyInner({
                       type="button"
                       variant="outline"
                       size="icon"
-                      className="size-9"
+                      className="size-11 sm:size-9"
                       disabled={idx === 0}
                       aria-label={lText(
                         locale,
@@ -573,7 +615,7 @@ function V3ExamQuestionBodyInner({
                       type="button"
                       variant="outline"
                       size="icon"
-                      className="size-9"
+                      className="size-11 sm:size-9"
                       disabled={idx === currentOrderedIds.length - 1}
                       aria-label={lText(
                         locale,
@@ -588,6 +630,29 @@ function V3ExamQuestionBodyInner({
                 </div>
               );
             })}
+          </div>
+          <div className="flex items-center justify-end">
+            <Button
+              type="button"
+              size="sm"
+              variant={
+                record.structuredResponse?.kind === "ordering"
+                  ? "secondary"
+                  : "default"
+              }
+              className="min-h-11 sm:min-h-9 gap-1.5"
+              onClick={() =>
+                onChangeStructured({
+                  kind: "ordering",
+                  ordered_item_ids: [...currentOrderedIds],
+                })
+              }
+            >
+              <Check className="size-4" aria-hidden="true" />
+              {record.structuredResponse?.kind === "ordering"
+                ? lText(locale, "Đã lưu thứ tự hiện tại", "Current order saved")
+                : lText(locale, "Xác nhận thứ tự", "Confirm order")}
+            </Button>
           </div>
         </div>
       ) : question.question_type === "matching" &&
@@ -688,7 +753,7 @@ function V3ExamQuestionBodyInner({
           {isSafeDisplayImageUrl(
             payload.image_url || question.prompt_image_url_snapshot,
           ) ? (
-            <div className="relative inline-flex min-h-48 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/20">
+            <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-border bg-muted/20">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={
@@ -697,9 +762,10 @@ function V3ExamQuestionBodyInner({
                 alt={lText(locale, "Sơ đồ điểm đánh dấu", "Hotspot diagram")}
                 loading="lazy"
                 decoding="async"
-                className="max-h-[420px] w-auto cursor-crosshair object-contain select-none"
+                className="block max-h-[420px] max-w-full h-auto w-auto cursor-crosshair select-none"
                 onClick={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();
+                  if (rect.width <= 0 || rect.height <= 0) return;
                   const x = Math.max(
                     0,
                     Math.min(1, (e.clientX - rect.left) / rect.width),

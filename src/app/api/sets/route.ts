@@ -9,6 +9,10 @@ import {
 import { sanitizePostgrestSearch } from "@/lib/security/sanitize";
 import { fetchInChunks, SAFE_IN_CHUNK_SIZE } from "@/lib/supabase/query-helpers";
 import {
+  isMissingRpcError,
+  rpcListAccessibleStudySets,
+} from "@/lib/supabase/rpc";
+import {
   createStudySetSchema,
   listSetsQuerySchema,
 } from "@/lib/validation/sets";
@@ -25,6 +29,38 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     const from = (query.page - 1) * query.pageSize;
     const to = from + query.pageSize - 1;
+
+    // DB-06 & V32-037 (Migration 0019): Single-RTT RLS-aware SQL RPC eliminates waterfall,
+    // removes 100-shared-set truncation, and supports server-side favoritesOnly across all scopes
+    const { data: rpcList, error: rpcErr } = await rpcListAccessibleStudySets(
+      supabase,
+      {
+        p_scope: query.scope,
+        p_search: query.search ?? null,
+        p_folder_id: query.folderId ?? null,
+        p_set_type: query.type ?? null,
+        p_visibility: query.visibility ?? null,
+        p_include_archived: Boolean(query.includeArchived),
+        p_favorites_only: Boolean(query.favoritesOnly),
+        p_sort: query.sort,
+        p_page: query.page,
+        p_page_size: query.pageSize,
+      },
+    );
+
+    if (!rpcErr && rpcList) {
+      const items = Array.isArray(rpcList.items) ? rpcList.items : [];
+      const total = Number(rpcList.total ?? items.length);
+      return apiSuccess(items, {
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: from + items.length < total,
+      });
+    }
+    if (rpcErr && !isMissingRpcError(rpcErr)) {
+      throw rpcErr;
+    }
 
     if (query.scope === "shared") {
       const { data: memberships, error: memError } = await supabase

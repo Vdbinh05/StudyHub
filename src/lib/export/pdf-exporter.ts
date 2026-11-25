@@ -12,7 +12,11 @@ import {
 import fontkit from "@pdf-lib/fontkit";
 import { richTextToPlainText } from "@/lib/richtext";
 import type { Locale, QuestionType } from "@/types/domain";
-import type { QuestionTypePayload, RichTextDoc } from "@/types/v3";
+import type {
+  QuestionTypePayload,
+  RichTextDoc,
+  StructuredAnswerResponse,
+} from "@/types/v3";
 
 export type PdfExportMode =
   | "question_paper"
@@ -25,8 +29,10 @@ export type PdfOrientation = "portrait" | "landscape";
 
 export interface PdfEmbeddedImage {
   bytes: Uint8Array;
-  mimeType: "image/png" | "image/jpeg";
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
   alt?: string;
+  /** Signals legacy WebP/GIF media that cannot be embedded natively in PDF so an explicit caption is drawn. */
+  unsupportedFormatNote?: boolean;
 }
 
 export interface PdfExportOption {
@@ -274,6 +280,145 @@ function wrapTextLines(
   return lines.length > 0 ? lines : [""];
 }
 
+/**
+ * Formats a V3 `StructuredAnswerResponse` (fill-in-the-blank, numerical, ordering,
+ * matching, image hotspot, options, text) into a crisp human-readable summary string
+ * for exam review PDFs (`incorrect_review` & `paper_with_explanations`) (FUNC-21).
+ */
+export function formatStructuredExamResponseForPdf(
+  response: StructuredAnswerResponse | null | undefined,
+  typePayload: QuestionTypePayload | null | undefined,
+  options: readonly Pick<PdfExportOption, "id" | "label">[],
+  isVi: boolean,
+): string | null {
+  if (!response || typeof response !== "object" || !("kind" in response)) {
+    return null;
+  }
+
+  switch (response.kind) {
+    case "options": {
+      if (!Array.isArray(response.selected_option_ids) || response.selected_option_ids.length === 0) {
+        return null;
+      }
+      const selectedSet = new Set(response.selected_option_ids);
+      const labels = options
+        .filter((opt) => selectedSet.has(opt.id))
+        .map((opt) => opt.label);
+      return labels.length > 0 ? labels.join(", ") : null;
+    }
+
+    case "text": {
+      const trimmed = (response.value ?? "").trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+
+    case "blanks": {
+      const answersMap = response.answers ?? {};
+      if (typePayload?.type === "fill_in_blank" && typePayload.blanks.length > 0) {
+        const values = typePayload.blanks.map((blank, idx) => {
+          const val = (answersMap[blank.blank_id] ?? "").trim();
+          return { idx, val };
+        });
+        if (!values.some((item) => item.val.length > 0)) return null;
+        return values
+          .map((item) => `(${item.idx + 1}) ${item.val || "—"}`)
+          .join("; ");
+      }
+      const entries = Object.entries(answersMap)
+        .map(([k, v]) => [k, (v ?? "").trim()] as const)
+        .filter(([, v]) => v.length > 0);
+      if (entries.length === 0) return null;
+      return entries.map(([k, v]) => `${k}: ${v}`).join("; ");
+    }
+
+    case "numerical": {
+      const rawVal = (response.value ?? "").trim();
+      const numStr =
+        rawVal ||
+        (typeof response.numeric_value === "number" &&
+        Number.isFinite(response.numeric_value)
+          ? String(response.numeric_value)
+          : "");
+      if (!numStr) return null;
+      const unit = (response.unit ?? "").trim();
+      return unit ? `${numStr} ${unit}` : numStr;
+    }
+
+    case "ordering": {
+      if (!Array.isArray(response.ordered_item_ids) || response.ordered_item_ids.length === 0) {
+        return null;
+      }
+      const itemMap = new Map<string, string>();
+      if (typePayload?.type === "ordering") {
+        for (const item of typePayload.items) {
+          itemMap.set(item.id, item.text);
+        }
+      }
+      return response.ordered_item_ids
+        .map((id, idx) => `${idx + 1}. ${itemMap.get(id) ?? id}`)
+        .join(" → ");
+    }
+
+    case "matching": {
+      const pairMap = response.pairs ?? {};
+      const entries = Object.entries(pairMap).filter(([, rightId]) => Boolean(rightId));
+      if (entries.length === 0) return null;
+
+      if (typePayload?.type === "matching") {
+        const rightTextById = new Map<string, string>();
+        for (const pair of typePayload.pairs) {
+          rightTextById.set(pair.right_id, pair.right_text);
+        }
+        for (const distractor of typePayload.distractors ?? []) {
+          rightTextById.set(distractor.right_id, distractor.right_text);
+        }
+
+        const formatted: string[] = [];
+        typePayload.pairs.forEach((pair, idx) => {
+          const chosenRightId = pairMap[pair.id];
+          if (chosenRightId) {
+            formatted.push(
+              `${idx + 1}-${rightTextById.get(chosenRightId) ?? chosenRightId}`,
+            );
+          }
+        });
+        if (formatted.length > 0) return formatted.join("; ");
+      }
+
+      return entries.map(([left, right]) => `${left}-${right}`).join("; ");
+    }
+
+    case "hotspot": {
+      const selectedIds = response.selected_hotspot_ids ?? [];
+      if (
+        selectedIds.length > 0 &&
+        typePayload?.type === "image_hotspot" &&
+        typePayload.target_hotspots.length > 0
+      ) {
+        const labelById = new Map(
+          typePayload.target_hotspots.map((target) => [target.id, target.label]),
+        );
+        const labels = selectedIds
+          .map((id) => labelById.get(id))
+          .filter((label): label is string => Boolean(label));
+        if (labels.length > 0) return labels.join(", ");
+      }
+      const clicks = response.clicks ?? [];
+      if (clicks.length === 0) return null;
+      const coords = clicks
+        .map(
+          (pt) =>
+            `(${Math.round(Math.max(0, Math.min(1, pt.x)) * 100)}%, ${Math.round(Math.max(0, Math.min(1, pt.y)) * 100)}%)`,
+        )
+        .join(", ");
+      return isVi ? `Điểm chọn: ${coords}` : `Selected points: ${coords}`;
+    }
+
+    default:
+      return null;
+  }
+}
+
 function computeAnswerSummary(
   q: PdfExportQuestion,
   isVi: boolean,
@@ -510,6 +655,14 @@ export async function exportStudySetToPdf(
   const embedImageSafe = async (
     img: PdfEmbeddedImage,
   ): Promise<PDFImage | null> => {
+    if (
+      img.unsupportedFormatNote ||
+      img.mimeType === "image/webp" ||
+      img.mimeType === "image/gif" ||
+      img.bytes.byteLength === 0
+    ) {
+      return null;
+    }
     try {
       const safeBytes = new Uint8Array(
         img.bytes.buffer,
@@ -532,7 +685,26 @@ export async function exportStudySetToPdf(
     maxH: number,
   ): Promise<void> => {
     const embedded = await embedImageSafe(img);
-    if (!embedded) return;
+    if (!embedded) {
+      const isLegacyWebpOrGif =
+        img.unsupportedFormatNote ||
+        img.mimeType === "image/webp" ||
+        img.mimeType === "image/gif";
+      const note = isLegacyWebpOrGif
+        ? isVi
+          ? "[Hình ảnh định dạng WebP/GIF — xem trên StudyHub]"
+          : "[WebP/GIF image — view on StudyHub]"
+        : isVi
+          ? "[Hình ảnh không thể nhúng vào PDF — xem trên StudyHub]"
+          : "[Image could not be embedded in PDF — view on StudyHub]";
+      drawWrapped(note, {
+        font: fontRegular,
+        size: Math.max(8.5, fontSize - 1),
+        indent,
+        color: palette.muted,
+      });
+      return;
+    }
     const dims = embedded.scale(1);
     const scale = Math.min(maxW / dims.width, maxH / dims.height, 1);
     const drawW = dims.width * scale;
@@ -914,14 +1086,23 @@ export async function exportStudySetToPdf(
 
       // Inline review / answer + explanation lines
       if (showInlineAnswers) {
-        if (options.mode === "incorrect_review" && q.userResponseText) {
+        if (
+          (options.mode === "incorrect_review" ||
+            options.mode === "paper_with_explanations") &&
+          q.userResponseText
+        ) {
           drawWrapped(
             `${isVi ? "Câu trả lời của bạn" : "Your answer"}: ${q.userResponseText}`,
             {
               font: fontRegular,
               size: fontSize - 0.5,
               indent: 12,
-              color: palette.danger,
+              color:
+                q.wasCorrect === true
+                  ? palette.success
+                  : q.wasCorrect === false
+                    ? palette.danger
+                    : palette.muted,
             },
           );
         }

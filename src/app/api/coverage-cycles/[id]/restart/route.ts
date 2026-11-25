@@ -6,6 +6,10 @@ import {
   handleApiError,
   parseOptionalJsonBody,
 } from "@/lib/security/errors";
+import {
+  enforceDistributedRateLimit,
+  RATE_LIMITS,
+} from "@/lib/security/rate-limit";
 import { fetchCycleSubjectProgress } from "@/lib/supabase/coverage-helper";
 import {
   cryptoShuffle,
@@ -27,6 +31,13 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { supabase, user } = await requireAuth();
+    const limited = await enforceDistributedRateLimit(
+      request,
+      RATE_LIMITS.CYCLE_RESTART,
+      user.id,
+    );
+    if (limited) return limited;
+
     const { id: rawId } = await context.params;
     const id = uuidSchema.parse(rawId);
 

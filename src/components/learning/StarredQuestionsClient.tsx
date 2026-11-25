@@ -34,7 +34,8 @@ import {
   fetchStarredQuestions,
   unstarQuestion,
 } from "@/lib/learning/api-client";
-import { getExpectedWriteAnswers } from "@/lib/learning/write-grader";
+import { formatCorrectAnswerDisplay } from "@/lib/learning/answer-display";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import { lText } from "./learning-copy";
 import { SafeRichText, ZoomableImage } from "./SafeRichText";
 
@@ -105,6 +106,7 @@ export function StarredQuestionsClient() {
           lText(locale, "Đã bỏ đánh dấu sao.", "Removed from starred questions."),
         );
         await queryClient.invalidateQueries({ queryKey: ["starred-questions"] });
+        invalidateLearningCaches(queryClient);
       } catch {
         toast.error(t("common.errorGeneric"));
       }
@@ -339,13 +341,7 @@ export function StarredQuestionsClient() {
               setTitleMap.get(item.study_set_id) ??
               lText(locale, "Học phần", "Study Set");
             const correctDisplay = q
-              ? (q.options ?? [])
-                  .filter((o) => o.is_correct)
-                  .map((o) => o.content)
-                  .join(", ") ||
-                getExpectedWriteAnswers(q)
-                  .map((a) => a.answer_text)
-                  .join(" / ")
+              ? formatCorrectAnswerDisplay(q, locale)
               : "";
 
             return (
@@ -376,7 +372,7 @@ export function StarredQuestionsClient() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="min-h-9 text-warning-subtle-foreground"
+                      className="min-h-11 text-warning-subtle-foreground sm:min-h-9"
                       onClick={() => void handleUnstar(item.question_id)}
                     >
                       <Star className="size-4 fill-warning text-warning" aria-hidden="true" />

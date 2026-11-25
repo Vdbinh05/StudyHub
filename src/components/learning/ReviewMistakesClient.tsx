@@ -50,8 +50,9 @@ import {
   type DueQuestionItem,
   type MistakeItem,
 } from "@/lib/learning/api-client";
+import { formatCorrectAnswerDisplay } from "@/lib/learning/answer-display";
 import { calculateNextReview, isQuestionDue } from "@/lib/learning/sm2";
-import { getExpectedWriteAnswers } from "@/lib/learning/write-grader";
+import { invalidateLearningCaches } from "@/lib/query-keys";
 import {
   V3_QUESTION_TYPES,
   type MasteryLevel,
@@ -133,9 +134,12 @@ export function ReviewMistakesClient() {
   const mistakesQuery = useQuery({
     queryKey: [
       "review-mistakes-v3",
+      selectedSubject,
       selectedSetId,
       selectedChapter,
+      selectedTagId,
       minWrongCount,
+      minConsecutiveWrong,
       daysFilter,
       selectedQuestionType,
       selectedMastery,
@@ -268,7 +272,6 @@ export function ReviewMistakesClient() {
       if ((item.consecutive_wrong ?? 0) < minConsecutiveWrong) return false;
       if (
         selectedExamAttemptId !== "all" &&
-        item.recent_exam_attempt_id &&
         item.recent_exam_attempt_id !== selectedExamAttemptId
       ) {
         return false;
@@ -387,6 +390,7 @@ export function ReviewMistakesClient() {
           ),
         );
         await queryClient.invalidateQueries({ queryKey: ["review-mistakes-v3"] });
+        invalidateLearningCaches(queryClient);
       } catch {
         toast.error(t("common.errorGeneric"));
       }
@@ -437,6 +441,7 @@ export function ReviewMistakesClient() {
         setDueRevealed(false);
         toast.success(t("study.sessionComplete"));
         await queryClient.invalidateQueries({ queryKey: ["review-due"] });
+        invalidateLearningCaches(queryClient);
       } else {
         setDueIndex((i) => i + 1);
         setDueRevealed(false);
@@ -485,11 +490,10 @@ export function ReviewMistakesClient() {
       item.study_set_title ??
       setMetaMap.get(item.study_set_id)?.title ??
       lText(locale, "Học phần", "Study Set");
-    const correctOptions = (q.options ?? []).filter((o) => o.is_correct);
     const wrongOptions = (q.options ?? []).filter((o) =>
       (item.last_selected_option_ids ?? []).includes(o.id),
     );
-    const expectedWrite = getExpectedWriteAnswers(q);
+    const formattedCorrectAnswer = formatCorrectAnswerDisplay(q, locale) || "—";
     const audioSrc =
       q.audio_url ??
       (q.type_payload?.type === "listening" ? q.type_payload.audio_url : null);
@@ -643,11 +647,7 @@ export function ReviewMistakesClient() {
                 {lText(locale, "Đáp án đúng:", "Correct answer:")}
               </p>
               <p className="mt-1 whitespace-pre-wrap text-foreground">
-                {correctOptions.length > 0
-                  ? correctOptions.map((o) => o.content || o.label).join(" / ")
-                  : expectedWrite.length > 0
-                    ? expectedWrite.join(" / ")
-                    : q.back_text || "—"}
+                {formattedCorrectAnswer}
               </p>
             </div>
           </div>
@@ -1181,28 +1181,28 @@ export function ReviewMistakesClient() {
         <TabsList className="grid h-auto w-full grid-cols-2 gap-1 p-1 sm:inline-flex sm:w-auto">
           <TabsTrigger
             value="unresolved"
-            className="min-h-9 px-2.5 text-xs sm:text-sm"
+            className="min-h-11 px-2.5 text-xs sm:min-h-9 sm:text-sm"
           >
             {lText(locale, "Chưa khắc phục", "Unresolved")} (
             {unresolvedItems.length})
           </TabsTrigger>
           <TabsTrigger
             value="corrected"
-            className="min-h-9 px-2.5 text-xs sm:text-sm"
+            className="min-h-11 px-2.5 text-xs sm:min-h-9 sm:text-sm"
           >
             {lText(locale, "Đã khắc phục", "Corrected")} (
             {correctedItems.length})
           </TabsTrigger>
           <TabsTrigger
             value="historical"
-            className="min-h-9 px-2.5 text-xs sm:text-sm"
+            className="min-h-11 px-2.5 text-xs sm:min-h-9 sm:text-sm"
           >
             {lText(locale, "Toàn bộ lịch sử", "All Historical")} (
             {filteredMistakes.length})
           </TabsTrigger>
           <TabsTrigger
             value="due"
-            className="min-h-9 px-2.5 text-xs sm:text-sm"
+            className="min-h-11 px-2.5 text-xs sm:min-h-9 sm:text-sm"
           >
             {lText(locale, "Đến hạn SM-2", "SM-2 Due")} ({dueItems.length})
           </TabsTrigger>
@@ -1325,14 +1325,10 @@ export function ReviewMistakesClient() {
                       <SafeRichText
                         rich={dueItems[dueIndex].question.back_rich}
                         fallbackText={
-                          dueItems[dueIndex].question.back_text ||
-                          (dueItems[dueIndex].question.options ?? [])
-                            .filter((o) => o.is_correct)
-                            .map((o) => o.content)
-                            .join(" / ") ||
-                          getExpectedWriteAnswers(
+                          formatCorrectAnswerDisplay(
                             dueItems[dueIndex].question,
-                          ).join(" / ")
+                            locale,
+                          ) || "—"
                         }
                       />
                     </div>
