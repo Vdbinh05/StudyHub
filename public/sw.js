@@ -15,12 +15,15 @@
  *   forced reloads during active timed exams).
  */
 
-const STATIC_CACHE = "studyhub-v3-shell-v1";
+const STATIC_CACHE = "studyhub-v3-shell-v2";
 const OFFLINE_FALLBACK_URL = "/offline";
 
 const PRECACHE_URLS = [
   OFFLINE_FALLBACK_URL,
   "/manifest.webmanifest",
+  "/favicon.ico",
+  "/favicon.png",
+  "/brand/logo-icon.png",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/icon-maskable-512.png",
@@ -42,6 +45,10 @@ function isStaticShellAsset(pathname) {
   return (
     pathname.startsWith("/_next/static/") ||
     pathname.startsWith("/icons/") ||
+    pathname.startsWith("/brand/") ||
+    pathname === "/favicon.ico" ||
+    pathname === "/favicon.png" ||
+    pathname === "/apple-touch-icon.png" ||
     pathname === "/manifest.webmanifest"
   );
 }
@@ -72,11 +79,11 @@ function buildMinimalOfflineHtmlResponse() {
     '<meta name="viewport" content="width=device-width,initial-scale=1" />',
     "<title>Ngoại tuyến | StudyHub</title>",
     "<style>",
-    "body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#0f172a;}",
-    ".card{max-width:440px;width:100%;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:24px;}",
-    "h1{margin:0 0 8px;font-size:1.25rem;}",
-    "p{margin:0 0 16px;color:#475569;line-height:1.5;}",
-    "button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600;cursor:pointer;}",
+    "body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;font-family:system-ui,-apple-system,sans-serif;background:#f7faff;color:#14214f;}",
+    ".card{max-width:440px;width:100%;background:#fff;border:1px solid #d9e7ff;border-radius:12px;padding:24px;}",
+    "h1{margin:0 0 8px;font-size:1.25rem;color:#14214f;}",
+    "p{margin:0 0 16px;color:#4a5b82;line-height:1.5;}",
+    "button{background:#3458db;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600;cursor:pointer;}",
     "</style>",
     "</head>",
     "<body>",

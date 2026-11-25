@@ -57,8 +57,8 @@ describe("PWA Manifest & Icons", () => {
     expect(manifest.short_name).toBe("StudyHub");
     expect(manifest.display).toBe("standalone");
     expect(manifest.start_url).toBe("/dashboard");
-    expect(manifest.theme_color).toBe("#4f46e5");
-    expect(manifest.background_color).toBe("#f8fafc");
+    expect(manifest.theme_color).toBe("#3458db");
+    expect(manifest.background_color).toBe("#f7faff");
 
     expect(Array.isArray(manifest.icons)).toBe(true);
     expect(manifest.icons).toEqual(
@@ -107,6 +107,38 @@ describe("PWA Manifest & Icons", () => {
       expect(meta.width).toBe(expectedW);
       expect(meta.height).toBe(expectedH);
       expect(meta.byteLength).toBeGreaterThan(500);
+    }
+
+    // Verify StudyHub transparent brand assets, favicons & Open Graph card
+    expect(fs.existsSync(path.join(PUBLIC_DIR, "favicon.ico"))).toBe(true);
+    expect(fs.existsSync(path.join(PUBLIC_DIR, "apple-touch-icon.png"))).toBe(true);
+    const brandPngs: Array<[string, number, number]> = [
+      ["favicon.png", 64, 64],
+      ["brand/logo-icon.png", 256, 256],
+      ["brand/og-image.png", 1200, 630],
+    ];
+    for (const [relPath, expectedW, expectedH] of brandPngs) {
+      const fullPath = path.join(PUBLIC_DIR, relPath);
+      expect(fs.existsSync(fullPath)).toBe(true);
+      const meta = readPngMetadata(fullPath);
+      expect(meta.hasValidSignature).toBe(true);
+      expect(meta.hasIend).toBe(true);
+      expect(meta.width).toBe(expectedW);
+      expect(meta.height).toBe(expectedH);
+    }
+    for (const relPath of [
+      "brand/logo-full.png",
+      "brand/logo-full-dark.png",
+      "brand/logo-main.png",
+      "brand/logo-main-dark.png",
+    ]) {
+      const fullPath = path.join(PUBLIC_DIR, relPath);
+      expect(fs.existsSync(fullPath)).toBe(true);
+      const meta = readPngMetadata(fullPath);
+      expect(meta.hasValidSignature).toBe(true);
+      expect(meta.hasIend).toBe(true);
+      expect(meta.width).toBeGreaterThan(300);
+      expect(meta.height).toBeGreaterThan(200);
     }
   });
 });
@@ -329,7 +361,7 @@ describe("Service Worker (`public/sw.js`) Security & Offline Contract", () => {
       });
     }
     await thirdPromise!;
-    const cacheMap = sw.cacheStorage.get("studyhub-v3-shell-v1");
+    const cacheMap = sw.cacheStorage.get("studyhub-v3-shell-v2");
     expect(cacheMap?.has("https://studyhub.app/icons/temp.png")).toBe(false);
   });
 
@@ -369,7 +401,7 @@ describe("Service Worker (`public/sw.js`) Security & Offline Contract", () => {
     expect(await onlineRes.text()).toContain("Private Dashboard HTML");
 
     // Verify /dashboard HTML was NOT stored in static cache
-    const cacheMap = sw.cacheStorage.get("studyhub-v3-shell-v1");
+    const cacheMap = sw.cacheStorage.get("studyhub-v3-shell-v2");
     expect(cacheMap?.has("https://studyhub.app/dashboard")).toBe(false);
 
     // Offline navigation falls back cleanly to /offline
@@ -390,7 +422,7 @@ describe("Service Worker (`public/sw.js`) Security & Offline Contract", () => {
   it("purges legacy cache versions on activate", async () => {
     const sw = createServiceWorkerHarness();
     sw.cacheStorage.set("studyhub-v1-legacy", new Map());
-    sw.cacheStorage.set("studyhub-v3-shell-v1", new Map());
+    sw.cacheStorage.set("studyhub-v3-shell-v2", new Map());
 
     const waitPromises: Promise<unknown>[] = [];
     for (const cb of sw.listeners.get("activate") ?? []) {
@@ -399,7 +431,7 @@ describe("Service Worker (`public/sw.js`) Security & Offline Contract", () => {
     await Promise.all(waitPromises);
 
     expect(sw.cacheStorage.has("studyhub-v1-legacy")).toBe(false);
-    expect(sw.cacheStorage.has("studyhub-v3-shell-v1")).toBe(true);
+    expect(sw.cacheStorage.has("studyhub-v3-shell-v2")).toBe(true);
     expect(sw.clientsClaim).toHaveBeenCalledTimes(1);
   });
 });
